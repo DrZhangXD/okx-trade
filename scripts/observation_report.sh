@@ -58,10 +58,10 @@ run() { eval "$@" 2>&1 || true; }
   echo '```'
   run "sqlite3 -header -column $PNL_DB \"
     WITH ranked AS (
-      SELECT strategy_id, datetime(ts,'unixepoch','localtime') AS t, ROUND(equity_usdt,2) AS equity,
-             ROW_NUMBER() OVER (PARTITION BY strategy_id ORDER BY ts DESC) AS rn
+      SELECT strategy_id, datetime(ts_ms/1000,'unixepoch','localtime') AS t, ROUND(equity_usdt,2) AS equity,
+             ROW_NUMBER() OVER (PARTITION BY strategy_id ORDER BY ts_ms DESC) AS rn
       FROM equities
-      WHERE ts > strftime('%s','now')-86400
+      WHERE ts_ms > (strftime('%s','now')-86400)*1000
     )
     SELECT strategy_id, t, equity FROM ranked WHERE rn <= 5 ORDER BY strategy_id, t DESC;\""
   echo '```'
