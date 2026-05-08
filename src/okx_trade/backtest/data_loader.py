@@ -40,6 +40,23 @@ async def download_historical_bars(
     return await client.market.get_candles_extended(inst_id, bar=bar, total=total)
 
 
+_PERIOD_MS: dict[str, int] = {
+    "1m": 60_000, "3m": 180_000, "5m": 300_000, "15m": 900_000, "30m": 1_800_000,
+    "1H": 3_600_000, "2H": 7_200_000, "4H": 14_400_000, "6H": 21_600_000, "12H": 43_200_000,
+    "1D": 86_400_000, "1W": 604_800_000,
+}
+
+
+def _period_to_ms(bar_period: str) -> int:
+    """``"1H"`` → 3_600_000；用于把 bar 开盘时间换算成收盘时间。"""
+    if bar_period in _PERIOD_MS:
+        return _PERIOD_MS[bar_period]
+    p = bar_period.upper().replace("MO", "M")  # 不支持 month；保护一下
+    if p in _PERIOD_MS:
+        return _PERIOD_MS[p]
+    raise ValueError(f"unsupported bar_period for backtest: {bar_period}")
+
+
 def bars_to_nt_bars(
     candles: list[Candle],
     instrument: NTInstrument,
@@ -51,17 +68,22 @@ def bars_to_nt_bars(
         candles: 已正序排列的 ``Candle``。
         instrument: 已构造好的 NT instrument（提供 price/size precision）。
         bar_period: OKX 频率字符串，``"1m"`` / ``"1H"`` 等。
+
+    Note:
+        OKX candle ``ts`` 是 bar 开盘时间。NT 回测引擎按 ``ts_event`` 顺序 dispatch，
+        若用开盘时间会让策略在 bar 开盘瞬间就拿到整根 bar 的 OHLC（lookahead）。
+        因此这里把 ``ts_event = candle.ts + bar_period``，即收盘时间。
     """
     bar_type = make_bar_type(instrument.id.symbol.value, bar_period)
+    period_ns = _period_to_ms(bar_period) * 1_000_000
     out: list[Bar] = []
     for c in candles:
-        # ts_init 与 ts_event 同步（历史数据回放时无意义）
-        ts_init_ns = int(c.ts) * 1_000_000
+        ts_close_ns = int(c.ts) * 1_000_000 + period_ns
         bar = parse_okx_candle_to_bar(
             c, bar_type=bar_type,
             price_precision=instrument.price_precision,
             size_precision=instrument.size_precision,
-            ts_init=ts_init_ns,
+            ts_init=ts_close_ns,
         )
         out.append(bar)
     return out

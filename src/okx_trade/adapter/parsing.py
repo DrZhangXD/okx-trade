@@ -107,6 +107,15 @@ def parse_okx_instrument(okx_inst: OKXInstrument, ts_init: int) -> CryptoPerpetu
         if not okx_inst.settle_ccy:
             raise ValueError(f"SWAP instrument {okx_inst.inst_id} missing settleCcy")
         settle_ccy = Currency.from_str(okx_inst.settle_ccy, strict=False)
+        # OKX SWAP 不在响应里返回 baseCcy/quoteCcy（仅 SPOT/MARGIN 有），
+        # 从 instId 反推（如 BTC-USDT-SWAP → base=BTC, quote=USDT）。
+        if base_ccy is None or quote_ccy is None:
+            parts = okx_inst.inst_id.split("-")
+            if len(parts) >= 3:
+                if base_ccy is None:
+                    base_ccy = Currency.from_str(parts[0], strict=False)
+                if quote_ccy is None:
+                    quote_ccy = Currency.from_str(parts[1], strict=False)
         # OKX 反向合约：settleCcy == baseCcy（如 BTC-USD-SWAP，用 BTC 结算）
         is_inverse = okx_inst.settle_ccy == okx_inst.base_ccy
         # 合约面值（USD-margined 通常是 USDT 计价的某个数量）
@@ -228,8 +237,10 @@ def parse_okx_candle_to_bar(
 ) -> Bar:
     """OKX ``Candle`` → ``Bar``。
 
-    OKX K 线 close 时间是 ``ts``（candle 起始时间，毫秒）；NT Bar 的 ts_event 用 close 时间。
-    我们这里用 ts + bar_period 作为 close 时间——但简化起见先用 ts_init。
+    OKX candle ``ts`` 是开盘时间（毫秒）。调用方需把 ``ts_init`` 设为收盘时间
+    （ts + bar_period），本函数把 ``ts_event`` 与 ``ts_init`` 对齐。
+    历史回放时这两者必须 = 收盘时间，否则 NT 会在 bar 开盘瞬间就 dispatch 这根 bar
+    的全部 OHLC，造成 lookahead。
     """
     return Bar(
         bar_type=bar_type,
@@ -238,7 +249,7 @@ def parse_okx_candle_to_bar(
         low=Price(float(candle.low), precision=price_precision),
         close=Price(float(candle.close), precision=price_precision),
         volume=Quantity(float(candle.volume), precision=size_precision),
-        ts_event=_ms_to_nanos(candle.ts),
+        ts_event=ts_init,
         ts_init=ts_init,
     )
 
