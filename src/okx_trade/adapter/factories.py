@@ -25,6 +25,7 @@ from __future__ import annotations
 import asyncio
 from typing import TYPE_CHECKING
 
+from nautilus_trader.common.config import InstrumentProviderConfig
 from nautilus_trader.live.factories import LiveDataClientFactory, LiveExecClientFactory
 from pydantic import SecretStr
 
@@ -92,7 +93,11 @@ class OKXLiveDataClientFactory(LiveDataClientFactory):
         # 解法：构造 provider 时传一个 lazy REST client（init 时不连接），_connect() 真正起。
         # 简化版：构造 REST client 但不 enter context；让 data client 在 _connect 时 enter。
         rest = OKXRestClient(settings)
-        provider = OKXInstrumentProvider(client=rest, clock=clock)
+        # 关键：传 ``load_all=True`` 让 NT 在 _connect 时调 ``initialize()``
+        # → ``load_all_async()`` 把 SWAP+SPOT instruments 灌进 NT cache。
+        # 没这一步策略 cache.instrument(...) 永远是 None，导致下单被拦截。
+        provider_cfg = InstrumentProviderConfig(load_all=config.load_instruments)
+        provider = OKXInstrumentProvider(client=rest, clock=clock, config=provider_cfg)
 
         client = OKXLiveDataClient(
             loop=loop,
@@ -126,7 +131,11 @@ class OKXLiveExecClientFactory(LiveExecClientFactory):
         from ..rest.client import OKXRestClient
         settings = _build_settings_from_exec_config(config)
         rest = OKXRestClient(settings)
-        provider = OKXInstrumentProvider(client=rest, clock=clock)
+        # 同 data factory：让 exec adapter 也能预加载 instruments（``load_instruments``
+        # 字段在 ``OKXExecClientConfig`` 没显式声明，统一用 True；data client 已经
+        # 加载完后 NT cache 全局共享，这里其实是兜底——不增加额外 REST 流量）
+        provider_cfg = InstrumentProviderConfig(load_all=True)
+        provider = OKXInstrumentProvider(client=rest, clock=clock, config=provider_cfg)
         td_mode = TdMode(config.td_mode)
         client = OKXLiveExecutionClient(
             loop=loop,
