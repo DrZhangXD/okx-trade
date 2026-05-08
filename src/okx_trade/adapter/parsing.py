@@ -67,6 +67,28 @@ def _ms_to_nanos(ms: int) -> int:
     return int(ms) * 1_000_000
 
 
+_AGG_TO_MS: dict[BarAggregation, int] = {
+    BarAggregation.MILLISECOND: 1,
+    BarAggregation.SECOND: 1_000,
+    BarAggregation.MINUTE: 60_000,
+    BarAggregation.HOUR: 3_600_000,
+    BarAggregation.DAY: 86_400_000,
+    BarAggregation.WEEK: 604_800_000,
+}
+
+
+def bar_spec_period_ms(spec: BarSpecification) -> int:
+    """``BarSpecification`` → 一根 bar 的时长（毫秒）。
+
+    用于把 OKX candle 开盘时间换算成收盘时间，覆盖 NT 支持的全部 step+aggregation
+    组合（包括 2D / 3D 这类 ``BarSize`` 暴露但 ``_PERIOD_MS`` 列举不全的情况）。
+    """
+    agg_ms = _AGG_TO_MS.get(spec.aggregation)
+    if agg_ms is None:
+        raise ValueError(f"unsupported bar aggregation: {spec.aggregation}")
+    return spec.step * agg_ms
+
+
 # ---------------------------------------------------------------------------
 # Instrument
 # ---------------------------------------------------------------------------
@@ -107,6 +129,15 @@ def parse_okx_instrument(okx_inst: OKXInstrument, ts_init: int) -> CryptoPerpetu
         if not okx_inst.settle_ccy:
             raise ValueError(f"SWAP instrument {okx_inst.inst_id} missing settleCcy")
         settle_ccy = Currency.from_str(okx_inst.settle_ccy, strict=False)
+        # OKX SWAP 不在响应里返回 baseCcy/quoteCcy（仅 SPOT/MARGIN 有），
+        # 从 instId 反推（如 BTC-USDT-SWAP → base=BTC, quote=USDT）。
+        if base_ccy is None or quote_ccy is None:
+            parts = okx_inst.inst_id.split("-")
+            if len(parts) >= 3:
+                if base_ccy is None:
+                    base_ccy = Currency.from_str(parts[0], strict=False)
+                if quote_ccy is None:
+                    quote_ccy = Currency.from_str(parts[1], strict=False)
         # OKX 反向合约：settleCcy == baseCcy（如 BTC-USD-SWAP，用 BTC 结算）
         is_inverse = okx_inst.settle_ccy == okx_inst.base_ccy
         # 合约面值（USD-margined 通常是 USDT 计价的某个数量）
@@ -228,9 +259,17 @@ def parse_okx_candle_to_bar(
 ) -> Bar:
     """OKX ``Candle`` → ``Bar``。
 
-    OKX K 线 close 时间是 ``ts``（candle 起始时间，毫秒）；NT Bar 的 ts_event 用 close 时间。
-    我们这里用 ts + bar_period 作为 close 时间——但简化起见先用 ts_init。
+    ``ts_event`` = bar 收盘时间（``candle.ts + bar_period``）。OKX candle ``ts`` 是
+    开盘时间，若直接当 ``ts_event`` 用，NT 回测引擎会在 bar 开盘瞬间就 dispatch
+    这根 bar 的全部 OHLC，造成 lookahead；同时实盘多根 bar 共享 ingestion clock
+    时也会让 ``ts_event`` 失去 chronological 语义。
+
+    ``ts_init``（系统首次感知到该事件的时刻）由调用方决定：
+    - 实盘 / 历史回填：传 ``clock.timestamp_ns()``（wall-clock）；
+    - 回测：传与 ``ts_event`` 相同的收盘时间，使 NT 按事件顺序回放。
     """
+    period_ms = bar_spec_period_ms(bar_type.spec)
+    ts_event_ns = (int(candle.ts) + period_ms) * 1_000_000
     return Bar(
         bar_type=bar_type,
         open=Price(float(candle.open), precision=price_precision),
@@ -238,7 +277,7 @@ def parse_okx_candle_to_bar(
         low=Price(float(candle.low), precision=price_precision),
         close=Price(float(candle.close), precision=price_precision),
         volume=Quantity(float(candle.volume), precision=size_precision),
-        ts_event=_ms_to_nanos(candle.ts),
+        ts_event=ts_event_ns,
         ts_init=ts_init,
     )
 

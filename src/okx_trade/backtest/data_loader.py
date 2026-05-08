@@ -14,7 +14,12 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from ..adapter.parsing import make_bar_type, parse_okx_candle_to_bar, parse_okx_instrument
+from ..adapter.parsing import (
+    bar_spec_period_ms,
+    make_bar_type,
+    parse_okx_candle_to_bar,
+    parse_okx_instrument,
+)
 from ..enums import BarSize
 
 if TYPE_CHECKING:
@@ -50,18 +55,25 @@ def bars_to_nt_bars(
     Args:
         candles: 已正序排列的 ``Candle``。
         instrument: 已构造好的 NT instrument（提供 price/size precision）。
-        bar_period: OKX 频率字符串，``"1m"`` / ``"1H"`` 等。
+        bar_period: OKX 频率字符串，``"1m"`` / ``"1H"`` / ``"3D"`` 等。
+
+    Note:
+        ``parse_okx_candle_to_bar`` 内部把 ``ts_event`` 设为收盘时间（OKX candle.ts
+        是开盘时间）。回测里 ``ts_init`` 也对齐到收盘时间，让 NT 按事件顺序回放
+        而不是 ingestion 顺序。``bar_period`` 的合法集合由 NT ``BarAggregation``
+        枚举决定（见 ``parsing.bar_spec_period_ms``），覆盖 ``BarSize`` 中暴露的
+        全部周期，包括 ``2D`` / ``3D``。
     """
     bar_type = make_bar_type(instrument.id.symbol.value, bar_period)
+    period_ns = bar_spec_period_ms(bar_type.spec) * 1_000_000
     out: list[Bar] = []
     for c in candles:
-        # ts_init 与 ts_event 同步（历史数据回放时无意义）
-        ts_init_ns = int(c.ts) * 1_000_000
+        ts_close_ns = int(c.ts) * 1_000_000 + period_ns
         bar = parse_okx_candle_to_bar(
             c, bar_type=bar_type,
             price_precision=instrument.price_precision,
             size_precision=instrument.size_precision,
-            ts_init=ts_init_ns,
+            ts_init=ts_close_ns,
         )
         out.append(bar)
     return out

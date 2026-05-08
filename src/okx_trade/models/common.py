@@ -66,7 +66,8 @@ class FundingRate(OKXModel):
     funding_rate: Decimal = Field(alias="fundingRate")
     next_funding_rate: Decimal = Field(default=Decimal("0"), alias="nextFundingRate")
     funding_time: int = Field(alias="fundingTime")        # 当期结算毫秒时间戳
-    next_funding_time: int = Field(alias="nextFundingTime")
+    # funding-rate-history 端点不返回 nextFundingTime
+    next_funding_time: int = Field(default=0, alias="nextFundingTime")
 
     @property
     def apr(self) -> Decimal:

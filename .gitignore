@@ -43,6 +43,9 @@ logs/
 # Runtime state / operational data
 var/
 
+# Backtest data catalog (regeneratable from OKX REST)
+data/
+
 # Local tooling state
 .claude/
 memory/

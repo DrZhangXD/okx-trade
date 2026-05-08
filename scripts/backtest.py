@@ -1,17 +1,26 @@
 """命令行回测工具。
 
-用法::
+支持的策略：
 
-    # 拉 BTC-USDT-SWAP 1h K 线 + 1d 区间，跑 Range Breakout 策略
-    python scripts/backtest.py \\
-        --strategy range_breakout \\
-        --symbol BTC-USDT-SWAP \\
-        --signal-bar 1H --range-bar 1D \\
-        --total-bars 5000 \\
-        --equity 10000 --risk-pct 0.005
+- ``range_breakout``：单标的 1H 信号 + 1D 区间。
+  ::
+
+      python scripts/backtest.py \\
+          --strategy range_breakout \\
+          --symbol BTC-USDT-SWAP \\
+          --signal-bar 1H --range-bar 1D \\
+          --total-bars 8760
+
+- ``xs_momentum``：多标的 1D 横截面动量。
+  ::
+
+      python scripts/backtest.py \\
+          --strategy xs_momentum \\
+          --instrument-ids BTC-USDT-SWAP,ETH-USDT-SWAP,SOL-USDT-SWAP \\
+          --signal-bar 1D --total-bars 365
 
 会自动：
-1. 调 OKX REST 拉历史 K 线（demo 端点不需要凭证）；
+1. 调 OKX REST 拉历史 K 线（公共端点不需要凭证）；
 2. 写到本地 ParquetDataCatalog（``./data`` 目录，可复用）；
 3. 跑 NT BacktestNode；
 4. 打印 PnL / Sharpe / maxDD / 交易次数 摘要。
@@ -30,7 +39,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from okx_trade import OKXRestClient, OKXSettings  # noqa: E402
 from okx_trade.adapter.constants import OKX_VENUE  # noqa: E402
-from okx_trade.adapter.parsing import make_bar_type  # noqa: E402
+from okx_trade.adapter.parsing import make_bar_type, parse_okx_instrument  # noqa: E402
 from okx_trade.backtest import (  # noqa: E402
     bars_to_nt_bars,
     download_historical_bars,
@@ -38,6 +47,8 @@ from okx_trade.backtest import (  # noqa: E402
     run_backtest,
     write_bars_to_catalog,
 )
+from okx_trade.backtest.data_loader import prepare_backtest_catalog  # noqa: E402
+from okx_trade.enums import InstType  # noqa: E402
 
 
 SUPPORTED_STRATEGIES = {
@@ -45,15 +56,21 @@ SUPPORTED_STRATEGIES = {
         "okx_trade.strategies.range_breakout:RangeBreakoutStrategy",
         "okx_trade.strategies.range_breakout:RangeBreakoutConfig",
     ),
+    "xs_momentum": (
+        "okx_trade.strategies.xs_momentum:XSMomentumStrategy",
+        "okx_trade.strategies.xs_momentum:XSMomentumConfig",
+    ),
 }
 
 
 def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="OKX backtest runner (NautilusTrader)")
     p.add_argument("--strategy", required=True, choices=list(SUPPORTED_STRATEGIES.keys()))
-    p.add_argument("--symbol", required=True, help="OKX instId, e.g. BTC-USDT-SWAP")
+    p.add_argument("--symbol", help="OKX instId（单标的策略用，e.g. BTC-USDT-SWAP）")
+    p.add_argument("--instrument-ids",
+                   help="多标的策略用，逗号分隔（e.g. BTC-USDT-SWAP,ETH-USDT-SWAP,SOL-USDT-SWAP）")
     p.add_argument("--signal-bar", default="1H", help="信号 K 线周期，默认 1H")
-    p.add_argument("--range-bar", default="1D", help="区间 K 线周期，默认 1D")
+    p.add_argument("--range-bar", default="1D", help="区间 K 线周期（仅 range_breakout 用），默认 1D")
     p.add_argument("--total-bars", type=int, default=2000, help="信号 K 线拉取根数")
     p.add_argument("--equity", type=float, default=10000.0, help="起始资金 USDT")
     p.add_argument("--risk-pct", type=float, default=0.005, help="单笔风险占净值")
@@ -64,17 +81,29 @@ def _parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
-async def _main_async(args: argparse.Namespace) -> None:
-    # 1) 拉数据 + 写 catalog
+async def _resolve_instrument(client: OKXRestClient, inst_id: str):
+    """拉 instrument 规格并解析为 NT instrument（不写盘）。"""
+    inst_type = InstType.SWAP if inst_id.endswith("-SWAP") else InstType.SPOT
+    okx_inst = await client.public.get_instrument(inst_type, inst_id)
+    return parse_okx_instrument(okx_inst, ts_init=0)
+
+
+# ---------------------------------------------------------------------------
+# range_breakout：单标的 1H 信号 + 1D 区间
+# ---------------------------------------------------------------------------
+
+
+async def _run_range_breakout(args: argparse.Namespace) -> None:
+    if not args.symbol:
+        raise SystemExit("range_breakout 需要 --symbol")
+
     if not args.reuse_data:
         print(f"[1/3] downloading {args.total_bars} bars × ({args.signal_bar}, {args.range_bar})...")
         async with OKXRestClient(OKXSettings()) as client:
-            from okx_trade.backtest.data_loader import prepare_backtest_catalog
             inst, signal_bars = await prepare_backtest_catalog(
                 client, args.symbol, args.signal_bar,
                 total=args.total_bars, catalog_path=args.catalog,
             )
-            # 区间 K 线根数：用更稀疏的上限（因为 1D bar 比 1H 少 24 倍）
             range_total = max(50, args.total_bars // 24)
             range_candles = await download_historical_bars(
                 client, args.symbol, args.range_bar, total=range_total,
@@ -85,22 +114,14 @@ async def _main_async(args: argparse.Namespace) -> None:
     else:
         print("[1/3] reusing catalog (--reuse-data)")
         async with OKXRestClient(OKXSettings()) as client:
-            from okx_trade.enums import InstType
-            inst_type = InstType.SWAP if args.symbol.endswith("-SWAP") else InstType.SPOT
-            okx_inst = await client.public.get_instrument(inst_type, args.symbol)
-            from okx_trade.adapter.parsing import parse_okx_instrument
-            inst = parse_okx_instrument(okx_inst, ts_init=0)
+            inst = await _resolve_instrument(client, args.symbol)
 
-    # 2) 构造 NT 回测配置
     print("[2/3] building backtest config...")
     from nautilus_trader.backtest.config import BacktestDataConfig
     from nautilus_trader.config import ImportableStrategyConfig
     from nautilus_trader.model.data import Bar
-    from nautilus_trader.persistence.catalog import ParquetDataCatalog
 
-    catalog = ParquetDataCatalog(path=args.catalog)
     instrument_id = f"{args.symbol}.{OKX_VENUE}"
-
     signal_bar_type = make_bar_type(args.symbol, args.signal_bar)
     range_bar_type = make_bar_type(args.symbol, args.range_bar)
 
@@ -124,7 +145,7 @@ async def _main_async(args: argparse.Namespace) -> None:
         leverage=args.leverage,
     )
 
-    strategy_path, config_path = SUPPORTED_STRATEGIES[args.strategy]
+    strategy_path, config_path = SUPPORTED_STRATEGIES["range_breakout"]
     strategy_config = ImportableStrategyConfig(
         strategy_path=strategy_path,
         config_path=config_path,
@@ -137,16 +158,114 @@ async def _main_async(args: argparse.Namespace) -> None:
         },
     )
 
-    # 3) 跑回测
     print("[3/3] running backtest...")
     summary = run_backtest(
         venue=venue,
         data=data_configs,
         strategies=[strategy_config],
     )
-
     print("\n=== RESULT ===")
     print(summary)
+
+
+# ---------------------------------------------------------------------------
+# xs_momentum：多标的 1D 横截面动量
+# ---------------------------------------------------------------------------
+
+
+async def _run_xs_momentum(args: argparse.Namespace) -> None:
+    if not args.instrument_ids:
+        raise SystemExit("xs_momentum 需要 --instrument-ids（逗号分隔）")
+    inst_id_list = [s.strip() for s in args.instrument_ids.split(",") if s.strip()]
+    if len(inst_id_list) < 2:
+        raise SystemExit(f"xs_momentum 至少需要 2 个标的，得到 {len(inst_id_list)}")
+
+    if not args.reuse_data:
+        print(f"[1/3] downloading {args.total_bars} × {args.signal_bar} bars for "
+              f"{len(inst_id_list)} instruments...")
+        async with OKXRestClient(OKXSettings()) as client:
+            for inst_id in inst_id_list:
+                _, bars = await prepare_backtest_catalog(
+                    client, inst_id, args.signal_bar,
+                    total=args.total_bars, catalog_path=args.catalog,
+                )
+                print(f"        {inst_id}: {len(bars)} bars")
+    else:
+        print("[1/3] reusing catalog (--reuse-data)")
+
+    print("[2/3] building backtest config...")
+    from nautilus_trader.backtest.config import BacktestDataConfig
+    from nautilus_trader.config import ImportableStrategyConfig
+    from nautilus_trader.model.data import Bar
+
+    catalog_path_str = str(Path(args.catalog).resolve())
+
+    nt_instrument_ids = [f"{s}.{OKX_VENUE}" for s in inst_id_list]
+    bar_types = [make_bar_type(s, args.signal_bar) for s in inst_id_list]
+
+    data_configs = [
+        BacktestDataConfig(
+            catalog_path=catalog_path_str,
+            data_cls=Bar.fully_qualified_name(),
+            instrument_id=instrument_id,
+            bar_types=[str(bar_type)],
+        )
+        for instrument_id, bar_type in zip(nt_instrument_ids, bar_types)
+    ]
+
+    venue = build_okx_venue_config(
+        starting_balance_usdt=args.equity,
+        leverage=args.leverage,
+    )
+
+    # bar_type_template："{inst}-1-DAY-LAST-EXTERNAL"，每个 inst 自己 replace
+    sample_bar_str = str(bar_types[0])
+    # sample 形如 BTC-USDT-SWAP.OKX-1-DAY-LAST-EXTERNAL；把前面 instrument_id 部分换成占位符
+    template_suffix = sample_bar_str.split(".OKX-", 1)[1]  # "1-DAY-LAST-EXTERNAL"
+    bar_type_template = "{inst}-" + template_suffix
+
+    # 至少 4 个标的才能 top_n=2 + bot_n=2；少于 4 个把 top_n/bot_n 调到 1
+    top_n = bot_n = 2 if len(inst_id_list) >= 4 else 1
+
+    strategy_path, config_path = SUPPORTED_STRATEGIES["xs_momentum"]
+    strategy_config = ImportableStrategyConfig(
+        strategy_path=strategy_path,
+        config_path=config_path,
+        config={
+            "instrument_ids": tuple(nt_instrument_ids),
+            "bar_type_template": bar_type_template,
+            "top_n": top_n,
+            "bot_n": bot_n,
+            "risk_pct": args.risk_pct,
+            "account_equity_usdt": args.equity,
+        },
+    )
+
+    print(f"        universe={len(nt_instrument_ids)} top_n={top_n} bot_n={bot_n}")
+    print("[3/3] running backtest...")
+    summary = run_backtest(
+        venue=venue,
+        data=data_configs,
+        strategies=[strategy_config],
+    )
+    print("\n=== RESULT ===")
+    print(summary)
+
+
+# ---------------------------------------------------------------------------
+# Dispatch
+# ---------------------------------------------------------------------------
+
+
+_RUNNERS = {
+    "range_breakout": _run_range_breakout,
+    "xs_momentum": _run_xs_momentum,
+}
+
+
+async def _main_async(args: argparse.Namespace) -> None:
+    runner = _RUNNERS[args.strategy]
+    await runner(args)
 
 
 def main() -> None:

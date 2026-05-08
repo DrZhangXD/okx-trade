@@ -61,5 +61,55 @@ class PublicEndpoints:
             )
         return FundingRate.model_validate(data[0])
 
+    async def get_funding_rate_history(
+        self,
+        inst_id: str,
+        *,
+        limit: int = 100,
+        before: int | None = None,
+        after: int | None = None,
+    ) -> list[FundingRate]:
+        """``GET /api/v5/public/funding-rate-history``。
+
+        每 8h 结算一次。OKX 单页最多 100 条；用 ``after`` 游标向更早翻页。
+        返回按 funding_time 升序。
+        """
+        params: dict[str, str] = {"instId": inst_id, "limit": str(limit)}
+        if before is not None:
+            params["before"] = str(before)
+        if after is not None:
+            params["after"] = str(after)
+        data = await self._t.request(
+            "GET", "/api/v5/public/funding-rate-history",
+            params=params, group="public.funding_rate_history",
+        )
+        rates = [FundingRate.model_validate(d) for d in data]
+        rates.sort(key=lambda r: r.funding_time)
+        return rates
+
+    async def get_funding_rate_history_extended(
+        self,
+        inst_id: str,
+        *,
+        total: int = 1095,  # 默认 1 年（8h × 365 ≈ 1095）
+    ) -> list[FundingRate]:
+        """分页拉取历史 funding rate，按时间升序返回。"""
+        all_rates: list[FundingRate] = []
+        seen: set[int] = set()
+        cursor: int | None = None
+        while len(all_rates) < total:
+            page_size = min(100, total - len(all_rates))
+            batch = await self.get_funding_rate_history(
+                inst_id, limit=page_size, after=cursor,
+            )
+            new_rows = [r for r in batch if r.funding_time not in seen]
+            if not new_rows:
+                break
+            all_rates.extend(new_rows)
+            seen.update(r.funding_time for r in new_rows)
+            cursor = min(r.funding_time for r in new_rows)
+        all_rates.sort(key=lambda r: r.funding_time)
+        return all_rates
+
 
 __all__ = ["PublicEndpoints"]

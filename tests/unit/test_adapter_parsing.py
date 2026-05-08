@@ -199,7 +199,10 @@ class TestParseCandle:
         assert str(bar.close) == "67050"
         # volume 按 size_precision 量化
         assert bar.volume.as_double() == 12.5
-        assert bar.ts_event == 1_700_000_000_000_000_000
+        # ts_event = 收盘时间 = candle.ts(open) + bar_period（1m = 60_000 ms）
+        assert bar.ts_event == 1_700_000_060_000_000_000
+        # ts_init 由调用方传入（实盘是 wall-clock，回测是收盘时间）
+        assert bar.ts_init == TS
 
 
 # ---------------------------------------------------------------------------
