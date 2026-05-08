@@ -67,6 +67,28 @@ def _ms_to_nanos(ms: int) -> int:
     return int(ms) * 1_000_000
 
 
+_AGG_TO_MS: dict[BarAggregation, int] = {
+    BarAggregation.MILLISECOND: 1,
+    BarAggregation.SECOND: 1_000,
+    BarAggregation.MINUTE: 60_000,
+    BarAggregation.HOUR: 3_600_000,
+    BarAggregation.DAY: 86_400_000,
+    BarAggregation.WEEK: 604_800_000,
+}
+
+
+def bar_spec_period_ms(spec: BarSpecification) -> int:
+    """``BarSpecification`` → 一根 bar 的时长（毫秒）。
+
+    用于把 OKX candle 开盘时间换算成收盘时间，覆盖 NT 支持的全部 step+aggregation
+    组合（包括 2D / 3D 这类 ``BarSize`` 暴露但 ``_PERIOD_MS`` 列举不全的情况）。
+    """
+    agg_ms = _AGG_TO_MS.get(spec.aggregation)
+    if agg_ms is None:
+        raise ValueError(f"unsupported bar aggregation: {spec.aggregation}")
+    return spec.step * agg_ms
+
+
 # ---------------------------------------------------------------------------
 # Instrument
 # ---------------------------------------------------------------------------
@@ -237,11 +259,17 @@ def parse_okx_candle_to_bar(
 ) -> Bar:
     """OKX ``Candle`` → ``Bar``。
 
-    OKX candle ``ts`` 是开盘时间（毫秒）。调用方需把 ``ts_init`` 设为收盘时间
-    （ts + bar_period），本函数把 ``ts_event`` 与 ``ts_init`` 对齐。
-    历史回放时这两者必须 = 收盘时间，否则 NT 会在 bar 开盘瞬间就 dispatch 这根 bar
-    的全部 OHLC，造成 lookahead。
+    ``ts_event`` = bar 收盘时间（``candle.ts + bar_period``）。OKX candle ``ts`` 是
+    开盘时间，若直接当 ``ts_event`` 用，NT 回测引擎会在 bar 开盘瞬间就 dispatch
+    这根 bar 的全部 OHLC，造成 lookahead；同时实盘多根 bar 共享 ingestion clock
+    时也会让 ``ts_event`` 失去 chronological 语义。
+
+    ``ts_init``（系统首次感知到该事件的时刻）由调用方决定：
+    - 实盘 / 历史回填：传 ``clock.timestamp_ns()``（wall-clock）；
+    - 回测：传与 ``ts_event`` 相同的收盘时间，使 NT 按事件顺序回放。
     """
+    period_ms = bar_spec_period_ms(bar_type.spec)
+    ts_event_ns = (int(candle.ts) + period_ms) * 1_000_000
     return Bar(
         bar_type=bar_type,
         open=Price(float(candle.open), precision=price_precision),
@@ -249,7 +277,7 @@ def parse_okx_candle_to_bar(
         low=Price(float(candle.low), precision=price_precision),
         close=Price(float(candle.close), precision=price_precision),
         volume=Quantity(float(candle.volume), precision=size_precision),
-        ts_event=ts_init,
+        ts_event=ts_event_ns,
         ts_init=ts_init,
     )
 
