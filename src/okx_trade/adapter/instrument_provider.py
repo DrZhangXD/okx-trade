@@ -67,10 +67,16 @@ class OKXInstrumentProvider(InstrumentProvider):
             for okx_inst in okx_list:
                 if inst_ids_keep is not None and okx_inst.inst_id not in inst_ids_keep:
                     continue
+                # 只加载 live 的 instrument——OKX 会推 preopen / suspend / settlement
+                # 状态合约，preopen 缺 tickSz/lotSz/minSz（默认值 0），把 0 精度的
+                # 灌进 NT cache 会导致下游 make_qty / make_price 报错或下错单。
+                if okx_inst.state and okx_inst.state != "live":
+                    continue
                 try:
                     nt_inst = parse_okx_instrument(okx_inst, ts_init=ts_init)
-                except ValueError:
-                    # 暂不支持的 instType（FUTURES/OPTION）跳过，不抛异常
+                except Exception:
+                    # 暂不支持的 instType（FUTURES/OPTION）或精度 0 等异常跳过，
+                    # 不影响其他 instruments 加载。
                     continue
                 self.add(nt_inst)
                 loaded += 1

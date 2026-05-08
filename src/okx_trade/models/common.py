@@ -46,9 +46,12 @@ class Instrument(OKXModel):
     settle_ccy: str = Field(default="", alias="settleCcy")
     ct_val: Decimal = Field(default=Decimal("1"), alias="ctVal")
     ct_val_ccy: str = Field(default="", alias="ctValCcy")
-    tick_sz: Decimal = Field(alias="tickSz")
-    lot_sz: Decimal = Field(alias="lotSz")
-    min_sz: Decimal = Field(alias="minSz")
+    # OKX 在 ``preopen`` 状态的 futures 合约（category=1）会**省略** tickSz/lotSz/minSz
+    # 字段。这里给默认 0，下游策略层只用 ``state == "live"`` 的 instrument，所以
+    # 0 值不会进交易热路径；但解析层不能因此崩，否则 ``load_all_async`` 会全军覆没。
+    tick_sz: Decimal = Field(default=Decimal("0"), alias="tickSz")
+    lot_sz: Decimal = Field(default=Decimal("0"), alias="lotSz")
+    min_sz: Decimal = Field(default=Decimal("0"), alias="minSz")
     state: str = Field(default="", alias="state")  # live / suspend / preopen / settlement
 
 
