@@ -1,0 +1,24 @@
+# 全局风控参数（RiskConfig 默认值）
+# 各策略 yaml 引用此处的字段；若策略 yaml 显式设值则覆盖。
+#
+# 字段定义见 src/okx_trade/risk/integration.py:RiskConfig
+
+enable_drawdown: true
+drawdown_daily_pct: 0.03      # 日 -3% 暂停新单
+drawdown_weekly_pct: 0.08     # 周 -8% 强制人工 review
+
+enable_vol_target: false      # 多策略组合层用 portfolio risk-budget，单策略默认不开
+vol_target_annualized: 0.15
+vol_window: 20
+
+# M5: PnL tracker 已接入；样本不足 (< 20 笔) 时 KellyCheck.set_stats 自动跳过，
+# 不会误伤；30 日数据到位前 Kelly 走默认 win_rate=0.5 / avg_r=1.0（中性）
+enable_kelly: true
+kelly_win_rate: 0.5
+kelly_avg_r: 1.0
+kelly_fraction: 0.25
+
+# M5: PnL tracker 已接入；样本不足 (< window/4) 时 CorrelationCheck 自动放行
+enable_correlation: true
+correlation_window: 30
+correlation_threshold: 0.7

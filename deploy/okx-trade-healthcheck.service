@@ -1,0 +1,13 @@
+[Unit]
+Description=OKX paper trading healthcheck (一次性，由 timer 触发)
+After=okx-trade.service
+
+[Service]
+Type=oneshot
+User=okxtrade
+Group=okxtrade
+WorkingDirectory=/home/okxtrade/okx-trade
+ExecStart=/home/okxtrade/okx-trade/.venv/bin/python scripts/healthcheck.py \
+  --max-stale-mins 30 --max-rss-mb 2000 --critical-since-mins 10
+# 健康失败由 OnFailure= 联动重启 okx-trade.service
+SuccessExitStatus=0

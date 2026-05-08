@@ -1,0 +1,19 @@
+# Funding Cash-and-Carry（M2，已上线）
+# 实现：src/okx_trade/strategies/funding_carry.py
+
+spot_instrument_id: BTC-USDT.OKX
+perp_instrument_id: BTC-USDT-SWAP.OKX
+spot_bar_type: BTC-USDT.OKX-1-MINUTE-LAST-EXTERNAL
+
+entry_apr_threshold: 0.08    # APR ≥ 8% 才开仓
+exit_apr_threshold: 0.02     # APR < 2% 平仓
+max_position_pct: 0.30        # 最大仓位 30% 净值
+
+account_equity_usdt: 10000.0
+check_interval_sec: 1800      # 30 分钟检查一次 funding rate
+
+# Delta-neutral 仓位 vol≈0，vol_target 没意义；只开 drawdown
+risk:
+  enable_drawdown: true
+  drawdown_daily_pct: 0.03
+  drawdown_weekly_pct: 0.08

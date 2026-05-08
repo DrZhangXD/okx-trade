@@ -1,0 +1,24 @@
+# Liq Reversal（M4，新增）
+# 实现：src/okx_trade/strategies/liq_reversal.py
+
+instrument_id: BTC-USDT-SWAP.OKX
+bar_type: BTC-USDT-SWAP.OKX-1-MINUTE-LAST-EXTERNAL
+
+liq_window_sec: 60             # 当前强平窗口
+liq_history_sec: 86400         # 24h 滚动 z-score
+zscore_threshold: 3.0          # 3σ 异常才触发
+cooldown_sec: 300              # 触发后 5 分钟冷却
+
+entry_stop_distance_pct: 0.005 # 0.5% 止损
+entry_tp_rr_ratio: 2.0         # 2R 止盈
+
+risk_pct: 0.005
+account_equity_usdt: 10000.0
+buffer_size: 50000             # 24h 高峰期足够
+
+subscribe_liquidations: true   # 实盘 / paper：true；NT backtest：false（脚本里覆盖）
+
+risk:
+  enable_drawdown: true
+  drawdown_daily_pct: 0.03
+  drawdown_weekly_pct: 0.08

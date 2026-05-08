@@ -1,0 +1,46 @@
+[Unit]
+Description=OKX paper trading (4 strategies + monitor)
+Documentation=https://github.com/zhangxudong/okx-trade
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=okxtrade
+Group=okxtrade
+WorkingDirectory=/home/okxtrade/okx-trade
+EnvironmentFile=/home/okxtrade/okx-trade/.env
+
+# Start: paper trading（NT TradingNode + 4 strategies + monitor）
+# Use the venv python explicitly to avoid PATH surprises.
+ExecStart=/home/okxtrade/okx-trade/.venv/bin/python scripts/live.py --run
+
+# 优雅停机：SIGINT 让 NT TradingNode 走 STOPPING 路径，10s 内不退则 SIGKILL
+KillSignal=SIGINT
+TimeoutStopSec=20
+
+# 自动重启：崩溃 / OOM 后 30s 重启；连续失败 5 次后 5 分钟内停手（避免 thrash）
+Restart=on-failure
+RestartSec=30s
+StartLimitBurst=5
+StartLimitIntervalSec=300
+
+# 资源限制：4 strategies + NT 大概 ~500MB；2GB 顶死防内存泄漏
+MemoryMax=2G
+LimitNOFILE=65536
+
+# 安全 hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/okxtrade/okx-trade/var
+
+# 日志：走 systemd journal（journalctl -u okx-trade -f 看实时；
+# /var/log/syslog 也会有；若想分独立文件配 StandardOutput=append:/path）
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=okx-trade
+
+[Install]
+WantedBy=multi-user.target

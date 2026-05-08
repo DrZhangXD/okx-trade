@@ -1,0 +1,76 @@
+# 4 策略并行 paper trading 配置（M5）
+# 由 scripts/live.py 加载
+
+account:
+  equity_usdt: 10000.0
+  paper_trading: true       # true = NT backtest emulator + 模拟成交；false = 实盘
+
+# PnL tracker 持久化文件
+pnl_db: var/pnl.sqlite
+
+# universe 选股（XS Momentum 用）
+xs_momentum_universe:
+  size: 30                  # top N
+  settle_ccy: USDT          # 只看 USDT-settled 永续
+  sort_by: vol24h           # 按 24h 成交额排
+
+strategies:
+  range_breakout:
+    enabled: true
+    config: configs/strategies/range_breakout.yaml
+  funding_carry:
+    enabled: true
+    config: configs/strategies/funding_carry.yaml
+  xs_momentum:
+    enabled: true
+    config: configs/strategies/xs_momentum.yaml
+  liq_reversal:
+    enabled: true
+    config: configs/strategies/liq_reversal.yaml
+
+# 全局风控默认值（策略 yaml 的 risk: 字段会优先生效）
+# Kelly / Correlation 默认开：M5 PnL tracker 已接入，足量历史前自动样本不足放行
+risk_defaults:
+  enable_drawdown: true
+  drawdown_daily_pct: 0.03
+  drawdown_weekly_pct: 0.08
+  enable_kelly: true
+  kelly_fraction: 0.25
+  enable_correlation: true
+  correlation_window: 30
+  correlation_threshold: 0.7
+
+# Portfolio optimizer：冷启动 equal-weight；30 日数据后切 risk_budget
+portfolio_optimizer:
+  mode: equal               # equal | risk_budget
+  min_history_days: 30
+  rebalance_weekday: 1      # 周一（M5 内未实接调度，留 reference）
+  rebalance_hour_utc: 0
+
+# Monitor：周期性轮询风控 + 每日 report
+monitor:
+  poll_interval_s: 60
+  daily_report_dir: var/daily_reports
+
+# Alerts：sink 列表 + 触发阈值
+alerts:
+  sinks:
+    - type: log
+    - type: jsonl
+      path: var/alerts.jsonl
+  thresholds:
+    kelly_jump: 0.05         # win_rate 跨 5pp → INFO
+    correlation_max: 0.7     # 任一对 |ρ| 超 → WARN
+    reject_per_hour: 5       # 单策略 1h 内 risk REJECT 超 → WARN
+
+# NT execution engine 配置（reconciliation 在 M6 接通 generate_*_reports 后默认开）
+execution:
+  reconciliation: true                # 启动时拉 OKX 订单/持仓对账；关掉退化为 stateless
+  reconciliation_lookback_mins: 1440  # 历史订单回查窗口（分钟）；null=不限
+
+# OKX 凭证（生产时通过 env 注入；这里留 stub 以便 yaml 自包含）
+okx_credentials:
+  api_key: null
+  api_secret: null
+  passphrase: null
+  http_proxy: null

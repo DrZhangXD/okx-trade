@@ -1,0 +1,32 @@
+# XS Momentum（M4，新增）
+# 实现：src/okx_trade/strategies/xs_momentum.py
+#
+# instrument_ids 由 scripts/live.py 启动时根据 universe 配置（24h volume 排序）
+# 动态填充。这里仅占位示例。
+
+instrument_ids:
+  - BTC-USDT-SWAP.OKX
+  - ETH-USDT-SWAP.OKX
+  - SOL-USDT-SWAP.OKX
+  - XRP-USDT-SWAP.OKX
+  - DOGE-USDT-SWAP.OKX
+  - AVAX-USDT-SWAP.OKX
+
+bar_type_template: "{inst}-1-DAY-LAST-EXTERNAL"
+
+lookback_days: 7              # 1-7 天动量
+top_n: 5                       # 多腿 5 个
+bot_n: 5                       # 空腿 5 个
+target_vol_annualized: 0.15    # 目标年化 vol = 15%
+vol_window: 20
+rebalance_hour_utc: 0          # 每日 UTC 0 点 rebalance
+buffer_size: 60                # ≥ lookback + vol_window + 5
+
+risk_pct: 0.01                 # 每个腿单笔风险 1%
+account_equity_usdt: 10000.0
+
+# vol_target 已在策略内部按品种维度做了，这里再叠一层会过缩；只开 drawdown
+risk:
+  enable_drawdown: true
+  drawdown_daily_pct: 0.03
+  drawdown_weekly_pct: 0.08

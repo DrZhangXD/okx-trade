@@ -1,0 +1,20 @@
+# Range Breakout（M2，已上线）
+# 实现：src/okx_trade/strategies/range_breakout.py
+
+instrument_id: BTC-USDT-SWAP.OKX
+range_bar_type: BTC-USDT-SWAP.OKX-1-DAY-LAST-EXTERNAL
+signal_bar_type: BTC-USDT-SWAP.OKX-1-HOUR-LAST-EXTERNAL
+
+tp_rr_ratio: 2.0
+max_stop_distance_pct: 0.02
+swing_lookback: 10
+
+risk_pct: 0.005           # 单笔风险 0.5%
+account_equity_usdt: 10000.0
+signal_buffer_size: 200
+
+# 风控（继承 risk.yaml）
+risk:
+  enable_drawdown: true
+  drawdown_daily_pct: 0.03
+  drawdown_weekly_pct: 0.08

@@ -1,0 +1,12 @@
+[Unit]
+Description=Run okx-trade healthcheck every 5 minutes
+
+[Timer]
+# 启动后 2 分钟首跑，然后每 5 分钟一次
+OnBootSec=2min
+OnUnitActiveSec=5min
+AccuracySec=30s
+Persistent=false
+
+[Install]
+WantedBy=timers.target
