@@ -57,7 +57,29 @@ class OKXAPIError(OKXError):
         self.data = data
         self.endpoint = endpoint
         prefix = f"[{endpoint}] " if endpoint else ""
-        super().__init__(f"{prefix}OKX API error code={code}: {message}")
+        detail = _extract_inner_detail(data)
+        super().__init__(f"{prefix}OKX API error code={code}: {message}{detail}")
+
+
+def _extract_inner_detail(data: Any | None) -> str:
+    """从 OKX 响应的 ``data`` 字段提取 ``sCode`` / ``sMsg``，拼成 ` | sCode=...: ...`。
+
+    OKX 的"批量请求里至少一笔失败"会返回 outer ``code="1", msg="All operations
+    failed"``，真正的拒绝原因在 ``data[0]``。本函数兼容 ``data`` 是 list / dict /
+    None，返回空串表示没有可用 sCode。
+    """
+    item: Any = None
+    if isinstance(data, list) and data:
+        item = data[0]
+    elif isinstance(data, dict):
+        item = data
+    if not isinstance(item, dict):
+        return ""
+    s_code = item.get("sCode")
+    if not s_code or s_code == "0":
+        return ""
+    s_msg = item.get("sMsg", "")
+    return f" | sCode={s_code}: {s_msg}"
 
 
 class OKXAuthError(OKXAPIError):

@@ -279,6 +279,16 @@ class OKXLiveExecutionClient(LiveExecutionClient):
         ord_type = order_type_and_tif_to_okx(order.order_type, order.time_in_force)
         td_mode = resolve_td_mode(inst_id, self._td_mode)
 
+        # 提交前 min-lot 防线：低于 instrument.min_quantity 直接 raise，避免浪费
+        # OKX 配额（每条都会被 sCode=51020 拒）+ 污染 monitor reject_per_hour 计数。
+        instrument = self.cache.instrument(order.instrument_id)
+        if instrument is not None and instrument.min_quantity is not None:
+            if order.quantity < instrument.min_quantity:
+                raise ValueError(
+                    f"order qty {order.quantity} below min_quantity "
+                    f"{instrument.min_quantity} for {inst_id}"
+                )
+
         # 数量：从 NT Quantity 转字符串（已经按 size_precision 量化好了）
         sz = str(order.quantity)
         # 价格：限价单才有 price；市价单 None
