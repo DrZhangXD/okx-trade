@@ -74,6 +74,12 @@ alerts:
 execution:
   reconciliation: true                # 启动时拉 OKX 订单/持仓对账；关掉退化为 stateless
   reconciliation_lookback_mins: 1440  # 历史订单回查窗口（分钟）；null=不限
+  # 必须与 OKX 账户 /api/v5/account/config 的 posMode 一致：
+  #   posMode=long_short_mode → pos_side_mode: long_short
+  #   posMode=net_mode        → pos_side_mode: net
+  # 不一致会被 OKX 报 sCode=51000 Parameter posSide error。
+  pos_side_mode: long_short
+  td_mode: cross                      # cross / isolated；现货自动 fallback 到 cash
 
 # OKX 凭证（生产时通过 env 注入；这里留 stub 以便 yaml 自包含）
 okx_credentials:

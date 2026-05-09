@@ -316,6 +316,8 @@ def _build_trading_node(live_cfg: dict[str, Any]) -> Any:
                 passphrase=creds.get("passphrase"),
                 is_demo=is_paper,
                 http_proxy=creds.get("http_proxy"),
+                td_mode=exec_cfg.get("td_mode", "cross"),
+                pos_side_mode=exec_cfg.get("pos_side_mode", "net"),
             ),
         },
     )
