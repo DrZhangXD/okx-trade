@@ -45,6 +45,7 @@ from nautilus_trader.model.enums import (
     AccountType,
     LiquiditySide,
     OmsType,
+    OrderStatus,
     OrderType,
 )
 from nautilus_trader.model.identifiers import (
@@ -358,9 +359,20 @@ class OKXLiveExecutionClient(LiveExecutionClient):
             )
             return
 
-        # 下单成功 → 等 orders 频道推送来 generate_order_accepted/filled
-        # 这里只需要把 venue_order_id 记到 cache（如果 NT 没自动做的话）
-        # 实际上 NT 在 generate_order_accepted 时会绑定 venue_order_id
+        # 下单成功 → 立刻基于 REST 同步响应 emit OrderAccepted。不能等 WS
+        # `orders` 频道推送 state="live"：OKX 偶发 30-60s 才推，期间 NT 的
+        # in-flight resolution（execution_engine.py:778）会强制把 SUBMITTED
+        # 状态超时的订单标记为 OrderRejected(reason="UNKNOWN")，导致 NT 内
+        # 部状态与 OKX 实际状态分裂。WS handler 那边带 OrderStatus 守卫
+        # （见 ``_handle_order_update``），不会重复 emit。
+        if result.ord_id:
+            self.generate_order_accepted(
+                strategy_id=command.strategy_id,
+                instrument_id=order.instrument_id,
+                client_order_id=order.client_order_id,
+                venue_order_id=VenueOrderId(result.ord_id),
+                ts_event=self._clock.timestamp_ns(),
+            )
 
     # ------------------------------------------------------------------
     # Cancel
@@ -904,13 +916,17 @@ class OKXLiveExecutionClient(LiveExecutionClient):
             return
 
         if state == "live":
-            self.generate_order_accepted(
-                strategy_id=strategy_id,
-                instrument_id=instrument_id,
-                client_order_id=client_order_id,
-                venue_order_id=venue_order_id,
-                ts_event=ts_event,
-            )
+            # Dedup：``_submit_order`` 在 REST 成功后已经 emit 过 OrderAccepted。
+            # 只有在 NT 缓存里订单仍在 SUBMITTED（race：WS 早于 REST 响应、或
+            # REST 没拿到 ord_id）才再 emit，避免 NT 状态机抱怨重复 transition。
+            if order is None or order.status == OrderStatus.SUBMITTED:
+                self.generate_order_accepted(
+                    strategy_id=strategy_id,
+                    instrument_id=instrument_id,
+                    client_order_id=client_order_id,
+                    venue_order_id=venue_order_id,
+                    ts_event=ts_event,
+                )
         elif state in ("partially_filled", "filled"):
             self._emit_fill(data, strategy_id, instrument_id, client_order_id, venue_order_id, ts_event)
         elif state in ("canceled", "mmp_canceled"):
