@@ -281,7 +281,7 @@ class OKXLiveExecutionClient(LiveExecutionClient):
 
         # 提交前 min-lot 防线：低于 instrument.min_quantity 直接 raise，避免浪费
         # OKX 配额（每条都会被 sCode=51020 拒）+ 污染 monitor reject_per_hour 计数。
-        instrument = self.cache.instrument(order.instrument_id)
+        instrument = self._instrument_provider.find(order.instrument_id)
         if instrument is not None and instrument.min_quantity is not None:
             if order.quantity < instrument.min_quantity:
                 raise ValueError(
