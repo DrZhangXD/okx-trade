@@ -240,4 +240,4 @@ Per-milestone detail: see [CHANGELOG.md](CHANGELOG.md).
 
 ## License
 
-Private repository, all rights reserved by the author.
+Source visible but **not licensed for use** — © 2026 DrZhangXD, All Rights Reserved. Contact the author in writing before reuse or derivative work.

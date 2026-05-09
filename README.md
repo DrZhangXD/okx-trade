@@ -240,4 +240,4 @@ ruff check src/ tests/
 
 ## License
 
-私有仓库，作者保留所有权利。
+仓库公开可读但**未授予使用许可**——© 2026 DrZhangXD，All Rights Reserved。如需引用 / 二次开发，请先联系作者获取书面许可。
