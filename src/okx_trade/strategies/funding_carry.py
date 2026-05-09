@@ -42,6 +42,7 @@ from typing import TYPE_CHECKING
 
 from ..risk import RiskConfig, RiskIntent, apply_risk_manager, build_risk_manager
 from .pnl_hook import record_strategy_equity_daily, record_strategy_trade
+from .qty import safe_make_qty
 
 if TYPE_CHECKING:
     from nautilus_trader.model.data import Bar
@@ -363,17 +364,26 @@ if _NT_AVAILABLE:
                 perp_contracts = adjusted
                 spot_qty = spot_qty * ratio
 
-            # 两腿同时下市价单
+            # 两腿同时下市价单 —— 任一腿 qty 对齐后变 0 则放弃，避免 delta 失衡
+            spot_qty_obj = safe_make_qty(
+                spot_inst, spot_qty, self.log, ctx=f"enter spot {self.spot_id.value}"
+            )
+            perp_qty_obj = safe_make_qty(
+                perp_inst, perp_contracts, self.log,
+                ctx=f"enter perp {self.perp_id.value}",
+            )
+            if spot_qty_obj is None or perp_qty_obj is None:
+                return
             spot_order = self.order_factory.market(
                 instrument_id=self.spot_id,
                 order_side=OrderSide.BUY,
-                quantity=spot_inst.make_qty(Decimal(str(spot_qty))),
+                quantity=spot_qty_obj,
                 time_in_force=TimeInForce.IOC,
             )
             perp_order = self.order_factory.market(
                 instrument_id=self.perp_id,
                 order_side=OrderSide.SELL,
-                quantity=perp_inst.make_qty(Decimal(str(perp_contracts))),
+                quantity=perp_qty_obj,
                 time_in_force=TimeInForce.IOC,
             )
             self.submit_order(spot_order)
@@ -394,17 +404,31 @@ if _NT_AVAILABLE:
             if spot_inst is None or perp_inst is None:
                 return
 
+            spot_qty_obj = safe_make_qty(
+                spot_inst, self._spot_qty, ctx=f"exit spot {self.spot_id.value}"
+            )
+            perp_qty_obj = safe_make_qty(
+                perp_inst, self._perp_contracts,
+                ctx=f"exit perp {self.perp_id.value}",
+            )
+            if spot_qty_obj is None or perp_qty_obj is None:
+                self.log.error(
+                    f"EXIT carry skipped: leg < lot_sz "
+                    f"(spot={self._spot_qty}, perp={self._perp_contracts}); "
+                    f"position remains open"
+                )
+                return
             spot_close = self.order_factory.market(
                 instrument_id=self.spot_id,
                 order_side=OrderSide.SELL,
-                quantity=spot_inst.make_qty(Decimal(str(self._spot_qty))),
+                quantity=spot_qty_obj,
                 time_in_force=TimeInForce.IOC,
                 reduce_only=False,  # 现货账户没 reduce_only 概念，直接卖
             )
             perp_close = self.order_factory.market(
                 instrument_id=self.perp_id,
                 order_side=OrderSide.BUY,
-                quantity=perp_inst.make_qty(Decimal(str(self._perp_contracts))),
+                quantity=perp_qty_obj,
                 time_in_force=TimeInForce.IOC,
                 reduce_only=True,
             )

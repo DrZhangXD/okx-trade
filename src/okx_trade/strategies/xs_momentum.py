@@ -39,6 +39,7 @@ from .base import BarBuffer, BarSnapshot, to_bar_snapshots
 # xs_momentum 走每日 rebalance + 增量订单，不存在清晰的"一笔成交"边界，
 # PnL 主要通过 equity snapshot 喂 correlation；不需要 record_strategy_trade。
 from .pnl_hook import record_strategy_equity_daily
+from .qty import safe_make_qty
 
 # ---------------------------------------------------------------------------
 # Pure functions
@@ -456,12 +457,16 @@ if _NT_AVAILABLE:
             if inst is None:
                 self.log.warning(f"rebalance: instrument missing {inst_id_str}")
                 return
-            qty = abs(delta_contracts)
+            qty_obj = safe_make_qty(
+                inst, abs(delta_contracts), self.log, ctx=f"rebalance {inst_id_str}"
+            )
+            if qty_obj is None:
+                return
             side = OrderSide.BUY if delta_contracts > 0 else OrderSide.SELL
             order = self.order_factory.market(
                 instrument_id=InstrumentId.from_str(inst_id_str),
                 order_side=side,
-                quantity=inst.make_qty(Decimal(str(qty))),
+                quantity=qty_obj,
                 time_in_force=TimeInForce.IOC,
             )
             self.submit_order(order)

@@ -38,6 +38,7 @@ from .base import (
     to_bar_snapshots,
 )
 from .pnl_hook import record_strategy_equity_daily, record_strategy_trade
+from .qty import safe_make_qty
 
 State = Literal["idle", "breakout_up", "breakout_down"]
 
@@ -436,11 +437,16 @@ if _NT_AVAILABLE:
             if adjusted != contracts:
                 contracts = adjusted
 
+            qty_obj = safe_make_qty(
+                inst, contracts, self.log, ctx=f"enter {self.instrument_id}"
+            )
+            if qty_obj is None:
+                return
             side = OrderSide.BUY if signal.direction == "long" else OrderSide.SELL
             order = self.order_factory.market(
                 instrument_id=self.instrument_id,
                 order_side=side,
-                quantity=inst.make_qty(Decimal(str(contracts))),
+                quantity=qty_obj,
                 time_in_force=TimeInForce.IOC,
             )
             self.submit_order(order)
@@ -486,12 +492,21 @@ if _NT_AVAILABLE:
                 return
             ct_val = float(inst.multiplier) if float(inst.multiplier) > 0 else 1.0
             contracts = self._position_contracts
+            qty_obj = safe_make_qty(
+                inst, contracts, ctx=f"exit {self.instrument_id}"
+            )
+            if qty_obj is None:
+                self.log.error(
+                    f"EXIT skipped: position contracts {contracts} < lot_sz "
+                    f"for {self.instrument_id}; position remains open"
+                )
+                return
             # 反向平仓（reduce-only）
             close_side = OrderSide.SELL if sig.direction == "long" else OrderSide.BUY
             order = self.order_factory.market(
                 instrument_id=self.instrument_id,
                 order_side=close_side,
-                quantity=inst.make_qty(Decimal(str(contracts))),
+                quantity=qty_obj,
                 time_in_force=TimeInForce.IOC,
                 reduce_only=True,
             )
