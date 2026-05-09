@@ -83,8 +83,35 @@ class LiveMonitor:
     def stop(self) -> None:
         self._stopped.set()
 
+    def _emit_service_started(self) -> None:
+        """启动入口 emit 一条 INFO，让 ``alerts.jsonl`` 在每次 systemd 拉起服务
+        时都留痕，方便外部统计 NRestarts / 服务可用率。"""
+        import os
+        alert = Alert(
+            severity=AlertSeverity.INFO,
+            source="service",
+            message=(
+                f"monitor started; pid={os.getpid()} "
+                f"poll_interval={self.poll_interval_s}s "
+                f"strategies={len(self.handles_by_strategy)}"
+            ),
+            ts_ms=self._clock(),
+            context={
+                "pid": os.getpid(),
+                "poll_interval_s": self.poll_interval_s,
+                "strategy_count": len(self.handles_by_strategy),
+                "strategy_ids": list(self.handles_by_strategy.keys()),
+            },
+        )
+        fan_out(self.sinks, alert)
+
     async def run(self) -> None:
         """死循环 poll；外部调 ``stop()`` 退出。"""
+        # 启动信标：每次 systemd 拉起服务都会在 alerts.jsonl 留下一条记录
+        try:
+            self._emit_service_started()
+        except Exception:
+            pass
         while not self._stopped.is_set():
             try:
                 self.poll_once()

@@ -127,11 +127,19 @@ def run_live(args: argparse.Namespace) -> int:
     print(f"[live] allocator={type(ctx.allocator).__name__}")
     print(f"[live] sinks={[type(s).__name__ for s in ctx.sinks]}")
 
-    # spawn monitor task 在 NT loop 启动后；这里靠 run_in_executor 简单启动
+    # spawn monitor + daily-report 后台 task 在 NT loop 启动前 schedule
     monitor_task: asyncio.Task | None = None
+    report_task: asyncio.Task | None = None
+    loop = asyncio.get_event_loop()
     if ctx.monitor is not None:
-        loop = asyncio.get_event_loop()
         monitor_task = loop.create_task(ctx.monitor.run())
+    if ctx.reporter is not None:
+        report_task = loop.create_task(
+            ctx.reporter.run_loop(
+                on_write=lambda p: print(f"[daily-report] written: {p}"),
+                on_error=lambda e: print(f"[daily-report] error: {e}"),
+            ),
+        )
 
     try:
         ctx.node.run()
@@ -140,6 +148,8 @@ def run_live(args: argparse.Namespace) -> int:
             ctx.monitor.stop()
         if monitor_task is not None and not monitor_task.done():
             monitor_task.cancel()
+        if report_task is not None and not report_task.done():
+            report_task.cancel()
         ctx.tracker.close()
     return 0
 

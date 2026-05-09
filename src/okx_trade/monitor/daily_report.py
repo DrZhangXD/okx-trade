@@ -9,12 +9,20 @@
 - ``date``：UTC 日期
 - ``per_strategy``：{strategy_id: {trade_count, pnl_usdt, win_rate, ending_equity}}
 - ``totals``：{trade_count, pnl_usdt}
+
+后台调度
+--------
+``run_loop()`` 是 asyncio 死循环，每天 UTC ``0:01:00`` 写一份"刚结束那天"的
+报告（错峰一分钟避开整点 cron 高峰）。``scripts/live.py`` 在 ``--run`` 时通
+过 ``loop.create_task(reporter.run_loop())`` 起来；外部 ``cancel()`` 退出。
 """
 from __future__ import annotations
 
+import asyncio
 import json
+from collections.abc import Awaitable, Callable
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -107,6 +115,52 @@ class DailyReporter:
 
     def write_for_today(self) -> Path:
         return self.write_for_date(datetime.now(tz=timezone.utc).strftime("%Y-%m-%d"))
+
+    @staticmethod
+    def _next_run_at(now: datetime) -> datetime:
+        """下一次写报告时间：下一个 UTC 0:01:00。"""
+        today_001 = now.replace(hour=0, minute=1, second=0, microsecond=0)
+        if now < today_001:
+            return today_001
+        return (now + timedelta(days=1)).replace(
+            hour=0, minute=1, second=0, microsecond=0,
+        )
+
+    async def run_loop(
+        self,
+        *,
+        sleep_for: Callable[[float], Awaitable[None]] | None = None,
+        now: Callable[[], datetime] | None = None,
+        on_write: Callable[[Path], None] | None = None,
+        on_error: Callable[[BaseException], None] | None = None,
+    ) -> None:
+        """死循环，每个 UTC 0:01 写"刚结束那天"的 daily report。
+
+        ``scripts/live.py`` 在 ``--run`` 入口调 ``loop.create_task(reporter.run_loop())``；
+        外部 ``task.cancel()`` 退出（CancelledError 由调用方处理）。
+
+        Args:
+            sleep_for: 注入的 sleep 协程（默认 asyncio.sleep），便于测试。
+            now: 注入的"当前 UTC 时间"函数（默认 datetime.now(tz=utc)），便于测试。
+            on_write: 每次成功写报告后回调，参数是写出文件路径（用于打日志 / 通知）。
+            on_error: 写报告失败的回调（捕获 Exception 后调用，不抛出，避免拉崩 task）。
+        """
+        _sleep = sleep_for or asyncio.sleep
+        _now = now or (lambda: datetime.now(tz=timezone.utc))
+
+        while True:
+            cur = _now()
+            wait_s = (self._next_run_at(cur) - cur).total_seconds()
+            await _sleep(wait_s)
+            try:
+                # 写"刚结束的那天"：触发时刻 - 1 小时确保落在前一个 UTC 日内
+                yesterday = (_now() - timedelta(hours=1)).strftime("%Y-%m-%d")
+                path = self.write_for_date(yesterday)
+                if on_write is not None:
+                    on_write(path)
+            except Exception as exc:  # noqa: BLE001 - 监控循环不能因写失败崩
+                if on_error is not None:
+                    on_error(exc)
 
 
 def _json_default(o: Any) -> Any:
