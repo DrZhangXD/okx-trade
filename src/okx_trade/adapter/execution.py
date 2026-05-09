@@ -129,14 +129,16 @@ def _build_account_balances(balance: Balance) -> list[AccountBalance]:
             continue
         if free > total:
             total = free
-        locked = total - free
-        out.append(
-            AccountBalance(
-                Money(total, currency),
-                Money(locked, currency),
-                Money(free, currency),
-            )
-        )
+        # 关键：``locked`` 必须从 quantize 后的 total/free 派生，不能用未量化的
+        # Decimal 减法。NT ``AccountBalance`` 在 ``objects.pyx:1925`` 严格校验
+        # ``total.raw_int - locked.raw_int == free.raw_int``；OKX 返回的 eq /
+        # availBal 经常在 8 位小数处差 1 unit，直接用裸 Decimal 减法 + Money
+        # 三次量化会让等式偏 1 unit，构造失败 → AccountState 永不 emit →
+        # Portfolio 报 'no account registered' → 所有 fill 被丢。
+        m_total = Money(total, currency)
+        m_free = Money(free, currency)
+        m_locked = Money(m_total.as_decimal() - m_free.as_decimal(), currency)
+        out.append(AccountBalance(m_total, m_locked, m_free))
     return out
 
 
