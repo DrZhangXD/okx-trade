@@ -30,11 +30,18 @@ strategies:
 
 # 全局风控默认值（策略 yaml 的 risk: 字段会优先生效）
 # Kelly / Correlation 默认开：M5 PnL tracker 已接入，足量历史前自动样本不足放行
+#
+# Kelly 冷启动默认 (0.55, 1.5)：
+#   f* = (0.55×1.5 - 0.45) / 1.5 = 0.25 → × kelly_fraction(0.25) = 6.25% 标准仓位
+# 不要用 (0.5, 1.0)，那个公式上 = 0，会让所有策略永远 REJECT。
+# 前 20 笔成交后 PnL tracker 会调 set_stats 接管。
 risk_defaults:
   enable_drawdown: true
   drawdown_daily_pct: 0.03
   drawdown_weekly_pct: 0.08
   enable_kelly: true
+  kelly_win_rate: 0.55
+  kelly_avg_r: 1.5
   kelly_fraction: 0.25
   enable_correlation: true
   correlation_window: 30
