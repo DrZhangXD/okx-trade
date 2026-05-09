@@ -12,10 +12,15 @@ vol_target_annualized: 0.15
 vol_window: 20
 
 # M5: PnL tracker 已接入；样本不足 (< 20 笔) 时 KellyCheck.set_stats 自动跳过，
-# 不会误伤；30 日数据到位前 Kelly 走默认 win_rate=0.5 / avg_r=1.0（中性）
+# 保留以下冷启动默认。
+#
+# 注意：(0.5, 1.0) 不是"中性"——它的 kelly_fraction = (0.5×1-0.5)/1 = 0，
+# 会导致 KellyCheck 永远 REJECT 所有下单。改用 (0.55, 1.5) 假设温和正 edge：
+#     f* = (0.55×1.5 - 0.45) / 1.5 = 0.25
+# × kelly_fraction(0.25) = 6.25% 标准仓位。前 20 笔成交后 PnL tracker 接管。
 enable_kelly: true
-kelly_win_rate: 0.5
-kelly_avg_r: 1.0
+kelly_win_rate: 0.55
+kelly_avg_r: 1.5
 kelly_fraction: 0.25
 
 # M5: PnL tracker 已接入；样本不足 (< window/4) 时 CorrelationCheck 自动放行
