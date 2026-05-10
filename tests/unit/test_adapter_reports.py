@@ -39,6 +39,7 @@ from nautilus_trader.model.enums import (
 from nautilus_trader.model.identifiers import (
     AccountId,
     ClientOrderId,
+    PositionId,
     TraderId,
     VenueOrderId,
 )
@@ -490,6 +491,7 @@ class TestGeneratePositionStatusReports:
                 "pos": "5",
                 "avgPx": "30000",
                 "ts": "1714000000000",
+                "posId": "3550279046859345920",
             }),
         ]
 
@@ -507,6 +509,85 @@ class TestGeneratePositionStatusReports:
         assert r.position_side == PositionSide.LONG
         assert str(r.quantity) == "5"
         assert r.avg_px_open == Decimal("30000")
+        # OKX posId 透传 → NT venue_position_id，避免 reconcile fallback 到 EXTERNAL
+        assert r.venue_position_id == PositionId("3550279046859345920")
+
+    async def test_long_position_without_posid_falls_back_to_inst_side(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """OKX 极旧账户 / 边角 case 不返回 posId 时退到稳定 fallback ID，
+        避免 NT 自己 fallback 到 ``{instrument}-EXTERNAL`` 撞内部 order-driven ID。"""
+        from okx_trade.models.account import Position
+        client = _build_exec_client_with_mocks(monkeypatch)
+        client._rest.account.get_positions.return_value = [
+            Position.model_validate({
+                "instId": "BTC-USDT-SWAP",
+                "instType": "SWAP",
+                "mgnMode": "cross",
+                "posSide": "net",
+                "pos": "5",
+                "avgPx": "30000",
+                "ts": "1714000000000",
+                # 故意不带 posId
+            }),
+        ]
+
+        cmd = GeneratePositionStatusReports(
+            instrument_id=None, start=None, end=None,
+            command_id=UUID4(), ts_init=_ts_init(),
+        )
+        reports = await client.generate_position_status_reports(cmd)
+
+        assert len(reports) == 1
+        r = reports[0]
+        assert r.venue_position_id is not None
+        # 稳定 fallback 格式：{instrument_id}-{side}
+        assert r.venue_position_id.value == "BTC-USDT-SWAP.OKX-LONG"
+
+    async def test_long_short_mode_two_positions_same_inst(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """long_short 模式同 inst 同时持有 long+short 两条仓位，
+        各自 posId 不同 → 两份 report 的 venue_position_id 必须不冲突。"""
+        from okx_trade.models.account import Position
+        client = _build_exec_client_with_mocks(monkeypatch)
+        client._rest.account.get_positions.return_value = [
+            Position.model_validate({
+                "instId": "BTC-USDT-SWAP",
+                "instType": "SWAP",
+                "mgnMode": "cross",
+                "posSide": "long",
+                "pos": "3",
+                "avgPx": "30000",
+                "ts": "1714000000000",
+                "posId": "1111111111111111111",
+            }),
+            Position.model_validate({
+                "instId": "BTC-USDT-SWAP",
+                "instType": "SWAP",
+                "mgnMode": "cross",
+                "posSide": "short",
+                "pos": "2",
+                "avgPx": "31000",
+                "ts": "1714000000000",
+                "posId": "2222222222222222222",
+            }),
+        ]
+
+        cmd = GeneratePositionStatusReports(
+            instrument_id=None, start=None, end=None,
+            command_id=UUID4(), ts_init=_ts_init(),
+        )
+        reports = await client.generate_position_status_reports(cmd)
+
+        assert len(reports) == 2
+        ids = {r.venue_position_id for r in reports}
+        assert ids == {
+            PositionId("1111111111111111111"),
+            PositionId("2222222222222222222"),
+        }
+        sides = {r.position_side for r in reports}
+        assert sides == {PositionSide.LONG, PositionSide.SHORT}
 
     async def test_flat_position_returns_flat_report(
         self, monkeypatch: pytest.MonkeyPatch,

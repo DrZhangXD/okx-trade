@@ -52,6 +52,7 @@ from nautilus_trader.model.identifiers import (
     AccountId,
     ClientOrderId,
     InstrumentId,
+    PositionId,
     TradeId,
     VenueOrderId,
 )
@@ -638,6 +639,7 @@ class OKXLiveExecutionClient(LiveExecutionClient):
             avg_px = data.avg_px
             pos_side = data.pos_side
             ts_ms = data.ts
+            pos_id_str = data.pos_id
         else:
             inst_id_str = data.get("instId") or ""
             try:
@@ -650,6 +652,7 @@ class OKXLiveExecutionClient(LiveExecutionClient):
                 avg_px = Decimal("0")
             pos_side = data.get("posSide") or "net"
             ts_ms = self._ms_or_none(data.get("uTime") or data.get("ts")) or 0
+            pos_id_str = data.get("posId") or ""
 
         if not inst_id_str:
             return None
@@ -663,6 +666,7 @@ class OKXLiveExecutionClient(LiveExecutionClient):
         ts_last = _ms_to_nanos(int(ts_ms)) if ts_ms else ts_init
 
         if position_side.name == "FLAT" or pos == 0:
+            # FLAT position 不参与 venue_position_id 比对（NT create_flat 也不接收该参数）
             return PositionStatusReport.create_flat(
                 account_id=self.account_id,
                 instrument_id=instrument_id,
@@ -676,9 +680,19 @@ class OKXLiveExecutionClient(LiveExecutionClient):
         except Exception:
             return None
 
+        # venue_position_id：优先用 OKX posId（snowflake 唯一）；空时退到稳定 fallback
+        # ``{inst}-{side}``，避免 NT 自动 fallback 到 ``{inst}-EXTERNAL`` 占位 ID 与
+        # 内部 order-driven ID 撞车。posId 在 demo / 实盘均有返回（已实测）。
+        venue_position_id = (
+            PositionId(pos_id_str)
+            if pos_id_str
+            else PositionId(f"{instrument_id.value}-{position_side.name}")
+        )
+
         return PositionStatusReport(
             account_id=self.account_id,
             instrument_id=instrument_id,
+            venue_position_id=venue_position_id,
             position_side=position_side,
             quantity=quantity,
             avg_px_open=avg_px if avg_px and avg_px > 0 else None,

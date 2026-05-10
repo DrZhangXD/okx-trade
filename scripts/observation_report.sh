@@ -68,8 +68,18 @@ run() { eval "$@" 2>&1 || true; }
   echo
 
   echo "## 5. WARN / ERROR top 频次（最近 24h）"
+  echo
+  echo "_注：``Position avg_px mismatch`` 是 NT internal 与 OKX ``avgPx`` 的计价口径差_"
+  echo "_（OKX 摊销 funding fee/realizedPnL，NT cache 不摊销），M5 期内归类为_"
+  echo "_info-only，单独计数显示，不进 top 红灯榜单。M6 前可专项治理（用 OKX 的_"
+  echo "_``nonSettleAvgPx`` 字段对齐）。_"
+  echo
   echo '```'
-  run "journalctl -u okx-trade --since '24 hours ago' --no-pager | grep -E '\[(WARN|ERROR)\]' | sed -E 's/.*\[(WARN|ERROR)\][^:]*: //' | awk -F: '{print \$1}' | sort | uniq -c | sort -rn | head -15"
+  echo "# avg_px mismatch 单独计数（计价口径差，info-only）"
+  run "journalctl -u okx-trade --since '24 hours ago' --no-pager | grep -cE 'avg_px mismatch'"
+  echo
+  echo "# WARN/ERROR top 15（已剔除 avg_px mismatch）"
+  run "journalctl -u okx-trade --since '24 hours ago' --no-pager | grep -E '\[(WARN|ERROR)\]' | grep -v 'avg_px mismatch' | sed -E 's/.*\[(WARN|ERROR)\][^:]*: //' | awk -F: '{print \$1}' | sort | uniq -c | sort -rn | head -15"
   echo '```'
   echo
 

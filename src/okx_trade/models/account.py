@@ -51,6 +51,12 @@ class Position(OKXModel):
     lever: Decimal = Decimal("1")
     liq_px: Decimal = Field(alias="liqPx", default=Decimal("0"))
     margin: Decimal = Decimal("0")
+    # OKX 持仓 ID（long_short 模式下同 inst 的 long/short 各自唯一；net 模式下 inst 唯一）。
+    # 之前 ``OKXModel.extra="ignore"`` 把这个字段静默吞了，导致 adapter 构造
+    # ``PositionStatusReport`` 时拿不到稳定 venue_position_id —— NT 1.226 reconcile
+    # 阶段会 fallback 到 ``{instrument}-EXTERNAL`` 占位 ID，与 NT 内部 order-driven
+    # 的 ``P-...`` 序列对不上，触发 "Incorrect position ID" / "Residual Position" WARN。
+    pos_id: str = Field(alias="posId", default="")
     ts: int = 0
 
     @property
