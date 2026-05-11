@@ -42,9 +42,12 @@ from okx_trade.adapter.constants import OKX_VENUE  # noqa: E402
 from okx_trade.adapter.parsing import make_bar_type, parse_okx_instrument  # noqa: E402
 from okx_trade.backtest import (  # noqa: E402
     bars_to_nt_bars,
-    download_historical_bars,
     build_okx_venue_config,
+    download_historical_bars,
+    extract_equity_curve,
+    plot_equity_curve_html,
     run_backtest,
+    run_backtest_with_node,
     write_bars_to_catalog,
 )
 from okx_trade.backtest.data_loader import prepare_backtest_catalog  # noqa: E402
@@ -78,6 +81,10 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--catalog", default="./data", help="ParquetDataCatalog 路径")
     p.add_argument("--reuse-data", action="store_true",
                    help="复用 catalog 已有数据，跳过下载")
+    p.add_argument("--plot", default=None,
+                   help="保存净值曲线 HTML 到指定路径（plotly 交互图，缺省不绘图）")
+    p.add_argument("--equity-csv", default=None,
+                   help="同时导出 equity DataFrame 为 CSV（调试用，可选）")
     return p.parse_args()
 
 
@@ -86,6 +93,48 @@ async def _resolve_instrument(client: OKXRestClient, inst_id: str):
     inst_type = InstType.SWAP if inst_id.endswith("-SWAP") else InstType.SPOT
     okx_inst = await client.public.get_instrument(inst_type, inst_id)
     return parse_okx_instrument(okx_inst, ts_init=0)
+
+
+def _run_and_maybe_plot(
+    args: argparse.Namespace,
+    *,
+    venue,
+    data,
+    strategies,
+    plot_title: str,
+):
+    """跑回测；若 ``--plot`` / ``--equity-csv`` 任一启用，抓 node 抽 equity，输出对应文件。"""
+    if args.plot or args.equity_csv:
+        summary, node = run_backtest_with_node(
+            venue=venue, data=data, strategies=strategies,
+        )
+        equity = extract_equity_curve(node, OKX_VENUE)
+        if equity.empty:
+            print("[plot] 警告：账户事件为空，跳过绘图/导出 CSV")
+        else:
+            if args.equity_csv:
+                out_csv = Path(args.equity_csv).resolve()
+                out_csv.parent.mkdir(parents=True, exist_ok=True)
+                equity.to_csv(out_csv)
+                print(f"[plot] equity CSV → {out_csv}")
+            if args.plot:
+                subtitle = (
+                    f"PnL {summary.pnl_pct:+.2%} | "
+                    f"Sharpe {summary.sharpe_ratio:.2f} | "
+                    f"maxDD {summary.max_drawdown_pct:.2%} | "
+                    f"win {summary.win_rate:.1%} | "
+                    f"orders {summary.total_orders}"
+                )
+                out_html = plot_equity_curve_html(
+                    equity,
+                    output_path=args.plot,
+                    title=plot_title,
+                    starting_balance=args.equity,
+                    subtitle=subtitle,
+                )
+                print(f"[plot] equity HTML → {out_html}")
+        return summary
+    return run_backtest(venue=venue, data=data, strategies=strategies)
 
 
 # ---------------------------------------------------------------------------
@@ -159,10 +208,12 @@ async def _run_range_breakout(args: argparse.Namespace) -> None:
     )
 
     print("[3/3] running backtest...")
-    summary = run_backtest(
+    summary = _run_and_maybe_plot(
+        args,
         venue=venue,
         data=data_configs,
         strategies=[strategy_config],
+        plot_title=f"range_breakout — {args.symbol}",
     )
     print("\n=== RESULT ===")
     print(summary)
@@ -243,10 +294,12 @@ async def _run_xs_momentum(args: argparse.Namespace) -> None:
 
     print(f"        universe={len(nt_instrument_ids)} top_n={top_n} bot_n={bot_n}")
     print("[3/3] running backtest...")
-    summary = run_backtest(
+    summary = _run_and_maybe_plot(
+        args,
         venue=venue,
         data=data_configs,
         strategies=[strategy_config],
+        plot_title=f"xs_momentum — {','.join(inst_id_list)}",
     )
     print("\n=== RESULT ===")
     print(summary)

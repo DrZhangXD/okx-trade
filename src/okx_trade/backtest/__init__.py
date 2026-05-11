@@ -24,10 +24,15 @@ from .data_loader import (
     write_bars_to_catalog,
     write_instrument_to_catalog,
 )
+from .plotting import (
+    extract_equity_curve,
+    plot_equity_curve_html,
+)
 from .runner import (
     BacktestSummary,
     build_okx_venue_config,
     run_backtest,
+    run_backtest_with_node,
 )
 
 __all__ = [
@@ -40,4 +45,8 @@ __all__ = [
     "BacktestSummary",
     "build_okx_venue_config",
     "run_backtest",
+    "run_backtest_with_node",
+    # plotting
+    "extract_equity_curve",
+    "plot_equity_curve_html",
 ]

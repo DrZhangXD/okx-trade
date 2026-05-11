@@ -21,6 +21,7 @@ if TYPE_CHECKING:
         BacktestEngineConfig,
         BacktestVenueConfig,
     )
+    from nautilus_trader.backtest.node import BacktestNode
     from nautilus_trader.backtest.results import BacktestResult
     from nautilus_trader.config import ImportableStrategyConfig
 
@@ -97,6 +98,31 @@ def run_backtest(
         start / end: 回测时间范围（毫秒）。None → 用全部数据。
         engine_config: 自定义 engine 配置；默认仅设 trader_id + 关掉冗长 logging。
     """
+    summary, _node = run_backtest_with_node(
+        venue,
+        data=data,
+        strategies=strategies,
+        start=start,
+        end=end,
+        engine_config=engine_config,
+    )
+    return summary
+
+
+def run_backtest_with_node(
+    venue: BacktestVenueConfig,
+    *,
+    data: list[BacktestDataConfig],
+    strategies: list[ImportableStrategyConfig],
+    start: int | None = None,
+    end: int | None = None,
+    engine_config: BacktestEngineConfig | None = None,
+) -> tuple[BacktestSummary, BacktestNode]:
+    """与 :func:`run_backtest` 同逻辑，但额外返回 ``BacktestNode``，
+
+    用于跑完后从 ``node.get_engines()[0].trader.generate_account_report(venue)``
+    抽出账户余额时间序列（净值曲线）。
+    """
     from nautilus_trader.backtest.config import BacktestEngineConfig, BacktestRunConfig
     from nautilus_trader.backtest.node import BacktestNode
 
@@ -115,6 +141,7 @@ def run_backtest(
         engine=engine_config,
         start=start,
         end=end,
+        dispose_on_completion=False,  # 保留 engine，供事后抽 equity 曲线
     )
 
     node = BacktestNode(configs=[run_config])
@@ -122,7 +149,7 @@ def run_backtest(
     if not results:
         raise RuntimeError("BacktestNode.run() returned empty results")
 
-    return _summarize(results[0])
+    return _summarize(results[0]), node
 
 
 def _summarize(result: BacktestResult) -> BacktestSummary:
@@ -164,4 +191,5 @@ __all__ = [
     "BacktestSummary",
     "build_okx_venue_config",
     "run_backtest",
+    "run_backtest_with_node",
 ]
