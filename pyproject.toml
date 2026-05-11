@@ -40,6 +40,7 @@ strategy = [
   "scipy>=1.13",
   "pyarrow>=17.0",
   "pyyaml>=6.0",        # M4: configs/*.yaml + scripts/live.py
+  "plotly>=5.20",       # backtest equity curve HTML
 ]
 dev = [
   "pytest>=8.0",
