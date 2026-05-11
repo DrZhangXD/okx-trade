@@ -98,15 +98,24 @@ def get_rss_mb(pid: int) -> float | None:
 
 
 def pnl_age_minutes(db_path: Path) -> float | None:
-    """读 pnl.sqlite，取 trades + equities 的最大 ts_ms，换算成"距今多少分钟"。"""
+    """读 pnl.sqlite，取 trades + equities 的最大 ts_ms，换算成"距今多少分钟"。
+
+    过滤掉未来时间戳：曾经 XSMomentum 用 bar 边界（1D HKT close = UTC 16:00）当 ts_ms，
+    导致 MAX 永远是未来值，age 恒负，PNL_STALE 检查永远不触发。SQL 里就用
+    ``WHERE ts <= now_ms`` 排除。
+    """
     if not db_path.exists():
         return None
+    now_ms = int(time.time() * 1000)
     try:
         conn = sqlite3.connect(str(db_path))
         cur = conn.execute(
             "SELECT MAX(ts) FROM ("
-            "SELECT MAX(closed_ts_ms) AS ts FROM trades "
-            "UNION ALL SELECT MAX(ts_ms) AS ts FROM equities)"
+            "SELECT MAX(closed_ts_ms) AS ts FROM trades  WHERE closed_ts_ms <= ? "
+            "UNION ALL "
+            "SELECT MAX(ts_ms)        AS ts FROM equities WHERE ts_ms        <= ?"
+            ")",
+            (now_ms, now_ms),
         )
         row = cur.fetchone()
         conn.close()
@@ -115,7 +124,6 @@ def pnl_age_minutes(db_path: Path) -> float | None:
     if not row or row[0] is None:
         return None
     last_ms = int(row[0])
-    now_ms = int(time.time() * 1000)
     return (now_ms - last_ms) / 60_000.0
 
 
