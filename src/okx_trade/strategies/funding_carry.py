@@ -35,6 +35,7 @@ funding 费率。Funding 转负或回归正常时退出，把腿对冲平仓。
 from __future__ import annotations
 
 import asyncio
+import time
 from dataclasses import dataclass
 from decimal import Decimal
 from enum import Enum
@@ -288,13 +289,15 @@ if _NT_AVAILABLE:
                 equity_usdt = None
 
             if equity_usdt is not None:
+                # equity 用 wall-clock：bar ts_event 可能落在未来（长 bar 尤甚）。
+                now_ms = int(time.time() * 1000)
                 if handles.drawdown_tracker is not None:
-                    handles.drawdown_tracker.record_equity(ts_ms=ts_ms, equity=equity_usdt)
+                    handles.drawdown_tracker.record_equity(ts_ms=now_ms, equity=equity_usdt)
                 # M5: 每个 UTC 日写一条 equity snapshot 给 PnL tracker
                 self._last_equity_day = record_strategy_equity_daily(
                     self._pnl_tracker,
                     strategy_id=str(self.id),
-                    ts_ms=ts_ms,
+                    ts_ms=now_ms,
                     equity_usdt=equity_usdt,
                     last_day=self._last_equity_day,
                 )

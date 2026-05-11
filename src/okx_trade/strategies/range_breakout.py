@@ -24,6 +24,7 @@
 """
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import TYPE_CHECKING, Literal
@@ -374,13 +375,15 @@ if _NT_AVAILABLE:
                 equity_usdt = None  # 回测早期可能还没初始化，静默跳过
 
             if equity_usdt is not None:
+                # equity 用 wall-clock：snap.ts 是 1H signal_bar 收线时间，会落到未来。
+                now_ms = int(time.time() * 1000)
                 if handles.drawdown_tracker is not None:
-                    handles.drawdown_tracker.record_equity(ts_ms=snap.ts, equity=equity_usdt)
+                    handles.drawdown_tracker.record_equity(ts_ms=now_ms, equity=equity_usdt)
                 # M5: 每个 UTC 日写一条 equity snapshot 给 PnL tracker（喂 correlation）
                 self._last_equity_day = record_strategy_equity_daily(
                     self._pnl_tracker,
                     strategy_id=str(self.id),
-                    ts_ms=snap.ts,
+                    ts_ms=now_ms,
                     equity_usdt=equity_usdt,
                     last_day=self._last_equity_day,
                 )
