@@ -2,11 +2,14 @@
 from __future__ import annotations
 
 from collections import deque
+from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 
 from okx_trade.strategies.liq_reversal import (
     LiqEvent,
+    LiqReversalStrategy,
     liq_reversal_decision,
     liq_zscore,
     parse_okx_liq_frame,
@@ -175,3 +178,52 @@ class TestParseOKXLiqFrame:
         evs = parse_okx_liq_frame(frame)
         assert len(evs) == 1
         assert evs[0].sz_usd == 200.0
+
+
+class TestOnOrderRejected:
+    """覆盖 OrderRejected → 清幻仓状态，防止 51008 级联。
+
+    OKX 在 sCode=51008（margin / reduce-only 平了不存在的仓）拒单后，本策略
+    必须把 ``_active_direction`` 清空，否则下一根 bar 会拿幻仓状态再发 reduce-only
+    平仓单，再次被拒——直到下一轮 ENTER 信号才有机会修。
+    """
+
+    def _mock_strat(self, *, active_dir: str | None, contracts: float) -> object:
+        strat = MagicMock()
+        strat._active_direction = active_dir
+        strat._position_contracts = contracts
+        strat.log = MagicMock()
+        return strat
+
+    def test_clears_short_state_on_rejection(self) -> None:
+        strat = self._mock_strat(active_dir="short", contracts=0.76)
+        evt = SimpleNamespace(reason="sCode=51008: Insufficient USDT margin")
+        LiqReversalStrategy.on_order_rejected(strat, evt)
+        assert strat._active_direction is None
+        assert strat._position_contracts == 0.0
+        strat.log.warning.assert_called_once()
+
+    def test_clears_long_state_on_rejection(self) -> None:
+        strat = self._mock_strat(active_dir="long", contracts=0.5)
+        LiqReversalStrategy.on_order_rejected(
+            strat, SimpleNamespace(reason="anything"),
+        )
+        assert strat._active_direction is None
+        assert strat._position_contracts == 0.0
+
+    def test_idempotent_when_already_flat(self) -> None:
+        # 没有持仓时被拒（理论上不该发生）—— 不抛、不重复打 warn
+        strat = self._mock_strat(active_dir=None, contracts=0.0)
+        LiqReversalStrategy.on_order_rejected(
+            strat, SimpleNamespace(reason="x"),
+        )
+        assert strat._active_direction is None
+        assert strat._position_contracts == 0.0
+        strat.log.warning.assert_not_called()
+
+    def test_handles_missing_reason_attr(self) -> None:
+        # NT 不同版本的 event payload 略有差异——兜底用 getattr
+        strat = self._mock_strat(active_dir="short", contracts=0.3)
+        LiqReversalStrategy.on_order_rejected(strat, SimpleNamespace())
+        assert strat._active_direction is None
+        assert strat._position_contracts == 0.0

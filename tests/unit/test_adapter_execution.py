@@ -9,8 +9,12 @@ from decimal import Decimal
 
 import pytest
 
-from okx_trade.adapter.execution import _build_account_balances, resolve_td_mode
-from okx_trade.enums import TdMode
+from okx_trade.adapter.execution import (
+    _build_account_balances,
+    resolve_pos_side,
+    resolve_td_mode,
+)
+from okx_trade.enums import PosSide, Side, TdMode
 from okx_trade.models.account import Balance, BalanceDetail
 
 
@@ -29,6 +33,70 @@ class TestResolveTdMode:
         self, inst_id: str, default_mode: TdMode, expected: TdMode,
     ) -> None:
         assert resolve_td_mode(inst_id, default_mode) == expected
+
+
+class TestResolvePosSide:
+    """``posSide`` 由 (side, reduce_only, pos_side_mode, td_mode) 唯一决定。
+
+    Hedged 模式下，reduce-only 单的 ``posSide`` 等于被减仓位的方向（与 side 反向）。
+    早期实现忽略这一区分，hedged + reduce_only=True + 紧张保证金会触发 sCode=51008。
+    """
+
+    # net 模式 / 现货：永远不传 posSide
+    @pytest.mark.parametrize("side", [Side.BUY, Side.SELL])
+    @pytest.mark.parametrize("reduce_only", [True, False])
+    def test_net_mode_returns_none(self, side: Side, reduce_only: bool) -> None:
+        assert resolve_pos_side(
+            side, reduce_only=reduce_only,
+            pos_side_mode="net", td_mode=TdMode.CROSS,
+        ) is None
+
+    @pytest.mark.parametrize("side", [Side.BUY, Side.SELL])
+    @pytest.mark.parametrize("reduce_only", [True, False])
+    @pytest.mark.parametrize("pos_side_mode", ["net", "long_short"])
+    def test_cash_td_mode_returns_none(
+        self, side: Side, reduce_only: bool, pos_side_mode: str,
+    ) -> None:
+        assert resolve_pos_side(
+            side, reduce_only=reduce_only,
+            pos_side_mode=pos_side_mode, td_mode=TdMode.CASH,
+        ) is None
+
+    # hedged 开仓：posSide 与 side 同向
+    def test_hedged_open_long(self) -> None:
+        assert resolve_pos_side(
+            Side.BUY, reduce_only=False,
+            pos_side_mode="long_short", td_mode=TdMode.CROSS,
+        ) == PosSide.LONG
+
+    def test_hedged_open_short(self) -> None:
+        assert resolve_pos_side(
+            Side.SELL, reduce_only=False,
+            pos_side_mode="long_short", td_mode=TdMode.CROSS,
+        ) == PosSide.SHORT
+
+    # hedged 平仓：posSide 等于被减方向（与 side 反向）—— 修复 51008 cascade 的关键
+    def test_hedged_close_short_with_buy(self) -> None:
+        # BUY + reduce_only → 平 SHORT 仓 → posSide=SHORT（不是 LONG）
+        assert resolve_pos_side(
+            Side.BUY, reduce_only=True,
+            pos_side_mode="long_short", td_mode=TdMode.CROSS,
+        ) == PosSide.SHORT
+
+    def test_hedged_close_long_with_sell(self) -> None:
+        # SELL + reduce_only → 平 LONG 仓 → posSide=LONG（不是 SHORT）
+        assert resolve_pos_side(
+            Side.SELL, reduce_only=True,
+            pos_side_mode="long_short", td_mode=TdMode.CROSS,
+        ) == PosSide.LONG
+
+    # isolated margin 与 cross 行为一致
+    @pytest.mark.parametrize("td_mode", [TdMode.CROSS, TdMode.ISOLATED])
+    def test_hedged_close_isolated_or_cross(self, td_mode: TdMode) -> None:
+        assert resolve_pos_side(
+            Side.BUY, reduce_only=True,
+            pos_side_mode="long_short", td_mode=td_mode,
+        ) == PosSide.SHORT
 
 
 class TestBuildAccountBalances:

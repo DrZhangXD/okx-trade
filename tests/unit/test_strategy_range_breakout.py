@@ -1,10 +1,14 @@
 """``range_breakout`` 纯函数单测：与 scalp 同名实现对齐。"""
 from __future__ import annotations
 
+from types import SimpleNamespace
+from unittest.mock import MagicMock
+
 from okx_trade.strategies.base import BarSnapshot, position_contracts
 from okx_trade.strategies.range_breakout import (
     Range,
     RangeBreakoutLogic,
+    RangeBreakoutStrategy,
     detect_range_breakout_signal,
     last_completed_range,
 )
@@ -215,3 +219,38 @@ class TestPositionContracts:
         assert position_contracts(0, 0.01, 100, 99, 1, 1, 1) == 0.0
         assert position_contracts(1000, 0.01, 100, 100, 1, 1, 1) == 0.0  # 0 stop dist
         assert position_contracts(1000, 0.01, 100, 99, 0, 1, 1) == 0.0
+
+
+class TestOnOrderRejected:
+    """OrderRejected 清幻仓状态：防止 51008 级联（开仓被拒后下一根 bar 又
+    拿幻仓 reduce-only 平仓，又被拒）。"""
+
+    def _mock_strat(self, *, active_signal: object | None, contracts: float) -> object:
+        strat = MagicMock()
+        strat._active_signal = active_signal
+        strat._position_contracts = contracts
+        strat.log = MagicMock()
+        return strat
+
+    def test_clears_state_on_rejection(self) -> None:
+        sig = SimpleNamespace(direction="short")
+        strat = self._mock_strat(active_signal=sig, contracts=0.76)
+        evt = SimpleNamespace(reason="sCode=51008: Insufficient USDT margin")
+        RangeBreakoutStrategy.on_order_rejected(strat, evt)
+        assert strat._active_signal is None
+        assert strat._position_contracts == 0.0
+        strat.log.warning.assert_called_once()
+
+    def test_idempotent_when_already_flat(self) -> None:
+        strat = self._mock_strat(active_signal=None, contracts=0.0)
+        RangeBreakoutStrategy.on_order_rejected(
+            strat, SimpleNamespace(reason="x"),
+        )
+        strat.log.warning.assert_not_called()
+
+    def test_handles_missing_reason_attr(self) -> None:
+        sig = SimpleNamespace(direction="long")
+        strat = self._mock_strat(active_signal=sig, contracts=0.3)
+        RangeBreakoutStrategy.on_order_rejected(strat, SimpleNamespace())
+        assert strat._active_signal is None
+        assert strat._position_contracts == 0.0

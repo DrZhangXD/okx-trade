@@ -586,6 +586,28 @@ if _NT_AVAILABLE:
             self._position_contracts = 0.0
 
         # ------------------------------------------------------------------
+        # Event hooks
+        # ------------------------------------------------------------------
+
+        def on_order_rejected(self, event) -> None:  # noqa: ANN001
+            # 本策略 set ``_active_direction`` 是在 ``submit_order`` 之后立即写的，
+            # 没等 OrderAccepted 确认。任一阶段（开 / 平）被 OKX 拒，本地都会留下
+            # 与 venue 不一致的"幻仓"状态，下一根 bar 又会拿幻仓去 reduce-only
+            # 平仓，再次被 51008 拒——形成级联。被拒即清状态：
+            # - 拒的是开仓：本来就没开成，清状态后下次信号重新尝试；
+            # - 拒的是平仓：OKX 上没对应仓位（51008 with reduce_only=true 的含义），
+            #   说明本地状态早就漂了，清掉避免无限重试。
+            if self._active_direction is None and self._position_contracts == 0.0:
+                return
+            self.log.warning(
+                f"order rejected; clearing phantom state "
+                f"(was active={self._active_direction} qty={self._position_contracts}): "
+                f"{getattr(event, 'reason', '?')}"
+            )
+            self._active_direction = None
+            self._position_contracts = 0.0
+
+        # ------------------------------------------------------------------
         # Background WS task
         # ------------------------------------------------------------------
 

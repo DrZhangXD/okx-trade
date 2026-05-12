@@ -537,6 +537,23 @@ if _NT_AVAILABLE:
             self._active_signal = None
             self._position_contracts = 0.0
 
+        def on_order_rejected(self, event) -> None:  # noqa: ANN001
+            # ``_enter_position`` 在 ``submit_order`` 之后立即写 ``_active_signal``，
+            # 没等 OrderAccepted 确认。一旦被 OKX 拒，本地会留下与 venue 不一致的
+            # 幻仓状态，下一根 bar 拿幻仓 reduce-only 平仓时再被 51008 拒——形成级联。
+            # 被拒即清状态：开仓被拒说明仓没开成；平仓被拒（reduce_only=true → OKX
+            # 51008）说明本地状态早漂了，清掉避免无限重试。
+            if self._active_signal is None and self._position_contracts == 0.0:
+                return
+            self.log.warning(
+                f"order rejected; clearing phantom state "
+                f"(was active={self._active_signal is not None} "
+                f"qty={self._position_contracts}): "
+                f"{getattr(event, 'reason', '?')}"
+            )
+            self._active_signal = None
+            self._position_contracts = 0.0
+
 else:  # pragma: no cover —— [strategy] extra 未装：留 stub 让 import 不炸
     class RangeBreakoutConfig:  # type: ignore[no-redef]
         pass

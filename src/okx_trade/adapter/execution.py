@@ -160,6 +160,40 @@ def resolve_td_mode(inst_id: str, default_mode: TdMode) -> TdMode:
     return TdMode.CASH
 
 
+def resolve_pos_side(
+    side: Side,
+    *,
+    reduce_only: bool,
+    pos_side_mode: str,
+    td_mode: TdMode,
+) -> PosSide | None:
+    """计算下单时要发给 OKX 的 ``posSide``。
+
+    OKX hedged 模式（``long_short``）下，``posSide`` 必须和持仓方向匹配：
+
+    - **开多**：``side=BUY``, ``posSide=LONG``
+    - **平多**：``side=SELL``, ``posSide=LONG``  ← reduce-only 时方向不翻
+    - **开空**：``side=SELL``, ``posSide=SHORT``
+    - **平空**：``side=BUY``, ``posSide=SHORT``  ← reduce-only 时方向不翻
+
+    即 reduce-only 单的 ``posSide`` 等于被减仓位的方向（和 side 反向），不是
+    side 推出来的"开仓方向"。早期实现用过 ``posSide = LONG if BUY else SHORT``
+    的简化，在保证金充裕时 OKX 会容错（reduceOnly=true 时按持仓 net 掉），
+    但保证金紧张时 OKX 会先按 "open long" 校验，触发 sCode=51008 拒单。
+
+    Net 模式与现货账户：``posSide`` 不传（OKX 要求 net mode 不带这个字段）。
+    """
+    if td_mode == TdMode.CASH:
+        return None
+    if pos_side_mode != "long_short":
+        return None
+    if reduce_only:
+        # 平仓单：posSide 等于被减仓位方向（与 side 反向）
+        return PosSide.SHORT if side == Side.BUY else PosSide.LONG
+    # 开仓单：posSide 与 side 同向
+    return PosSide.LONG if side == Side.BUY else PosSide.SHORT
+
+
 class OKXLiveExecutionClient(LiveExecutionClient):
     """OKX 执行客户端。
 
@@ -298,16 +332,19 @@ class OKXLiveExecutionClient(LiveExecutionClient):
         # 价格：限价单才有 price；市价单 None
         px = str(order.price) if order.has_price else None
 
-        # posSide：OKX 双向持仓模式才传，net 模式不传；现货账户永远不传
-        pos_side: PosSide | None = None
-        if td_mode != TdMode.CASH and self._pos_side_mode == "long_short":
-            # 简化：买就是开多，卖就是开空（不区分平仓）
-            pos_side = PosSide.LONG if side == Side.BUY else PosSide.SHORT
-
-        # 现货也不支持 reduceOnly（OKX 会报参数错）
+        # reduceOnly：现货不支持（OKX 会报参数错）
+        is_reduce_only = bool(getattr(order, "is_reduce_only", False))
         reduce_only_val: bool | None = None
         if td_mode != TdMode.CASH:
-            reduce_only_val = getattr(order, "is_reduce_only", False) or None
+            reduce_only_val = is_reduce_only or None
+
+        # posSide：hedged 模式下，开 / 平仓的 posSide 不同（见 resolve_pos_side docstring）
+        pos_side = resolve_pos_side(
+            side,
+            reduce_only=is_reduce_only,
+            pos_side_mode=self._pos_side_mode,
+            td_mode=td_mode,
+        )
 
         return OrderRequest(
             inst_id=inst_id,
