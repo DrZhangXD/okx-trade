@@ -222,3 +222,68 @@ def test_emit_service_started_swallows_sink_exceptions() -> None:
     mon = LiveMonitor({"s1": handles}, [BoomSink()], clock=lambda: 1000)
     # 不应 raise（fan_out 内部已捕获 + run() 入口又包了一层 try）
     mon._emit_service_started()
+
+
+# ---------------------------------------------------------------------------
+# Heartbeat（healthcheck 读取的存活信号）
+# ---------------------------------------------------------------------------
+def test_heartbeat_written_with_clock_ms(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """``_write_heartbeat`` 应把 ``clock()`` 返回的 ms 原子写入指定文件。"""
+    cfg = RiskConfig(enable_kelly=True)
+    _, handles = build_risk_manager(cfg)
+    hb = tmp_path / "heartbeat.ts"
+    mon = LiveMonitor(
+        {"s1": handles}, [],
+        clock=lambda: 1_700_000_000_000,
+        heartbeat_path=hb,
+    )
+    mon._write_heartbeat()
+    assert hb.exists()
+    assert hb.read_text().strip() == "1700000000000"
+
+
+def test_heartbeat_creates_parent_dir(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """构造时 heartbeat 文件父目录不存在 → 应自动 mkdir。"""
+    cfg = RiskConfig(enable_kelly=True)
+    _, handles = build_risk_manager(cfg)
+    hb = tmp_path / "newdir" / "heartbeat.ts"
+    mon = LiveMonitor(
+        {"s1": handles}, [],
+        clock=lambda: 1234,
+        heartbeat_path=hb,
+    )
+    assert hb.parent.exists()
+    mon._write_heartbeat()
+    assert hb.read_text().strip() == "1234"
+
+
+def test_heartbeat_disabled_when_path_none(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """``heartbeat_path=None`` 视为关闭；``_write_heartbeat`` no-op。"""
+    cfg = RiskConfig(enable_kelly=True)
+    _, handles = build_risk_manager(cfg)
+    mon = LiveMonitor(
+        {"s1": handles}, [],
+        clock=lambda: 1234,
+        heartbeat_path=None,
+    )
+    mon._write_heartbeat()  # 不应 raise，也不应写任何文件
+    assert mon.heartbeat_path is None
+
+
+def test_heartbeat_overwrites_on_repeat_call(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """连续两次 ``_write_heartbeat`` 应原子覆盖，文件只剩最新值。"""
+    cfg = RiskConfig(enable_kelly=True)
+    _, handles = build_risk_manager(cfg)
+    hb = tmp_path / "heartbeat.ts"
+    ticks = iter([1000, 2000, 3000])
+    mon = LiveMonitor(
+        {"s1": handles}, [],
+        clock=lambda: next(ticks),
+        heartbeat_path=hb,
+    )
+    mon._write_heartbeat()
+    mon._write_heartbeat()
+    mon._write_heartbeat()
+    assert hb.read_text().strip() == "3000"
+    # 临时文件不应残留
+    assert not (tmp_path / "heartbeat.ts.tmp").exists()

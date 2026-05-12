@@ -2,9 +2,17 @@
 
 检查 4 件事，任一失败 → exit 非 0 + 打印诊断：
 1. ``scripts/live.py`` 进程在跑（pgrep）；
-2. ``var/pnl.sqlite`` 在最近 ``--max-stale-mins`` 内被写过（说明 strategies 还在喂 equity）；
+2. ``var/heartbeat.ts`` 在最近 ``--max-stale-mins`` 内被刷过（说明 LiveMonitor 还在跑 poll
+   loop，间接证明 NT TradingNode + strategies 没卡死）；
 3. ``var/alerts.jsonl`` 没有新出现的 CRITICAL alert（drawdown 触发 → 应人工 review）；
 4. NT 进程的 RSS < ``--max-rss-mb``（防内存泄漏）。
+
+历史
+----
+原本 #2 检查 ``var/pnl.sqlite`` 的 MAX(ts_ms)；但 ``record_strategy_equity_daily``
+设计上每个 UTC 日只写一条，正常情况下 30 min 阈值会误报 stale。改成由 LiveMonitor
+每 ``poll_interval_s`` 刷一次 heartbeat 文件，作为真正的 wall-clock 心跳。
+``pnl_age_minutes`` 仍保留供诊断 CLI 使用。
 
 用法
 ----
@@ -18,7 +26,7 @@
 ------
 - ``0``：全部 OK
 - ``1``：进程没在跑
-- ``2``：PnL 写入太久没动（strategies 卡住）
+- ``2``：heartbeat 太久没刷（monitor poll loop 卡了；可能是 NT 主线程卡死）
 - ``3``：发现新 CRITICAL alert（人工 review 必要）
 - ``4``：内存超限
 - ``5``：内部检查异常（命令缺失等）
@@ -37,7 +45,8 @@ from pathlib import Path
 
 EXIT_OK = 0
 EXIT_PROCESS_DOWN = 1
-EXIT_PNL_STALE = 2
+EXIT_HEARTBEAT_STALE = 2  # 原 EXIT_PNL_STALE，语义已迁移到 heartbeat
+EXIT_PNL_STALE = EXIT_HEARTBEAT_STALE  # 向后兼容别名，外部脚本可能引用
 EXIT_CRITICAL_ALERT = 3
 EXIT_MEM_OVER = 4
 EXIT_INTERNAL = 5
@@ -97,6 +106,24 @@ def get_rss_mb(pid: int) -> float | None:
     return None
 
 
+def heartbeat_age_minutes(path: Path) -> float | None:
+    """读 ``var/heartbeat.ts``（LiveMonitor 每 poll 写一次的 wall-clock ms），
+    返回距今多少分钟。文件不存在或内容无效 → ``None``（main 走 cold-start WARN）。
+    """
+    if not path.exists():
+        return None
+    try:
+        content = path.read_text().strip()
+        last_ms = int(content)
+    except (OSError, ValueError):
+        return None
+    now_ms = int(time.time() * 1000)
+    age = (now_ms - last_ms) / 60_000.0
+    # heartbeat 文件里写的是 wall-clock ms；若内容时间在未来（时钟回拨等），
+    # 当作 0 分钟前——freshness 检查不应被未来值误判。
+    return max(0.0, age)
+
+
 def pnl_age_minutes(db_path: Path) -> float | None:
     """读 pnl.sqlite，取 trades + equities 的最大 ts_ms，换算成"距今多少分钟"。
 
@@ -151,7 +178,7 @@ def main() -> int:
     p.add_argument("--var-dir", default="var",
                    help="var directory containing pnl.sqlite + alerts.jsonl")
     p.add_argument("--max-stale-mins", type=float, default=30.0,
-                   help="PnL last-write 超过此分钟数视为卡住")
+                   help="heartbeat last-write 超过此分钟数视为 monitor 卡住")
     p.add_argument("--max-rss-mb", type=float, default=2000.0,
                    help="进程 RSS 超过此 MB 视为内存泄漏")
     p.add_argument("--critical-since-mins", type=float, default=10.0,
@@ -163,8 +190,9 @@ def main() -> int:
     args = p.parse_args()
 
     var_dir = Path(args.var_dir)
-    pnl_db = var_dir / "pnl.sqlite"
+    pnl_db = var_dir / "pnl.sqlite"  # 仅供诊断；不在主流程使用
     alerts_jsonl = var_dir / "alerts.jsonl"
+    heartbeat_file = var_dir / "heartbeat.ts"
 
     def say(msg: str) -> None:
         if not args.quiet:
@@ -185,19 +213,19 @@ def main() -> int:
             return EXIT_MEM_OVER
         say(f"OK: RSS={rss:.0f}MB (limit {args.max_rss_mb:.0f}MB)")
 
-    # 3) PnL freshness
-    age = pnl_age_minutes(pnl_db)
+    # 3) Heartbeat freshness（LiveMonitor 每 poll_interval_s 刷一次 var/heartbeat.ts）
+    age = heartbeat_age_minutes(heartbeat_file)
     if age is None:
-        # 启动初期可能还没写过；只警告，不挂
-        say("WARN: pnl.sqlite has no trades/equities yet (cold start?)")
+        # 启动初期 monitor 还没第一次刷；30s-1min 内常见，仅 WARN 不挂
+        say(f"WARN: {heartbeat_file} missing or unreadable (cold start?)")
     elif age > args.max_stale_mins:
         say(
-            f"FAIL[{EXIT_PNL_STALE}]: last PnL write was {age:.1f} min ago "
-            f"(>{args.max_stale_mins:.0f} min)"
+            f"FAIL[{EXIT_HEARTBEAT_STALE}]: heartbeat was {age:.1f} min ago "
+            f"(>{args.max_stale_mins:.0f} min) — monitor poll loop stuck?"
         )
-        return EXIT_PNL_STALE
+        return EXIT_HEARTBEAT_STALE
     else:
-        say(f"OK: last PnL write {age:.1f} min ago")
+        say(f"OK: heartbeat {age:.1f} min ago")
 
     # 4) Recent CRITICAL alerts
     since_ms = int((time.time() - args.critical_since_mins * 60) * 1000)

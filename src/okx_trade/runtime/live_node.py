@@ -250,6 +250,7 @@ def build_live_context(
         handles_map, sinks,
         poll_interval_s=int(monitor_cfg.get("poll_interval_s", 60)),
         thresholds=_build_thresholds(live_cfg.get("alerts", {}) or {}),
+        heartbeat_path=monitor_cfg.get("heartbeat_path", "var/heartbeat.ts"),
     ) if handles_map else None
 
     reporter = DailyReporter(

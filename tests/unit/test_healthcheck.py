@@ -121,3 +121,45 @@ def test_pnl_age_uses_max_real_ts(tmp_path: Path) -> None:
 
 def test_pnl_age_returns_none_when_db_missing(tmp_path: Path) -> None:
     assert hc.pnl_age_minutes(tmp_path / "nope.sqlite") is None
+
+
+# ---------------------------------------------------------------------------
+# heartbeat_age_minutes：新的主活信号
+# ---------------------------------------------------------------------------
+def test_heartbeat_age_fresh(tmp_path: Path) -> None:
+    """30s 前刚写过的 heartbeat 应返回 ≈0.5 min。"""
+    hb = tmp_path / "heartbeat.ts"
+    thirty_s_ago = int(time.time() * 1000) - 30_000
+    hb.write_text(str(thirty_s_ago))
+    age = hc.heartbeat_age_minutes(hb)
+    assert age is not None
+    assert age == pytest.approx(0.5, abs=0.2)
+
+
+def test_heartbeat_age_stale(tmp_path: Path) -> None:
+    """1h 前的 heartbeat 应返回 ≈60 min。"""
+    hb = tmp_path / "heartbeat.ts"
+    one_hour_ago = int(time.time() * 1000) - 3600_000
+    hb.write_text(str(one_hour_ago))
+    age = hc.heartbeat_age_minutes(hb)
+    assert age is not None
+    assert age == pytest.approx(60.0, abs=0.5)
+
+
+def test_heartbeat_age_returns_none_when_missing(tmp_path: Path) -> None:
+    assert hc.heartbeat_age_minutes(tmp_path / "nope.ts") is None
+
+
+def test_heartbeat_age_returns_none_when_garbage(tmp_path: Path) -> None:
+    hb = tmp_path / "heartbeat.ts"
+    hb.write_text("not-a-number")
+    assert hc.heartbeat_age_minutes(hb) is None
+
+
+def test_heartbeat_age_clamps_negative_to_zero(tmp_path: Path) -> None:
+    """heartbeat 内容若是未来 ms（时钟回拨等），age 应被夹到 0 而非负数。"""
+    hb = tmp_path / "heartbeat.ts"
+    future = int(time.time() * 1000) + 10 * 60_000
+    hb.write_text(str(future))
+    age = hc.heartbeat_age_minutes(hb)
+    assert age == 0.0

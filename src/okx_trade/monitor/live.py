@@ -19,8 +19,11 @@
 from __future__ import annotations
 
 import asyncio
+import os
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 
 from ..risk import DrawdownState
 from ..risk.integration import RiskHandles
@@ -55,6 +58,9 @@ class LiveMonitor:
         poll_interval_s: 轮询间隔。默认 60s。
         thresholds: 触发参数；默认见 ``MonitorThresholds``。
         clock: ``() -> ms`` 时钟函数，方便测试 freeze；默认 ``time.time_ns()/1e6``。
+        heartbeat_path: 每次 poll 后写入当前 ms 的 heartbeat 文件路径；
+            外部 healthcheck 据此判活。``None`` → 关闭 heartbeat（仅测试用）。
+            默认 ``var/heartbeat.ts``。
     """
 
     def __init__(
@@ -65,6 +71,7 @@ class LiveMonitor:
         poll_interval_s: int = 60,
         thresholds: MonitorThresholds | None = None,
         clock: Callable[[], int] | None = None,
+        heartbeat_path: str | Path | None = "var/heartbeat.ts",
     ) -> None:
         self.handles_by_strategy = handles_by_strategy
         self.sinks = sinks
@@ -74,19 +81,39 @@ class LiveMonitor:
             sid: _StrategySnapshot() for sid in handles_by_strategy
         }
         if clock is None:
-            import time
             self._clock: Callable[[], int] = lambda: int(time.time_ns() / 1_000_000)
         else:
             self._clock = clock
         self._stopped = asyncio.Event()
+        self.heartbeat_path: Path | None = (
+            Path(heartbeat_path) if heartbeat_path is not None else None
+        )
+        if self.heartbeat_path is not None:
+            self.heartbeat_path.parent.mkdir(parents=True, exist_ok=True)
 
     def stop(self) -> None:
         self._stopped.set()
 
+    def _write_heartbeat(self) -> None:
+        """把当前 wall-clock ms 原子写入 heartbeat 文件。
+
+        外部 ``scripts/healthcheck.py`` 据此判 monitor / strategies 是否还活着。
+        atomic write：写 ``<path>.tmp`` 再 ``os.replace`` 防 healthcheck 读到半截。
+        """
+        if self.heartbeat_path is None:
+            return
+        try:
+            now_ms = self._clock()
+            tmp = self.heartbeat_path.with_suffix(self.heartbeat_path.suffix + ".tmp")
+            tmp.write_text(str(now_ms))
+            os.replace(tmp, self.heartbeat_path)
+        except Exception:
+            # heartbeat 写失败不影响 monitor 主流程
+            pass
+
     def _emit_service_started(self) -> None:
         """启动入口 emit 一条 INFO，让 ``alerts.jsonl`` 在每次 systemd 拉起服务
         时都留痕，方便外部统计 NRestarts / 服务可用率。"""
-        import os
         alert = Alert(
             severity=AlertSeverity.INFO,
             source="service",
@@ -112,12 +139,16 @@ class LiveMonitor:
             self._emit_service_started()
         except Exception:
             pass
+        # 启动即写一次 heartbeat，避免冷启动 30s 窗口内 healthcheck 误报
+        self._write_heartbeat()
         while not self._stopped.is_set():
             try:
                 self.poll_once()
             except Exception:
                 # 监控自己挂掉不能影响主流程
                 pass
+            # poll 成功（或被异常吞掉但 monitor task 仍在跑）→ 刷 heartbeat
+            self._write_heartbeat()
             try:
                 await asyncio.wait_for(
                     self._stopped.wait(), timeout=self.poll_interval_s,
