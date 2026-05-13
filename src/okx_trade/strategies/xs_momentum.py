@@ -66,6 +66,54 @@ def momentum_score(closes: list[float], lookback_days: int = 7) -> float | None:
     return last / base - 1.0
 
 
+def apply_inst_count_cap(
+    longs: list[str],
+    shorts: list[str],
+    *,
+    cap: int,
+    top_n: int,
+    bot_n: int,
+) -> tuple[list[str], list[str]]:
+    """按 ``top_n : bot_n`` 比例把 ``(longs, shorts)`` 裁到总数 ≤ ``cap``。
+
+    场景:demo 账户保证金有限,XSMomentum 一次 rebalance 同时下 10 单会撑爆
+    其他策略的开仓 margin。给出 ``cap`` 后只保留各自评分最好的若干个。
+
+    Args:
+        longs: ``cross_section_rank`` 返回的多腿,**按 score 降序**,``longs[0]`` 最佳。
+        shorts: 空腿,**按 score 升序**(最弱在前),``shorts[0]`` 最佳。
+        cap: 多 + 空总数上限。
+        top_n / bot_n: 原始名额,用于按比例分配 cap。
+
+    Returns:
+        裁剪后的 ``(longs, shorts)``。``cap >= len(longs) + len(shorts)`` 时不动。
+
+    边界:
+    - ``cap <= 0`` → 都清空。
+    - ``top_n + bot_n == 0`` → 都清空(无法按比例)。
+    - 单边 ``top_n = 0`` 或 ``bot_n = 0`` → 全部 cap 给非零那边。
+    """
+    if cap <= 0 or (top_n + bot_n) == 0:
+        return [], []
+    if cap >= len(longs) + len(shorts):
+        return longs, shorts
+    # 按比例分配,longs 用 round (banker's rounding) 然后让 shorts 补齐总数
+    max_long = round(cap * top_n / (top_n + bot_n))
+    # 单边名额为 0 时强制把 cap 全给非零边
+    if top_n == 0:
+        max_long = 0
+    elif bot_n == 0:
+        max_long = cap
+    max_long = min(max_long, len(longs))
+    max_short = min(cap - max_long, len(shorts))
+    # cap 没用满(一边不够)时,把余额还给另一边
+    leftover = cap - max_long - max_short
+    if leftover > 0:
+        max_long = min(max_long + leftover, len(longs))
+        max_short = min(cap - max_long, len(shorts))
+    return longs[:max_long], shorts[:max_short]
+
+
 def cross_section_rank(
     scores: dict[str, float],
     top_n: int = 5,
@@ -217,6 +265,8 @@ if _NT_AVAILABLE:
         lookback_days: int = 7
         top_n: int = 5
         bot_n: int = 5
+        max_inst_count: int | None = None  # 单次 rebalance 实际持仓 inst 数上限;
+                                            # None = 不限,等于 top_n + bot_n
         target_vol_annualized: float = 0.15
         vol_window: int = 20
         rebalance_hour_utc: int = 0
@@ -372,8 +422,15 @@ if _NT_AVAILABLE:
 
             # 2) cross-section rank
             longs, shorts = cross_section_rank(scores, top_n=cfg.top_n, bot_n=cfg.bot_n)
+            # 2a) demo / 小账户 margin 节流:把同时下单的 inst 数裁到 cap
+            if cfg.max_inst_count is not None:
+                longs, shorts = apply_inst_count_cap(
+                    longs, shorts,
+                    cap=cfg.max_inst_count, top_n=cfg.top_n, bot_n=cfg.bot_n,
+                )
             self.log.info(
-                f"rebalance {today} longs={longs} shorts={shorts}"
+                f"rebalance {today} longs={longs} shorts={shorts} "
+                f"cap={cfg.max_inst_count}"
             )
 
             # 3) 等权 + vol-managed → 每个腿的 contracts 张数
@@ -491,6 +548,7 @@ else:  # pragma: no cover —— [strategy] extra 未装
 __all__ = [
     "XSMomentumConfig",
     "XSMomentumStrategy",
+    "apply_inst_count_cap",
     "cross_section_rank",
     "momentum_score",
     "rebalance_orders",

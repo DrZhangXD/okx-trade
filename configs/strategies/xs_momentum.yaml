@@ -23,6 +23,9 @@ bar_type_template: "{inst}-1-DAY-LAST-EXTERNAL"
 lookback_days: 7              # 1-7 天动量
 top_n: 5                       # 多腿 5 个
 bot_n: 5                       # 空腿 5 个
+max_inst_count: 4              # demo margin 节流:每次 rebalance 最多 4 个 inst
+                                # (2 多 + 2 空),避免一次性 10 单冻结其他策略的开仓
+                                # margin。实盘大账户可调到 6-8 或设为 null 不限。
 target_vol_annualized: 0.15    # 目标年化 vol = 15%
 vol_window: 20
 rebalance_hour_utc: 0          # 每日 UTC 0 点 rebalance

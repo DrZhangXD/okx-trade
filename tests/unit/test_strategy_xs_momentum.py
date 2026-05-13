@@ -4,6 +4,7 @@ from __future__ import annotations
 import pytest
 
 from okx_trade.strategies.xs_momentum import (
+    apply_inst_count_cap,
     cross_section_rank,
     momentum_score,
     rebalance_orders,
@@ -152,3 +153,97 @@ class TestRebalanceOrders:
         )
         # A 的 delta=0.05 < 0.1 → 不下；B delta=1.0 → 下
         assert deltas == {"B": 1.0}
+
+
+# ---------------------------------------------------------------------------
+# apply_inst_count_cap —— demo margin 节流,把 (longs, shorts) 裁到 cap 总数
+# ---------------------------------------------------------------------------
+
+
+class TestApplyInstCountCap:
+    def test_proportional_5_5_to_4(self) -> None:
+        """top_n=bot_n=5, cap=4 → 2 long + 2 short(各保留前 2 最佳)。"""
+        longs = ["L1", "L2", "L3", "L4", "L5"]
+        shorts = ["S1", "S2", "S3", "S4", "S5"]
+        out_l, out_s = apply_inst_count_cap(
+            longs, shorts, cap=4, top_n=5, bot_n=5,
+        )
+        assert out_l == ["L1", "L2"]
+        assert out_s == ["S1", "S2"]
+
+    def test_uneven_3_5_to_4(self) -> None:
+        """top_n=3, bot_n=5, cap=4 → max_long=round(4*3/8)=2(银行舍入), short=2。"""
+        longs = ["L1", "L2", "L3"]
+        shorts = ["S1", "S2", "S3", "S4", "S5"]
+        out_l, out_s = apply_inst_count_cap(
+            longs, shorts, cap=4, top_n=3, bot_n=5,
+        )
+        # 注:Python round() 是银行舍入,round(1.5)=2 → max_long=2, max_short=2
+        assert len(out_l) + len(out_s) == 4
+        assert out_l[0] == "L1"  # 最佳保留
+        assert out_s[0] == "S1"
+
+    def test_cap_exceeds_total_returns_unchanged(self) -> None:
+        longs = ["L1", "L2"]
+        shorts = ["S1", "S2"]
+        out_l, out_s = apply_inst_count_cap(
+            longs, shorts, cap=10, top_n=5, bot_n=5,
+        )
+        assert out_l == longs
+        assert out_s == shorts
+
+    def test_zero_bot_n_gives_all_to_longs(self) -> None:
+        """bot_n=0(只多不空)时,cap 全给 longs。"""
+        longs = ["L1", "L2", "L3", "L4", "L5"]
+        out_l, out_s = apply_inst_count_cap(
+            longs, [], cap=3, top_n=5, bot_n=0,
+        )
+        assert out_l == ["L1", "L2", "L3"]
+        assert out_s == []
+
+    def test_zero_top_n_gives_all_to_shorts(self) -> None:
+        """top_n=0(只空不多)时,cap 全给 shorts。"""
+        shorts = ["S1", "S2", "S3", "S4", "S5"]
+        out_l, out_s = apply_inst_count_cap(
+            [], shorts, cap=3, top_n=0, bot_n=5,
+        )
+        assert out_l == []
+        assert out_s == ["S1", "S2", "S3"]
+
+    def test_cap_zero_returns_empty(self) -> None:
+        out_l, out_s = apply_inst_count_cap(
+            ["L1"], ["S1"], cap=0, top_n=5, bot_n=5,
+        )
+        assert out_l == [] and out_s == []
+
+    def test_leftover_redistribute_when_one_side_short(self) -> None:
+        """top_n=5/bot_n=5/cap=8 → 想要 4+4,但 shorts 只 1 个 → leftover=3 → longs=7。"""
+        longs = ["L1", "L2", "L3", "L4", "L5", "L6", "L7"]
+        shorts = ["S1"]
+        out_l, out_s = apply_inst_count_cap(
+            longs, shorts, cap=8, top_n=5, bot_n=5,
+        )
+        # cap=8 >= 7+1=8 → 不动 → 直接走 cap-exceeds 分支
+        assert out_l == longs and out_s == shorts
+
+    def test_leftover_redistribute_strict_cap(self) -> None:
+        """cap < total,某一边名额不够时余额还给另一边。"""
+        # top_n=5, bot_n=5, cap=6 → 期望 3+3;但 longs 只 2 个 → 余 1 给 shorts → 2+4
+        longs = ["L1", "L2"]
+        shorts = ["S1", "S2", "S3", "S4", "S5"]
+        out_l, out_s = apply_inst_count_cap(
+            longs, shorts, cap=6, top_n=5, bot_n=5,
+        )
+        assert len(out_l) + len(out_s) == 6
+        assert out_l == ["L1", "L2"]
+        assert out_s == ["S1", "S2", "S3", "S4"]
+
+    def test_preserves_order_keeps_best_picks(self) -> None:
+        """裁切是 list[:k],保留前 k 个;longs / shorts 顺序假设最佳在前。"""
+        longs = ["BEST_L", "MID_L", "WORST_L"]
+        shorts = ["BEST_S", "MID_S", "WORST_S"]
+        out_l, out_s = apply_inst_count_cap(
+            longs, shorts, cap=2, top_n=3, bot_n=3,
+        )
+        assert out_l == ["BEST_L"]
+        assert out_s == ["BEST_S"]
