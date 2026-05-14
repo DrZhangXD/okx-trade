@@ -11,6 +11,12 @@ Group=okxtrade
 WorkingDirectory=/home/okxtrade/okx-trade
 EnvironmentFile=/home/okxtrade/okx-trade/.env
 
+# Reconcile: 启动前用 reduce-only 市价单关掉所有 OKX 持仓,确保 strategies 从
+# 干净状态起步,避免 stale 仓位锁满 margin → 全 51008(2026-05 真实故障)。
+# 用 ``-`` 前缀使失败不阻塞 ExecStart(reconcile 自身 timeout / 网络抖动不应让
+# service 起不来);script 自带 --require-demo 默认 ON 防误平实盘。
+ExecStartPre=-/home/okxtrade/okx-trade/.venv/bin/python scripts/reconcile_okx_positions.py
+
 # Start: paper trading（NT TradingNode + 4 strategies + monitor）
 # Use the venv python explicitly to avoid PATH surprises.
 ExecStart=/home/okxtrade/okx-trade/.venv/bin/python scripts/live.py --run

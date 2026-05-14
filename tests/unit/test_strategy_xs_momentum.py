@@ -7,6 +7,7 @@ from okx_trade.strategies.xs_momentum import (
     apply_inst_count_cap,
     cross_section_rank,
     momentum_score,
+    plan_delta_orders,
     rebalance_orders,
     vol_managed_weight,
 )
@@ -247,3 +248,81 @@ class TestApplyInstCountCap:
         )
         assert out_l == ["BEST_L"]
         assert out_s == ["BEST_S"]
+
+
+# ---------------------------------------------------------------------------
+# plan_delta_orders —— 根据 current + delta 拆开/平/翻仓单 + 正确 reduce_only
+# 回归 2026-05 真实故障:_submit_delta 不传 reduce_only → OKX 把"平仓"当新开
+# → margin 累积全锁 → 全 51008。
+# ---------------------------------------------------------------------------
+
+
+class TestPlanDeltaOrders:
+    def test_open_from_flat_long(self) -> None:
+        """current=0, delta=+5 → 单一开多单,reduce_only=False。"""
+        out = plan_delta_orders(current=0.0, delta=5.0)
+        assert out == [(5.0, False)]
+
+    def test_open_from_flat_short(self) -> None:
+        """current=0, delta=-3 → 单一开空单,reduce_only=False。"""
+        out = plan_delta_orders(current=0.0, delta=-3.0)
+        assert out == [(-3.0, False)]
+
+    def test_add_to_long(self) -> None:
+        """current=+5, delta=+3 → 同向加仓,reduce_only=False。"""
+        out = plan_delta_orders(current=5.0, delta=3.0)
+        assert out == [(3.0, False)]
+
+    def test_add_to_short(self) -> None:
+        """current=-5, delta=-3 → 同向加仓,reduce_only=False。"""
+        out = plan_delta_orders(current=-5.0, delta=-3.0)
+        assert out == [(-3.0, False)]
+
+    def test_partial_reduce_long(self) -> None:
+        """current=+5, delta=-3 → 缩仓,reduce_only=True。"""
+        out = plan_delta_orders(current=5.0, delta=-3.0)
+        assert out == [(-3.0, True)]
+
+    def test_partial_reduce_short(self) -> None:
+        """current=-5, delta=+3 → 缩仓,reduce_only=True。"""
+        out = plan_delta_orders(current=-5.0, delta=3.0)
+        assert out == [(3.0, True)]
+
+    def test_close_to_flat_long(self) -> None:
+        """current=+5, delta=-5 → 全平到 0,reduce_only=True。"""
+        out = plan_delta_orders(current=5.0, delta=-5.0)
+        assert out == [(-5.0, True)]
+
+    def test_close_to_flat_short(self) -> None:
+        """current=-5, delta=+5 → 全平到 0,reduce_only=True。"""
+        out = plan_delta_orders(current=-5.0, delta=5.0)
+        assert out == [(5.0, True)]
+
+    def test_flip_long_to_short(self) -> None:
+        """current=+5, delta=-8 → 翻仓:先平 +5(reduce_only) 再开空 -3。"""
+        out = plan_delta_orders(current=5.0, delta=-8.0)
+        assert out == [(-5.0, True), (-3.0, False)]
+
+    def test_flip_short_to_long(self) -> None:
+        """current=-5, delta=+9 → 翻仓:先平 -5(reduce_only) 再开多 +4。"""
+        out = plan_delta_orders(current=-5.0, delta=9.0)
+        assert out == [(5.0, True), (4.0, False)]
+
+    def test_zero_delta_is_noop(self) -> None:
+        assert plan_delta_orders(current=5.0, delta=0.0) == []
+        assert plan_delta_orders(current=0.0, delta=0.0) == []
+
+    def test_qty_signs_preserved_for_orderside_resolution(self) -> None:
+        """所有返回 qty 的符号必须与 ORDER 方向一致(>0 BUY / <0 SELL),
+        上层 ``_submit_delta`` 据此选 ``OrderSide``。"""
+        # 翻仓中:close 的符号必须 BUY/SELL 平 current,open 的符号继续 delta 方向
+        out = plan_delta_orders(current=5.0, delta=-8.0)
+        close_q, _ = out[0]
+        open_q, _ = out[1]
+        # current 是 LONG +5,平仓必须 SELL → qty < 0
+        assert close_q < 0
+        # delta -8 = SELL,翻完后 open 继续 SELL → qty < 0
+        assert open_q < 0
+        # 镜像
+        out2 = plan_delta_orders(current=-5.0, delta=9.0)
+        assert out2[0][0] > 0 and out2[1][0] > 0  # 都是 BUY 方向

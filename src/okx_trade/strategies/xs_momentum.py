@@ -187,6 +187,45 @@ def vol_managed_weight(
     return sign * scaled_abs
 
 
+def plan_delta_orders(
+    current: float, delta: float,
+) -> list[tuple[float, bool]]:
+    """根据当前持仓 + delta 拆出 1-2 个市价单,每个标注 reduce_only。
+
+    OKX 在 hedged 模式下会按 ``posSide`` 判定开/平,而 ``posSide`` 又取决于
+    ``reduce_only`` 标志(见 ``adapter/execution.py:resolve_pos_side``)。
+    所以 XSMomentum 的 ``_submit_delta`` **必须正确标 reduce_only**,否则
+    "缩仓 / 平仓"会被 OKX 当成新开反向单,持续吃保证金直至全锁(2026-05 真实问题)。
+
+    Args:
+        current: 当前 net position(正=多,负=空,0=空仓)。
+        delta: 期望增量(正=买入,负=卖出),保持 ``target - current`` 的符号。
+
+    Returns:
+        ``[(qty_signed, reduce_only), ...]`` 列表:
+        - ``current == 0`` 或同向加仓 → 单一开仓单 ``[(delta, False)]``
+        - 反向且 ``|delta| <= |current|`` → 单一平 / 缩仓 ``[(delta, True)]``
+        - 反向且 ``|delta| > |current|`` → 翻仓 → 拆 2 单:
+          ``[(-current, True), (delta + current, False)]`` 先平到 0 再反向开
+        - ``delta == 0`` → 空列表(no-op)
+
+    每个 tuple 的 qty 保留原始符号(>0 buy / <0 sell),上层据此选 OrderSide。
+    """
+    if delta == 0.0:
+        return []
+    if current == 0.0 or (current > 0) == (delta > 0):
+        # 全新开仓 / 同向加仓
+        return [(delta, False)]
+    # 反向
+    if abs(delta) <= abs(current):
+        # 纯平 / 缩仓 —— qty 保留原始符号,reduce_only=True
+        return [(delta, True)]
+    # 翻仓:先把 current 平到 0,再反向开 (delta + current = 剩余 open 量)
+    close_qty = -current          # 与 current 反号,大小 = |current|
+    open_qty = delta - close_qty  # 仍与 delta 同号(反向开仓的方向)
+    return [(close_qty, True), (open_qty, False)]
+
+
 def rebalance_orders(
     current: dict[str, float],
     target: dict[str, float],
@@ -513,27 +552,33 @@ if _NT_AVAILABLE:
             return sign * adjusted
 
         def _submit_delta(self, inst_id_str: str, delta_contracts: float) -> None:
-            inst = self.cache.instrument(InstrumentId.from_str(inst_id_str))
+            inst_id = InstrumentId.from_str(inst_id_str)
+            inst = self.cache.instrument(inst_id)
             if inst is None:
                 self.log.warning(f"rebalance: instrument missing {inst_id_str}")
                 return
-            qty_obj = safe_make_qty(
-                inst, abs(delta_contracts), self.log, ctx=f"rebalance {inst_id_str}"
-            )
-            if qty_obj is None:
-                return
-            side = OrderSide.BUY if delta_contracts > 0 else OrderSide.SELL
-            order = self.order_factory.market(
-                instrument_id=InstrumentId.from_str(inst_id_str),
-                order_side=side,
-                quantity=qty_obj,
-                time_in_force=TimeInForce.IOC,
-            )
-            self.submit_order(order)
-            self.log.info(
-                f"rebalance order: {inst_id_str} delta={delta_contracts:+.4f} "
-                f"side={side.name}"
-            )
+            # 读 OKX-synced 的当前净仓,据此决定开 / 平 / 翻
+            current = float(self.portfolio.net_position(inst_id))
+            for qty_signed, reduce_only in plan_delta_orders(current, delta_contracts):
+                qty_obj = safe_make_qty(
+                    inst, abs(qty_signed), self.log, ctx=f"rebalance {inst_id_str}",
+                )
+                if qty_obj is None:
+                    continue
+                side = OrderSide.BUY if qty_signed > 0 else OrderSide.SELL
+                order = self.order_factory.market(
+                    instrument_id=inst_id,
+                    order_side=side,
+                    quantity=qty_obj,
+                    time_in_force=TimeInForce.IOC,
+                    reduce_only=reduce_only,
+                )
+                self.submit_order(order)
+                self.log.info(
+                    f"rebalance order: {inst_id_str} qty={qty_signed:+.4f} "
+                    f"side={side.name} reduce_only={reduce_only} "
+                    f"(current={current:+.4f}, delta={delta_contracts:+.4f})"
+                )
 
 else:  # pragma: no cover —— [strategy] extra 未装
 
@@ -551,6 +596,7 @@ __all__ = [
     "apply_inst_count_cap",
     "cross_section_rank",
     "momentum_score",
+    "plan_delta_orders",
     "rebalance_orders",
     "vol_managed_weight",
 ]
