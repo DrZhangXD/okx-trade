@@ -1,20 +1,24 @@
-"""启动前 reconcile:用 reduce-only 市价单清空 OKX 所有 open positions。
+"""启动前 reconcile:取消 pending 单 + 用 reduce-only 市价单清空所有 open positions。
 
 为什么需要这步
 -------------
 - okx-trade.service 重启会重置策略内部状态(`_active_direction` / `_target_contracts` /
-  `_position_contracts`),但 OKX 端的 stale 仓位不会消失。
-- NT 自带的 reconciliation 只同步 cache,不会主动平掉 orphan 仓位。
-- 历史教训(2026-05):demo 账户因 stale 仓位锁满 5209 USDT margin
-  → free=0 → 所有新单 51008 → 整个系统瘫痪。手动平仓只治标。
+  `_position_contracts`),但 OKX 端的 stale 仓位 / pending 单不会消失。
+- NT 自带的 reconciliation 只同步 cache,不会主动平掉 orphan 仓位、也不会取消遗留
+  pending 单。后者会让 NT 启动时把"已 ACCEPTED 未成交"的旧单识别成幻仓,触发
+  XSMomentum 等策略在下次 rebalance 时发 reduce-only 单 → OKX 返 sCode=51169。
+- 历史教训(2026-05):demo 账户因 stale 仓位锁满 5209 USDT margin → free=0 →
+  所有新单 51008 → 系统瘫痪。手动平仓只治标。
 
-行为
-----
-1. 读 ``OKXSettings``(env / .env)。
-2. ``GET /api/v5/account/positions`` 列出所有持仓。
-3. 对每个 ``is_open=True`` 的 position,调 ``POST /api/v5/trade/close-position``
-   走 OKX 内置的市价平仓 API(reduce-only 语义、自动选 posSide)。
-4. 退出码:
+行为(顺序很重要)
+-----------------
+1. ``GET /api/v5/trade/orders-pending``:列出所有还在 live / partially_filled 状态
+   的单,逐个 ``POST /api/v5/trade/cancel-order`` 取消。先清单再清仓,否则刚平的仓
+   可能被遗留 pending 单立刻反向开回。
+2. ``GET /api/v5/account/positions`` + ``POST /api/v5/trade/close-position``:
+   对每个 ``is_open=True`` 的 position 走 OKX 内置市价平仓(reduce-only 语义、
+   自动选 posSide)。
+3. 退出码:
 
    - ``0`` —— 全部成功(包括 no-op 没仓可平);
    - ``1`` —— 部分失败(systemd 用 ``ExecStartPre=-`` 不阻塞 ExecStart);
@@ -69,6 +73,45 @@ async def reconcile(*, dry_run: bool, require_demo: bool) -> int:
 
     try:
         async with OKXRestClient(settings) as client:
+            # === 阶段 1: 取消所有 pending 单 ===
+            try:
+                pending = await client.trade.get_pending_orders()
+            except Exception as exc:  # noqa: BLE001
+                logger.error(f"failed to query pending orders: {exc}")
+                return EXIT_CONNECT_FAIL
+
+            cancel_failed = 0
+            if pending:
+                logger.info(f"found {len(pending)} pending order(s) to cancel:")
+                for o in pending:
+                    logger.info(
+                        f"  {o.get('instId')} ordId={o.get('ordId')} "
+                        f"side={o.get('side')} sz={o.get('sz')} state={o.get('state')}"
+                    )
+                if not dry_run:
+                    for o in pending:
+                        inst_id = o.get("instId", "")
+                        ord_id = o.get("ordId", "")
+                        if not inst_id or not ord_id:
+                            cancel_failed += 1
+                            continue
+                        try:
+                            await client.trade.cancel_order(
+                                inst_id=inst_id, ord_id=ord_id,
+                            )
+                            logger.info(f"canceled {inst_id} ordId={ord_id}")
+                        except Exception as exc:  # noqa: BLE001
+                            # 已 fill / 已 cancel / 已 expire 的单可能返错,不致命
+                            logger.warning(
+                                f"cancel failed for {inst_id} ordId={ord_id}: {exc}"
+                            )
+                            cancel_failed += 1
+                else:
+                    logger.info("--dry-run: skipping actual cancels")
+            else:
+                logger.info("no pending orders, skipping cancel step")
+
+            # === 阶段 2: 平掉所有 open positions ===
             try:
                 positions = await client.account.get_positions()
             except Exception as exc:  # noqa: BLE001
@@ -77,8 +120,14 @@ async def reconcile(*, dry_run: bool, require_demo: bool) -> int:
 
             open_positions = [p for p in positions if p.is_open]
             if not open_positions:
-                logger.info("no open positions on OKX, nothing to reconcile")
-                return EXIT_OK
+                if pending and cancel_failed == 0:
+                    logger.info(
+                        f"all {len(pending)} pending orders canceled; "
+                        "no open positions to close"
+                    )
+                else:
+                    logger.info("no open positions on OKX, nothing to close")
+                return EXIT_PARTIAL_FAIL if cancel_failed else EXIT_OK
 
             logger.info(f"found {len(open_positions)} open position(s) to close:")
             for p in open_positions:
@@ -91,7 +140,7 @@ async def reconcile(*, dry_run: bool, require_demo: bool) -> int:
                 logger.info("--dry-run: skipping actual close")
                 return EXIT_OK
 
-            failed = 0
+            close_failed = 0
             for p in open_positions:
                 try:
                     pos_side = PosSide(p.pos_side)
@@ -100,7 +149,7 @@ async def reconcile(*, dry_run: bool, require_demo: bool) -> int:
                     logger.error(
                         f"cannot map OKX values for {p.inst_id}: {exc}; skipping"
                     )
-                    failed += 1
+                    close_failed += 1
                     continue
                 try:
                     result = await client.trade.close_position(
@@ -112,14 +161,15 @@ async def reconcile(*, dry_run: bool, require_demo: bool) -> int:
                     )
                 except Exception as exc:  # noqa: BLE001
                     logger.error(f"failed to close {p.inst_id} {p.pos_side}: {exc}")
-                    failed += 1
+                    close_failed += 1
 
-            if failed:
+            total_failed = cancel_failed + close_failed
+            if total_failed:
                 logger.warning(
-                    f"{failed}/{len(open_positions)} close orders failed"
+                    f"{cancel_failed} cancel + {close_failed} close failures"
                 )
                 return EXIT_PARTIAL_FAIL
-            logger.info("all positions reconciled")
+            logger.info("all pending orders canceled, all positions reconciled")
             return EXIT_OK
     except Exception as exc:  # noqa: BLE001
         logger.error(f"unexpected error: {exc}")

@@ -7,6 +7,7 @@ signal_bar_type: BTC-USDT-SWAP.OKX-1-HOUR-LAST-EXTERNAL
 
 tp_rr_ratio: 2.0
 max_stop_distance_pct: 0.02
+min_stop_distance_pct: 0.001  # SL < 0.1% × entry 视为太紧,信号直接拒(防滑点暴亏)
 swing_lookback: 10
 
 risk_pct: 0.005           # 单笔风险 0.5%

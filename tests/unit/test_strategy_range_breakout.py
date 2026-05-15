@@ -254,3 +254,78 @@ class TestOnOrderRejected:
         RangeBreakoutStrategy.on_order_rejected(strat, SimpleNamespace())
         assert strat._active_signal is None
         assert strat._position_contracts == 0.0
+
+
+# ---------------------------------------------------------------------------
+# min_stop_distance_pct —— 防滑点暴亏的 SL 下限保护
+# 回归 2026-05-15 故障:demo 资金从 5k 涨到 81k 后,RangeBreakout 一次 ENTER 91.91
+# 张 BTC-SWAP @ 80160 / SL 80157(距离仅 $3 = 0.004%),tick 噪声立刻 SL,
+# slippage 把 -$2.76 预算放大到 -$3.12。
+# ---------------------------------------------------------------------------
+
+
+class TestMinStopDistance:
+    def setup_method(self) -> None:
+        # 区间宽 10、min_stop_distance_pct = 0.05(5%);entry ≈ 105 → 要求 SL
+        # 距 entry ≥ 5.25。便于构造"刚好太紧"和"刚好够"两种边界。
+        self.params_strict = RangeBreakoutLogic(
+            tp_rr_ratio=2.0,
+            max_stop_distance_pct=0.15,
+            min_stop_distance_pct=0.05,
+            swing_lookback=5,
+        )
+        self.params_default = RangeBreakoutLogic(
+            tp_rr_ratio=2.0,
+            max_stop_distance_pct=0.15,
+            swing_lookback=5,
+        )  # default min=0.001
+        self.wrange = Range(high=110, low=100, range_open_ts=0)
+
+    def test_rejects_too_tight_stop(self) -> None:
+        """extreme 几乎贴 entry → stop_distance / entry < min → 返 None。"""
+        # 下破 extreme=104.8(只低 0.2 区间),回归收 105 → dist=0.2 / 105 ≈ 0.19%
+        bars = [
+            _bar(1, 100, 102, 99, 101),
+            _bar(2, 100, 100.5, 99.5, 99.5),     # 下破到 99.5(extreme=99.5)
+            _bar(3, 99.5, 105.2, 99.4, 104.8),  # 回归收 104.8
+        ]
+        # entry=104.8, stop=99.5, dist=5.3 / 104.8 = 5.06% → 大于 5% min,通过
+        sig = detect_range_breakout_signal(bars, self.wrange, self.params_strict)
+        assert sig is not None  # 这条作为对比的"恰好够"
+
+    def test_rejects_when_strictly_below_min(self) -> None:
+        """更紧的 SL:dist < min_stop_distance_pct × entry → 拒。"""
+        # extreme=100.5,entry=105 → dist=4.5 / 105 = 4.29% < 5% min
+        bars = [
+            _bar(1, 100, 102, 99, 101),
+            _bar(2, 100, 100.5, 100.4, 100.5),
+            _bar(3, 100.5, 105.5, 100.4, 105),
+        ]
+        sig = detect_range_breakout_signal(bars, self.wrange, self.params_strict)
+        assert sig is None
+
+    def test_pathological_3usd_sl_on_btc_blocked(self) -> None:
+        """复现实际故障:entry=80160, SL=80157 → 0.004% 距离,被 0.1% 默认 min 拒。"""
+        # 把价格量纲放进区间 [79000, 81000],构造极紧 SL:
+        # 下破 extreme=80157,回归收 80160
+        wrange_btc = Range(high=81000, low=79000, range_open_ts=0)
+        bars = [
+            _bar(1, 79500, 79800, 79200, 79600),
+            _bar(2, 79600, 79700, 80157, 80157),  # "下破"到 80157(逻辑构造)
+            _bar(3, 80157, 80165, 80155, 80160),
+        ]
+        # 默认 min=0.001=0.1%;dist=3, 3/80160 ≈ 0.0037% < 0.1% → reject
+        sig = detect_range_breakout_signal(bars, wrange_btc, self.params_default)
+        assert sig is None
+
+    def test_default_min_allows_reasonable_signals(self) -> None:
+        """默认 min=0.001 不影响正常 0.5%-2% SL 的信号。"""
+        # extreme=98, entry=103 → dist=5, 5/103 ≈ 4.85% >> 0.1%
+        bars = [
+            _bar(1, 100, 102, 99, 101),
+            _bar(2, 100, 100.5, 98, 99),
+            _bar(3, 99, 104, 98.5, 103),
+        ]
+        sig = detect_range_breakout_signal(bars, self.wrange, self.params_default)
+        assert sig is not None
+        assert sig.stop_price == 98

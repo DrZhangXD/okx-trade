@@ -75,6 +75,11 @@ class RangeBreakoutLogic:
 
     tp_rr_ratio: float = 2.0
     max_stop_distance_pct: float = 0.02
+    # SL 距离下限:防止极紧 SL(如 breakout-return 时 extreme 几乎贴近 entry)
+    # 造成 position_contracts = risk / stop_distance 算出超大仓位 → 一点滑点就
+    # 把单笔损失放大。默认 0.001 = 0.1%(BTC @ $80k 即 ~$80 距离),小于此阈值的
+    # 信号直接 reject。生产可根据品种波动调整。
+    min_stop_distance_pct: float = 0.001
     swing_lookback: int = 10
 
 
@@ -174,6 +179,10 @@ def _build_signal(
         return None
 
     stop_distance = abs(entry - raw_stop)
+    # SL 太紧 → 仓位计算公式 contracts = risk_usdt / stop_distance 会爆,
+    # 且任何 tick 滑点都把单笔损失放大到几倍预算。直接拒。
+    if entry > 0 and stop_distance / entry < params.min_stop_distance_pct:
+        return None
     if entry > 0 and stop_distance / entry > params.max_stop_distance_pct:
         # 尝试 swing 止损
         swing_bars = bars_before[-params.swing_lookback:]
@@ -265,6 +274,7 @@ if _NT_AVAILABLE:
         signal_bar_type: str
         tp_rr_ratio: float = 2.0
         max_stop_distance_pct: float = 0.02
+        min_stop_distance_pct: float = 0.001
         swing_lookback: int = 10
         risk_pct: float = 0.005
         account_equity_usdt: float = 10000.0
@@ -293,6 +303,7 @@ if _NT_AVAILABLE:
             self._params = RangeBreakoutLogic(
                 tp_rr_ratio=config.tp_rr_ratio,
                 max_stop_distance_pct=config.max_stop_distance_pct,
+                min_stop_distance_pct=config.min_stop_distance_pct,
                 swing_lookback=config.swing_lookback,
             )
 
