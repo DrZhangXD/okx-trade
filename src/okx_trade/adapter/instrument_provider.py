@@ -50,18 +50,30 @@ class OKXInstrumentProvider(InstrumentProvider):
         """拉 SWAP + SPOT + FUTURES 全集到 cache。
 
         ``filters`` 支持的键：
-        - ``inst_types``: ``list[InstType]``，限制 instType 子集（默认三个都拉，
-          FUTURES 是 basis_arb 策略所需）
+        - ``inst_types``: ``list[InstType]``，限制 instType 子集（默认 SWAP + SPOT +
+          FUTURES；不含 OPTION，因为 OKX 期权 ~1000 个一次拉性能差，需显式启用）
         - ``inst_ids``: ``set[str]``，仅保留特定 instId（如 ``{"BTC-USDT-SWAP"}``）
+        - ``option_ulys``: ``list[str]``，期权标的过滤（如 ``["BTC-USD", "ETH-USD"]``），
+          仅当 ``InstType.OPTION`` 在 ``inst_types`` 时生效。每个 uly 单独 REST 调用。
         """
         filters = filters or {}
         inst_types: list[InstType] = filters.get(
             "inst_types", [InstType.SWAP, InstType.SPOT, InstType.FUTURES]
         )
         inst_ids_keep: set[str] | None = filters.get("inst_ids")
+        option_ulys: list[str] | None = filters.get("option_ulys")
 
-        # 并行拉所有 instType（两个 REST 请求）
-        tasks = [self._client.public.get_instruments(t) for t in inst_types]
+        # 并行拉所有 instType；期权按 uly 分别调用（OKX 单次只接受一个 uly）
+        tasks: list = []
+        for t in inst_types:
+            if t == InstType.OPTION:
+                if not option_ulys:
+                    # 期权类型但没指定 uly → 跳过（避免 ~1000 个全量拉）
+                    continue
+                for uly in option_ulys:
+                    tasks.append(self._client.public.get_instruments(t, uly=uly))
+            else:
+                tasks.append(self._client.public.get_instruments(t))
         results = await asyncio.gather(*tasks)
 
         ts_init = self._clock.timestamp_ns()

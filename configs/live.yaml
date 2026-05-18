@@ -36,6 +36,28 @@ strategies:
   ob_imbalance:
     enabled: true
     config: configs/strategies/ob_imbalance.yaml
+  # M6+ 新策略（默认 enabled: false，逐个 paper 验证后启用）：
+  # - funding_cross_section：多空 funding 横截面，需 universe + β 历史 ≥ 30 天
+  # - funding_skew_momentum：funding z-score ±2σ 反向（BTC instance）
+  # - stat_arb_pairs：BTC-ETH 协整套利，需 statsmodels（pip install -e ".[stat-arb]"）
+  # - option_vol_selling：BTC 短跨式 + delta hedge，需 OPTION instrument loading
+  #   （instrument_provider 需要 option_ulys 配置；启用前手动验证）
+  # - ml_fusion：XGBoost meta，需 xgboost + 训练好的模型文件
+  funding_cross_section:
+    enabled: false
+    config: configs/strategies/funding_cross_section.yaml
+  funding_skew_momentum:
+    enabled: false
+    config: configs/strategies/funding_skew_momentum.yaml
+  stat_arb_pairs:
+    enabled: false
+    config: configs/strategies/stat_arb_pairs.yaml
+  option_vol_selling:
+    enabled: false
+    config: configs/strategies/option_vol_selling.yaml
+  ml_fusion:
+    enabled: false
+    config: configs/strategies/ml_fusion.yaml
 
 # 全局风控默认值（策略 yaml 的 risk: 字段会优先生效）
 # Kelly / Correlation 默认开：M5 PnL tracker 已接入，足量历史前自动样本不足放行

@@ -11,8 +11,8 @@ class InstType(str, Enum):
     SPOT = "SPOT"
     SWAP = "SWAP"
     FUTURES = "FUTURES"   # 交割合约（basis_arb 使用）
+    OPTION = "OPTION"     # 欧式期权（option_vol_selling 使用）
     # 未来扩展
-    # OPTION = "OPTION"
     # MARGIN = "MARGIN"
 
 

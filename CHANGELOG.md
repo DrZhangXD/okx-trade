@@ -8,6 +8,25 @@
 
 ## [Unreleased] — Paper trading 观察期
 
+### Added (M6+ — 中长期策略一次性交付)
+
+- **`feat(pricing)`** — 新增 `src/okx_trade/pricing/options.py`：纯 Python Black-Scholes pricer + Greeks（delta/gamma/vega/theta）+ implied vol Newton-Raphson + vol_premium。
+- **`feat(risk)`** — 新增 `src/okx_trade/risk/stats.py`：`linreg` / `rolling_beta` / `zscore` / `engle_granger_coint` / `ou_fit` / `ou_half_life`。ADF 优先用 statsmodels，未装时降级为手写单滞后。
+- **`feat(backtest)`** — 新增 `src/okx_trade/backtest/walk_forward.py`：滚动 train/test 切分 + 二分类 / 回归评估。
+- **`feat(adapter)`** — 启用 `InstType.OPTION`；`parse_okx_instrument` 加 OPTION 分支（CryptoOption + OptionKind）；`Instrument` 模型加 strike/opt_type/underlying；`instrument_provider.load_all_async` 支持 `option_ulys` filter（避免一次拉 ~1000 期权）。
+- **`feat(rest)`** — `public.get_option_summary(uly, exp_time_ms)`：拉 OKX opt-summary（IV + Greeks）。新增 `models.OptionSummary`。
+- **`feat(strategies)`** — 新增 5 个策略：
+  - `funding_cross_section` (M6)：多空 funding 横截面 + β-hedge，每个 funding cycle rebalance
+  - `funding_skew_momentum` (M6)：funding rate 30d z-score ±2σ 反向交易 + ATR SL/TP
+  - `stat_arb_pairs` (M7)：BTC-ETH 协整套利（Engle-Granger + OU），每日重测协整
+  - `option_vol_selling` (M7)：BTC ATM short straddle + perp delta hedge
+  - `ml_fusion` (M7)：XGBoost meta，每 4h 预测 → top-K 多空腿
+- **`feat(strategies)`** — 新增 `strategies/_features.py`：跨策略 feature 聚合（momentum / RV / funding_z / regime_state / btc_corr）。
+- **`docs`** — `strategy_roadmap.md` 全面重写，10 策略上线状态 + 5 个 M6+ 启用前置条件清单。
+- **`pyproject`** — 新增 optional deps：`[stat-arb]` (statsmodels)、`[ml-fusion]` (xgboost)。
+
+5 个 M6+ 策略默认 `enabled: false`，需要逐个 paper 验证后开启。
+
 ### Added (M5.X strategy optimization)
 
 - **`feat(strategies)`** — 新增 `BasisArbStrategy`：OKX 交割合约 vs 现货期现套利（spot long + futures short），结算前 basis 锁定，比 funding_carry 更稳。需要 `InstType.FUTURES` 加载到 NT cache（本次顺便启用）。

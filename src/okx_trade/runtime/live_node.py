@@ -70,6 +70,35 @@ def _strategy_registry() -> dict[str, tuple[Any, Any]]:
         registry["ob_imbalance"] = (OBImbalanceConfig, OBImbalanceStrategy)
     except ImportError:
         pass
+    # M6+ batch
+    try:
+        from ..strategies.funding_cross_section import FundingXSConfig, FundingXSStrategy
+        registry["funding_cross_section"] = (FundingXSConfig, FundingXSStrategy)
+    except ImportError:
+        pass
+    try:
+        from ..strategies.funding_skew_momentum import (
+            FundingSkewConfig,
+            FundingSkewStrategy,
+        )
+        registry["funding_skew_momentum"] = (FundingSkewConfig, FundingSkewStrategy)
+    except ImportError:
+        pass
+    try:
+        from ..strategies.stat_arb_pairs import StatArbConfig, StatArbStrategy
+        registry["stat_arb_pairs"] = (StatArbConfig, StatArbStrategy)
+    except ImportError:
+        pass
+    try:
+        from ..strategies.option_vol_selling import OptionVolConfig, OptionVolStrategy
+        registry["option_vol_selling"] = (OptionVolConfig, OptionVolStrategy)
+    except ImportError:
+        pass
+    try:
+        from ..strategies.ml_fusion import MLFusionConfig, MLFusionStrategy
+        registry["ml_fusion"] = (MLFusionConfig, MLFusionStrategy)
+    except ImportError:
+        pass
     return registry
 
 

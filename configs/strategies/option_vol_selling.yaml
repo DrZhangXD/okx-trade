@@ -1,0 +1,35 @@
+# Option Vol Selling (M7)：BTC 期权卖跨式 + delta hedge
+# 实现：src/okx_trade/strategies/option_vol_selling.py
+#
+# 实盘启用前提（重要）：
+# 1. configs/live.yaml 把 InstType.OPTION 加进 instrument_provider 的 filter（默认
+#    不加，避免一次拉 ~500 期权）。最稳是在 live_node 启动时检测本策略 enabled，
+#    自动注入 filter（v1 暂未实现 — 手动启用时要先验证）。
+# 2. paper 跑 1-2 周看 OKX 期权 fill 与 IV 数据稳定性
+# 3. 监控 ``max_notional_per_leg_usdt`` 真实成交是否被限制
+
+underlying: BTC-USD          # OKX 期权 underlying 命名（与现货 BTC-USDT 不同）
+perp_instrument_id: BTC-USDT-SWAP.OKX
+perp_bar_type: BTC-USDT-SWAP.OKX-1-HOUR-LAST-EXTERNAL
+
+tenor_target_days: 7         # 目标当周期权
+iv_rv_ratio_min: 1.20        # IV/RV ≥ 1.2 才卖（20% premium）
+rv_window: 30                # 30d realized vol 窗口
+
+max_notional_per_leg_usdt: 1000.0
+delta_hedge_threshold: 0.05
+delta_hedge_freq_min: 60
+stop_distance_strike_pct: 0.05
+close_days_before_expiry: 1
+check_interval_sec: 3600     # 每小时 poll opt-summary
+
+account_equity_usdt: 10000.0
+
+risk:
+  enable_drawdown: true
+  drawdown_daily_pct: 0.03
+  drawdown_weekly_pct: 0.08
+  enable_kelly: false
+  enable_correlation: false
+  enable_regime_gate: false
+  regime_strategy_kind: neutral

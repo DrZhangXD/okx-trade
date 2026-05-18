@@ -56,6 +56,18 @@ dev = [
 regime-hmm = [
   "hmmlearn>=0.3",
 ]
+# M6+：stat_arb_pairs 用 statsmodels 做 ADF / cointegration test
+# 安装：pip install -e ".[stat-arb]"
+# 未装时降级为手写单滞后 ADF（精度差但能区分明显非平稳）
+stat-arb = [
+  "statsmodels>=0.14",
+]
+# M6+：ml_fusion 用 XGBoost
+# 安装：pip install -e ".[ml-fusion]"
+# 未装时 strategy init 直接 raise（避免静默失败）
+ml-fusion = [
+  "xgboost>=2.0",
+]
 
 [project.urls]
 Homepage = "https://github.com/zhangxudong/okx-trade"

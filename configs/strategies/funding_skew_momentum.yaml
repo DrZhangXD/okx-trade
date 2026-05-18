@@ -1,0 +1,34 @@
+# Funding Skew Momentum (M6)：funding 拥挤反向交易
+# 实现：src/okx_trade/strategies/funding_skew_momentum.py
+#
+# funding rate 30 天 z-score 突破 ±2σ → 反向开仓。
+# 每个标的一个 strategy instance，建议先在 BTC + ETH 上启用。
+
+instrument_id: BTC-USDT-SWAP.OKX
+bar_type: BTC-USDT-SWAP.OKX-1-HOUR-LAST-EXTERNAL
+
+history_periods: 90     # 30 天 × 3 funding cycle/day
+z_threshold: 2.0
+hold_max_hours: 72      # 3 天超时强平
+
+atr_period: 14
+atr_sl_mult: 2.0        # SL = 2 × ATR_14
+tp_rr_ratio: 1.5
+
+risk_pct: 0.005
+check_interval_sec: 1800
+
+account_equity_usdt: 10000.0
+
+# reversal kind：mean_reverting 市加满、trending 市砍
+risk:
+  enable_drawdown: true
+  drawdown_daily_pct: 0.03
+  drawdown_weekly_pct: 0.08
+  enable_kelly: true
+  kelly_win_rate: 0.55
+  kelly_avg_r: 1.5
+  kelly_fraction: 0.25
+  enable_correlation: false
+  enable_regime_gate: true
+  regime_strategy_kind: reversal

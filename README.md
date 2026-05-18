@@ -90,8 +90,15 @@ asyncio.run(main())
 | `LiqReversalStrategy` | 强平瀑布反转（z-score on `liquidation-orders`） | 事件驱动 | [liq_reversal.yaml](configs/strategies/liq_reversal.yaml) |
 | `BasisArbStrategy` (M5) | 交割合约 vs 现货期现套利（spot long + futures short） | 每小时检查 basis | [basis_arb.yaml](configs/strategies/basis_arb.yaml) |
 | `OBImbalanceStrategy` (M5) | 订单流 microprice + book imbalance 微观结构反转 | 秒级聚合，分钟级持仓 | [ob_imbalance.yaml](configs/strategies/ob_imbalance.yaml) |
+| `FundingXSStrategy` (M6+) | funding 横截面多空 + β-hedge | 每 8h funding cycle | [funding_cross_section.yaml](configs/strategies/funding_cross_section.yaml) |
+| `FundingSkewStrategy` (M6+) | funding rate ±2σ 反向 | ~30min poll | [funding_skew_momentum.yaml](configs/strategies/funding_skew_momentum.yaml) |
+| `StatArbStrategy` (M6+) | 协整对（BTC-ETH 等）spread 反转 | 每根 1H bar | [stat_arb_pairs.yaml](configs/strategies/stat_arb_pairs.yaml) |
+| `OptionVolStrategy` (M6+) | BTC short straddle + perp delta-hedge | 每小时 check | [option_vol_selling.yaml](configs/strategies/option_vol_selling.yaml) |
+| `MLFusionStrategy` (M6+) | XGBoost meta（多个 alpha 融合预测 4h forward return） | 每 4h | [ml_fusion.yaml](configs/strategies/ml_fusion.yaml) |
 
-已下线：`RangeBreakoutStrategy`（M5.X，alpha 弱 + 实现不稳）。详见 [docs/strategy_roadmap.md](docs/strategy_roadmap.md)。
+M6+ 策略默认 `enabled: false`，需逐个 paper 验证后开启。详见 [docs/strategy_roadmap.md](docs/strategy_roadmap.md)。
+
+已下线：`RangeBreakoutStrategy`（M5.X，alpha 弱 + 实现不稳）。
 
 ## 风控管道
 

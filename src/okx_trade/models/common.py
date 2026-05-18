@@ -56,6 +56,34 @@ class Instrument(OKXModel):
     # 交割合约（FUTURES）专属：到期/上市时间（毫秒），SPOT/SWAP 缺省为 0
     exp_time: int = Field(default=0, alias="expTime")
     list_time: int = Field(default=0, alias="listTime")
+    # 期权（OPTION）专属：行权价 + 类型（C/P）；非期权为 0/空
+    strike: Decimal = Field(default=Decimal("0"), alias="stk")
+    opt_type: str = Field(default="", alias="optType")     # "C" / "P"
+    underlying: str = Field(default="", alias="uly")       # 如 "BTC-USDT"
+
+
+class OptionSummary(OKXModel):
+    """``GET /api/v5/public/opt-summary`` 单条响应。
+
+    OKX 返回的 IV / Greeks 已经按 BS 模型算好。``vol_lv`` 是 mark IV（按 ATM 推算
+    的近似），更精确的 ``mark_vol`` 用单独字段返回。
+    """
+
+    inst_id: str = Field(alias="instId")
+    inst_type: str = Field(default="OPTION", alias="instType")
+    underlying: str = Field(default="", alias="uly")
+    # mark price 与隐含波动率
+    mark_vol: Decimal = Field(default=Decimal("0"), alias="markVol")  # mark IV
+    bid_vol: Decimal = Field(default=Decimal("0"), alias="bidVol")
+    ask_vol: Decimal = Field(default=Decimal("0"), alias="askVol")
+    vol_lv: Decimal = Field(default=Decimal("0"), alias="volLv")      # ATM IV 近似
+    fwd_px: Decimal = Field(default=Decimal("0"), alias="fwdPx")      # 远期价
+    # Greeks (BS)
+    delta: Decimal = Field(default=Decimal("0"), alias="deltaBS")
+    gamma: Decimal = Field(default=Decimal("0"), alias="gammaBS")
+    vega: Decimal = Field(default=Decimal("0"), alias="vegaBS")
+    theta: Decimal = Field(default=Decimal("0"), alias="thetaBS")
+    ts: int = Field(default=0, alias="ts")
 
 
 class FundingRate(OKXModel):
@@ -78,4 +106,4 @@ class FundingRate(OKXModel):
         return self.funding_rate * Decimal(3 * 365)
 
 
-__all__ = ["FundingRate", "Instrument", "OKXModel"]
+__all__ = ["FundingRate", "Instrument", "OKXModel", "OptionSummary"]

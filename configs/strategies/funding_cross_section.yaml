@@ -1,0 +1,47 @@
+# Funding Cross-Section (M6)：多空 funding 横截面套利
+# 实现：src/okx_trade/strategies/funding_cross_section.py
+#
+# 每个 funding cycle (UTC 0/8/16 + 1 min) 重平：选 funding 最负 top_n 做多 +
+# 最正 bot_n 做空，组合 β-hedge 后净 delta ≈ 0。
+#
+# 实盘启用前提：
+# 1. universe 加载完整（top-30 USDT 永续）
+# 2. β 历史 ≥ beta_window_days（首日跑可能 size=0；3 天后稳定）
+# 3. 跟 funding_carry 不能同时持仓 BTC（策略自身有简单冲突避免，但保险起见
+#    funding_carry 处于 IDLE 状态时再开本策略）
+
+instrument_ids:
+  - BTC-USDT-SWAP.OKX
+  - ETH-USDT-SWAP.OKX
+  - SOL-USDT-SWAP.OKX
+  - XRP-USDT-SWAP.OKX
+  - DOGE-USDT-SWAP.OKX
+  - AVAX-USDT-SWAP.OKX
+  - LTC-USDT-SWAP.OKX
+  - LINK-USDT-SWAP.OKX
+  - DOT-USDT-SWAP.OKX
+  - BNB-USDT-SWAP.OKX
+  - ADA-USDT-SWAP.OKX
+  - TON-USDT-SWAP.OKX
+
+beta_reference_id: BTC-USDT-SWAP.OKX
+beta_bar_type_template: "{inst}-1-DAY-LAST-EXTERNAL"
+beta_window_days: 30
+
+top_n: 3
+bot_n: 3
+rebalance_hours_utc: [0, 8, 16]
+max_position_pct: 0.40
+enable_beta_hedge: true
+check_interval_sec: 1800
+
+account_equity_usdt: 10000.0
+
+# delta-neutral：vol_target / kelly / correlation / regime 都关，只留 drawdown
+risk:
+  enable_drawdown: true
+  enable_vol_target: false
+  enable_kelly: false
+  enable_correlation: false
+  enable_regime_gate: false
+  regime_strategy_kind: neutral

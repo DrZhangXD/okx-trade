@@ -1,21 +1,62 @@
 # Strategy Roadmap
 
-记录现有策略状态 + 中长期策略规划。每条策略的 alpha 论据、所需数据、预期年化、
-工程量评估都列在这里，避免临时拍脑袋决定开发优先级。
+记录现有策略状态 + 历史演进。每条策略的 alpha 论据、所需数据、预期年化、
+工程量评估都列在这里。
 
-最近更新：2026-05-18（M5.X 策略优化批次）。
+最近更新：2026-05-18（M6+ 全部中长期策略一次性交付）。
 
 ---
 
-## 当前已上 (M5)
+## 当前已上 (10 策略)
 
-| 策略 | 类型 | 频率 | 状态 | 备注 |
-|---|---|---|---|---|
-| [`FundingCarryStrategy`](../src/okx_trade/strategies/funding_carry.py) | neutral (delta-neutral) | 8h cycle | live | 入场阈值 8% APR 偏低，建议提升到 15%；未建模反向 carry |
-| [`XSMomentumStrategy`](../src/okx_trade/strategies/xs_momentum.py) | momentum | 每日 UTC 0 | live | 单 lookback=7d 易在反转月份亏；regime gate 已接入 |
-| [`LiqReversalStrategy`](../src/okx_trade/strategies/liq_reversal.py) | reversal | event-driven | live | 阈值 3.5σ 经多次微调，建议改成动态分位；regime gate 已接入 |
-| [`BasisArbStrategy`](../src/okx_trade/strategies/basis_arb.py) | neutral (delta-neutral) | 1h check | **M5 新增** | 默认 enabled=false，需要 paper 验证 FUTURES inst_id 解析 + 两腿 fill 时差 |
-| [`OBImbalanceStrategy`](../src/okx_trade/strategies/ob_imbalance.py) | reversal | 中频（30s–5min 持仓） | **M5 新增** | 默认 enabled=false；回测困难（OKX 不开 books5 历史），主要靠 paper 验证 |
+| 策略 | 类型 | 频率 | 上线批次 | 默认 enabled | 备注 |
+|---|---|---|---|---|---|
+| [`FundingCarryStrategy`](../src/okx_trade/strategies/funding_carry.py) | neutral | 8h cycle | M2 | ✅ true | 入场阈值 8% APR 偏低，建议提升到 15% |
+| [`XSMomentumStrategy`](../src/okx_trade/strategies/xs_momentum.py) | momentum | 每日 UTC 0 | M4 | ✅ true | regime gate 已接入 |
+| [`LiqReversalStrategy`](../src/okx_trade/strategies/liq_reversal.py) | reversal | event-driven | M4 | ✅ true | regime gate 已接入 |
+| [`BasisArbStrategy`](../src/okx_trade/strategies/basis_arb.py) | neutral | 1h check | M5.X | ✅ true | 季度合约滚动需手动改 yaml |
+| [`OBImbalanceStrategy`](../src/okx_trade/strategies/ob_imbalance.py) | reversal | 中频 30s–5min | M5.X | ✅ true | books5 WS 订阅 |
+| [`FundingXSStrategy`](../src/okx_trade/strategies/funding_cross_section.py) | neutral β-hedged | 8h cycle | **M6+** | ❌ false | 多空 funding 横截面 + β hedge |
+| [`FundingSkewStrategy`](../src/okx_trade/strategies/funding_skew_momentum.py) | reversal | ~30min poll | **M6+** | ❌ false | funding ±2σ 反向 |
+| [`StatArbStrategy`](../src/okx_trade/strategies/stat_arb_pairs.py) | mean-reverting | 1H bar | **M6+** | ❌ false | BTC-ETH 协整套利（默认 pair） |
+| [`OptionVolStrategy`](../src/okx_trade/strategies/option_vol_selling.py) | vol carry | 1h check | **M6+** | ❌ false | BTC short straddle + delta hedge |
+| [`MLFusionStrategy`](../src/okx_trade/strategies/ml_fusion.py) | meta | 每 4h | **M6+** | ❌ false | XGBoost 多空均匀腿 |
+
+---
+
+## M6+ 启用清单（依次 paper 验证后切 enabled=true）
+
+每个策略上线前的验证步骤：
+
+### `funding_cross_section`
+1. paper 跑 ≥ 1 天，确保 universe + β 历史填充完整（β 需 ≥ 30 个 1D 收盘价）
+2. log 里看 funding rate batch 拉取无 OKX rate limit 错误
+3. 第一次 rebalance 时验证选股 + β-hedge 比例合理
+4. 与 funding_carry 同时持仓 BTC 的冲突（监控 monitor alert）
+
+### `funding_skew_momentum`
+1. paper 跑 ≥ 1 天，确认 90 个 funding rate 历史 bootstrap 完成
+2. 等待 funding z-score > 2σ 的第一次触发，验证 ATR SL/TP 合理
+3. hold_max_hours=72h 超时检查正常
+
+### `stat_arb_pairs`
+1. `pip install -e ".[stat-arb]"`（启用 statsmodels）
+2. paper 跑 ≥ 1 周看 BTC-ETH 协整 p-value 稳定性
+3. 验证 spread_z 入场 + mean-reversion 出场
+
+### `option_vol_selling` ⚠️ 最复杂
+1. **修改 `live_node._build_trading_node`**：让 instrument_provider 加 `option_ulys=["BTC-USD"]`
+   filter，否则启动加载 ~500 个期权超时
+2. paper 跑 ≥ 2 周看 OKX 期权 fill / mark IV 数据稳定性
+3. 验证 BS pricer 算出的 Greeks 跟 OKX opt-summary 一致
+4. 第一次 ATM straddle 入场 + delta hedge 路径完整
+
+### `ml_fusion`
+1. `pip install -e ".[ml-fusion]"`（装 xgboost）
+2. 写 `scripts/ml_fusion_retrain.py` 跑 walk-forward 训练，模型 pickle 到
+   `var/ml_fusion_model.pkl`
+3. paper 跑 ≥ 2 周看分类准确率 > 52%（高于随机基准 50%）
+4. monitor 加 alert：CV 分数掉到 < 51% 触发 WARN（v1 暂不实现）
 
 ---
 
@@ -24,83 +65,22 @@
 - **`RangeBreakoutStrategy`** (M5.X, 2026-05-18 下线)。原因：
   - crypto 区间假突破历史胜率 < 30%，TP/SL=2 不足以覆盖；
   - 与 `xs_momentum` 高度同向（都吃趋势），但噪音更大；
-  - 实现层 commits 34666fc / a6a3c8b 是事故性 fix（margin leak + pending order 清理），说明
-    实现不稳定，难以维护。
+  - 实现层 commits 34666fc / a6a3c8b 是事故性 fix（margin leak + pending order 清理），说明实现不稳定。
 
 ---
 
-## 中期 (M6 / 计划 2026-Q3)
+## 工程基础设施 todo
 
-### Funding Cross-Section Arbitrage
+按 plan 的"回测真实性问题"清单，待完成项：
 
-**思路**：同一时刻不同币种 funding rate 差异巨大（BTC 0.01% vs 小币 0.1%）。
-做多最负费率币 + 做空最正费率币，组合 delta ≈ 0（用 β 配比对冲，因为多数 altcoin
-对 BTC β≈1）。同时收两边 funding。
-
-- **数据**：OKX universe ~100 个 USDT 永续的 funding rate 实时表 +
-  rolling β（30d 简单回归）。
-- **执行**：每 8h funding cycle 调一次，挑最负 funding rank top-3 + 最正 funding rank top-3。
-- **预期 alpha**：15-25% 年化（结合资金费率分布的扁尾性）。
-- **工程量**：3-5 天。复用 `funding_carry` 的两腿下单逻辑 + 新增 universe ranking。
-
-### Funding-Skew Momentum
-
-**思路**：funding 突然冲高（≥ +2σ vs 30d 均值）= 多头过度拥挤 → 短期反向做空 perp；
-funding 急速转负 → 反向做多。基于持仓拥挤度而非价格延续。
-
-- **数据论文**：Soska/Chen 2022 在 Coinbase Derivatives 上有实证。
-- **数据**：OKX `funding-rate-history` 每个标的 30 天历史（已有 REST 端点）。
-- **执行**：按 funding rate z-score 触发，持仓 1-3 天，止盈止损按 ATR。
-- **预期 alpha**：8-15% 年化。
-- **工程量**：2-3 天。共享 `liq_reversal` 的 z-score / 阈值触发框架。
-
----
-
-## 长期 (M7+ / 计划 2026-Q4 及之后)
-
-### Option Volatility Selling
-
-**思路**：OKX BTC/ETH 期权 IV 长期高于 realized vol（5-15% 年化溢价）。卖跨式
-（put + call 同 strike）+ delta-hedge perp。学术上 vol risk premium 是 crypto
-最稳定的 carry source。
-
-- **数据**：OKX 期权链（mark / IV / Greeks），现货 / perp 用于 delta hedge。
-- **执行**：每日 / 每周 roll，根据 IV vs RV 决定 strike 与 expiry。Δ-hedge 频率
-  与 Γ exposure 挂钩。
-- **预期 alpha**：10-20% 年化，但下行 tail risk 大（需 cap notional）。
-- **工程量**：10-20 天。Greeks 引擎 + IV surface + risk monitor 全新建。
-
-### Statistical Arbitrage (Cointegration Pairs)
-
-**思路**：BTC-ETH、SOL-AVAX、LDO-RPL 等高度协整 token 对。Engle-Granger 检验
-+ OU 过程估计均值回归速度，spread 偏离 > 2σ 入场。
-
-- **数据**：universe pairwise daily returns（已有）。
-- **执行**：每日重做 cointegration 检验，spread 偏离时 long-short pair。
-- **预期 alpha**：5-12% 年化，但容量受限于流动性差的小币对。
-- **工程量**：5-8 天。
-
-### ML Signal Fusion (XGBoost / LightGBM)
-
-**思路**：把所有已有 alpha 信号（momentum / liq z / funding skew / OB imbalance）
-作为 features，XGBoost 学习未来 1h / 4h 涨跌方向。
-
-- **风险**：crypto 上 ML 类策略 OOS 衰减极快（半衰期 2-4 周）。需要重型
-  walk-forward + 周度重训管线。
-- **工程量**：> 20 天。建议**最后再做**——先把规则版 alpha 榨干。
-
----
-
-## 工程基础设施 todo（不是策略本身但策略层依赖）
-
-按 plan 的"二、回测真实性问题"清单，待完成项：
-
-1. **回测加 slippage + funding model**：当前 `enable_fees=False` 默认 + `PerfectFill`，
-   所有现有策略回测的 Sharpe 都虚高。需要：
-   - 默认开 `enable_fees=True`（taker 5bp）。
-   - 加 simple slippage model（mid ± k×spread）。
-   - 注入历史 funding-rate tick 让 `xs_momentum` 长仓被收取 funding。
-2. **walk-forward 框架**：`scripts/backtest.py` 加 `--walk-forward` 模式（6m train + 1m test 滚动）。
-3. **portfolio rebalance scheduler**：[live.yaml:67](../configs/live.yaml#L67) 写了周一 UTC 0
+1. **回测 fees / slippage / funding model**：
+   - M5.X 已加 `enable_fees` 开关到 `build_okx_venue_config`，但默认 False。建议改默认 True。
+   - 注入历史 funding-rate tick 让 `xs_momentum` 长仓被收取 funding（NT SimulatedExchange 不自动 settle funding）。
+   - simple slippage model（mid ± k×spread）未实现。
+2. **walk-forward 框架**：M6+ 已提供 `okx_trade/backtest/walk_forward.py`（splits + 评估），
+   待接入 `scripts/backtest.py` 的 `--walk-forward` 模式（6m train + 1m test 滚动）。
+3. **portfolio rebalance scheduler**：`live.yaml.portfolio_optimizer` 写了周一 UTC 0
    rebalance 但**未实接调度**。需要在 monitor.live 主循环里按 wall-clock 触发
    `allocator.allocate(...)` 切到 risk_budget。
+4. **OPTION instrument loading**：`option_vol_selling` 启用前 `live_node` 需要根据策略是否
+   enabled 动态注入 `option_ulys=["BTC-USD"]` 到 instrument_provider filter；目前需手动改代码。

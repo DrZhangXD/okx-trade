@@ -88,8 +88,12 @@ flowchart TB
 | `okx_trade.adapter.execution` | NT `LiveExecutionClient`：下单 / 撤单 / reconciliation |
 | `okx_trade.adapter.factories` | 装配 NT TradingNode 用 |
 | `okx_trade.strategies.base` | `BarBuffer` / `position_contracts` / strategy helpers |
-| `okx_trade.strategies.{xs_momentum,funding_carry,liq_reversal,basis_arb,ob_imbalance}` | 策略本体（range_breakout 已 M5.X 下线） |
+| `okx_trade.strategies.{xs_momentum,funding_carry,liq_reversal,basis_arb,ob_imbalance,funding_cross_section,funding_skew_momentum,stat_arb_pairs,option_vol_selling,ml_fusion}` | 10 个策略本体（range_breakout 已 M5.X 下线） |
 | `okx_trade.strategies._signals` | 跨策略共享纯函数（microprice / book_imbalance / annualized_basis 等） |
+| `okx_trade.strategies._features` | ml_fusion 特征聚合（momentum / RV / funding_z / regime / btc_corr） |
+| `okx_trade.pricing.options` | Black-Scholes pricer + Greeks（option_vol_selling 用） |
+| `okx_trade.risk.stats` | rolling_beta / engle_granger_coint / ou_fit（funding_xs / stat_arb 用） |
+| `okx_trade.backtest.walk_forward` | 滚动 train/test 切分 + 二分类评估（ml_fusion 训练用） |
 | `okx_trade.strategies.confirmation` | OFI 反向时降仓 50%（共用 helper） |
 | `okx_trade.strategies.pnl_hook` | 把 NT PositionEvent 转成 `PnLTracker.record_trade` |
 | `okx_trade.risk.base` | `RiskCheck` / `RiskManager` / `RiskAction` / `RiskIntent` |

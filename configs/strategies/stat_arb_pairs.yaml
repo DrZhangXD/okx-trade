@@ -1,0 +1,35 @@
+# Stat Arb Pairs (M7)：协整对统计套利
+# 实现：src/okx_trade/strategies/stat_arb_pairs.py
+#
+# 每个 strategy 实例只交易一个 pair；多个 pair 用多个实例（在 live.yaml 里
+# 加多个 entry，每个指定不同 pair_left / pair_right）。
+
+pair_left: BTC-USDT-SWAP.OKX
+pair_right: ETH-USDT-SWAP.OKX
+
+bar_type_template: "{inst}-1-HOUR-LAST-EXTERNAL"
+
+lookback_bars: 1440          # 60 天 × 24h
+coint_check_interval_h: 24   # 每日重测协整
+coint_pvalue_threshold: 0.05
+
+spread_z_entry: 2.0
+spread_z_exit: 0.5
+spread_z_stop: 3.5
+
+risk_pct: 0.003
+
+account_equity_usdt: 10000.0
+
+# 装 statsmodels 后 ADF 检验更准确：
+#   pip install -e ".[stat-arb]"
+# 未装时降级为手写单滞后 ADF（精度差，但能区分明显非平稳）
+
+risk:
+  enable_drawdown: true
+  drawdown_daily_pct: 0.03
+  drawdown_weekly_pct: 0.08
+  enable_kelly: false
+  enable_correlation: false
+  enable_regime_gate: false
+  regime_strategy_kind: neutral

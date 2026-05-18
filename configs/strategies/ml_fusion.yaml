@@ -1,0 +1,39 @@
+# ML Fusion (M7)：XGBoost meta strategy
+# 实现：src/okx_trade/strategies/ml_fusion.py
+#
+# 实盘启用前提：
+# 1. pip install -e ".[ml-fusion]"  # 装 xgboost
+# 2. 训出第一版模型并放到 model_path（脚本 scripts/ml_fusion_retrain.py 可后续补）
+# 3. 默认 ``enabled: false``。开启前 paper 跑 2 周看分类准确率 > 52%
+
+instrument_ids:
+  - BTC-USDT-SWAP.OKX
+  - ETH-USDT-SWAP.OKX
+  - SOL-USDT-SWAP.OKX
+  - XRP-USDT-SWAP.OKX
+  - DOGE-USDT-SWAP.OKX
+  - AVAX-USDT-SWAP.OKX
+
+bar_type_template: "{inst}-1-HOUR-LAST-EXTERNAL"
+
+target_horizon_hours: 4
+model_path: var/ml_fusion_model.pkl
+retrain_interval_hours: 168       # 每周（v1 手动跑训练脚本）
+train_window_days: 60
+prediction_threshold: 0.55        # proba > 0.55 → long；< 0.45 → short
+top_k_long: 2
+top_k_short: 2
+
+risk_pct: 0.003
+
+account_equity_usdt: 10000.0
+
+risk:
+  enable_drawdown: true
+  drawdown_daily_pct: 0.03
+  drawdown_weekly_pct: 0.08
+  enable_kelly: false
+  enable_correlation: false
+  # mean_reverting 时砍仓（XGBoost 在震荡市预测稳定性差）
+  enable_regime_gate: true
+  regime_strategy_kind: momentum

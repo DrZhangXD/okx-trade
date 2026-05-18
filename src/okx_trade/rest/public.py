@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from ..enums import InstType
 from ..exceptions import OKXAPIError
-from ..models.common import FundingRate, Instrument
+from ..models.common import FundingRate, Instrument, OptionSummary
 from .transport import Transport
 
 
@@ -110,6 +110,29 @@ class PublicEndpoints:
             cursor = min(r.funding_time for r in new_rows)
         all_rates.sort(key=lambda r: r.funding_time)
         return all_rates
+
+
+    async def get_option_summary(
+        self,
+        uly: str,
+        exp_time_ms: int | None = None,
+    ) -> list[OptionSummary]:
+        """``GET /api/v5/public/opt-summary``。
+
+        返回某标的（如 ``BTC-USD``）下所有 live 期权的 mark IV + Greeks。
+        ``exp_time_ms`` 可选，按到期日过滤；不传则返回所有到期日。
+
+        OKX 返回 ``deltaBS``/``gammaBS``/``vegaBS``/``thetaBS``（BS 模型计算的 Greeks），
+        ``markVol`` 是 mark price 反推的 IV，``volLv`` 是 ATM 近似 IV。
+        """
+        params: dict[str, str] = {"uly": uly}
+        if exp_time_ms is not None:
+            params["expTime"] = str(exp_time_ms)
+        data = await self._t.request(
+            "GET", "/api/v5/public/opt-summary",
+            params=params, group="public.opt_summary",
+        )
+        return [OptionSummary.model_validate(d) for d in data]
 
 
 __all__ = ["PublicEndpoints"]

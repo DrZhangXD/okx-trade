@@ -26,7 +26,13 @@ from nautilus_trader.model.enums import (
     TimeInForce,
 )
 from nautilus_trader.model.identifiers import InstrumentId, Symbol, TradeId
-from nautilus_trader.model.instruments import CryptoFuture, CryptoPerpetual, CurrencyPair
+from nautilus_trader.model.enums import OptionKind
+from nautilus_trader.model.instruments import (
+    CryptoFuture,
+    CryptoOption,
+    CryptoPerpetual,
+    CurrencyPair,
+)
 from nautilus_trader.model.objects import Currency, Price, Quantity
 
 from ..enums import InstType, OrdType, Side
@@ -115,7 +121,7 @@ def parse_okx_instrument(
         NT 不可变 Instrument 对象，可直接 ``provider.add(...)`` 注册。
 
     Raises:
-        ValueError: 未支持的 ``inst_type``（OPTION 暂不实现）。
+        ValueError: 未支持的 ``inst_type``。
     """
     taker_fee = Decimal(taker_fee_bps) / Decimal(10000) if taker_fee_bps else None
     maker_fee = Decimal(maker_fee_bps) / Decimal(10000) if maker_fee_bps else None
@@ -240,6 +246,67 @@ def parse_okx_instrument(
                 "okx_state": okx_inst.state,
                 "okx_inst_type": okx_inst.inst_type.value,
                 "okx_exp_time_ms": okx_inst.exp_time,
+            },
+        )
+
+    if okx_inst.inst_type == InstType.OPTION:
+        # OKX 期权：BTC-USD-261225-90000-C / BTC-USD-261225-90000-P
+        if not okx_inst.settle_ccy:
+            raise ValueError(f"OPTION instrument {okx_inst.inst_id} missing settleCcy")
+        if okx_inst.exp_time <= 0:
+            raise ValueError(f"OPTION instrument {okx_inst.inst_id} missing expTime")
+        if okx_inst.strike <= 0:
+            raise ValueError(f"OPTION instrument {okx_inst.inst_id} missing strike")
+        if okx_inst.opt_type not in ("C", "P"):
+            raise ValueError(
+                f"OPTION instrument {okx_inst.inst_id} bad optType={okx_inst.opt_type!r}"
+            )
+        settle_ccy = Currency.from_str(okx_inst.settle_ccy, strict=False)
+        # 期权 base/quote 从 instId 解析（BTC-USD-...-C → base=BTC, quote=USD）
+        if base_ccy is None or quote_ccy is None:
+            parts = okx_inst.inst_id.split("-")
+            if len(parts) >= 5:
+                if base_ccy is None:
+                    base_ccy = Currency.from_str(parts[0], strict=False)
+                if quote_ccy is None:
+                    quote_ccy = Currency.from_str(parts[1], strict=False)
+        is_inverse = okx_inst.settle_ccy == okx_inst.base_ccy or (
+            base_ccy is not None and okx_inst.settle_ccy == base_ccy.code
+        )
+        multiplier = Quantity(float(okx_inst.ct_val), precision=8) if okx_inst.ct_val > 0 \
+            else Quantity(1, precision=0)
+        activation_ns = _ms_to_nanos(okx_inst.list_time) if okx_inst.list_time > 0 else ts_init
+        expiration_ns = _ms_to_nanos(okx_inst.exp_time)
+        option_kind = OptionKind.CALL if okx_inst.opt_type == "C" else OptionKind.PUT
+        # 行权价精度：OKX 不显式给，沿用 tick_sz 的精度（通常足够）
+        strike_precision = max(0, _decimal_places(okx_inst.strike))
+        strike_price = Price(float(okx_inst.strike), precision=strike_precision)
+        return CryptoOption(
+            instrument_id=instrument_id,
+            raw_symbol=raw_symbol,
+            underlying=base_ccy,
+            quote_currency=quote_ccy,
+            settlement_currency=settle_ccy,
+            is_inverse=is_inverse,
+            option_kind=option_kind,
+            strike_price=strike_price,
+            activation_ns=activation_ns,
+            expiration_ns=expiration_ns,
+            price_precision=price_precision,
+            size_precision=size_precision,
+            price_increment=price_increment,
+            size_increment=size_increment,
+            multiplier=multiplier,
+            min_quantity=min_quantity,
+            maker_fee=maker_fee,
+            taker_fee=taker_fee,
+            ts_event=ts_init,
+            ts_init=ts_init,
+            info={
+                "okx_state": okx_inst.state,
+                "okx_inst_type": okx_inst.inst_type.value,
+                "okx_exp_time_ms": okx_inst.exp_time,
+                "okx_underlying": okx_inst.underlying,
             },
         )
 
