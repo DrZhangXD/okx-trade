@@ -1,0 +1,78 @@
+name: Deploy to okx-vps on main push
+
+# 自动部署：main push 时 ssh okx-vps 拉新代码 + 重启 service + healthcheck。
+# 配合 4 个 scheduled routine（claude.ai/code/routines）使用——routine 改完 yaml
+# git push 后，本 workflow 接力把变更上 VPS。
+#
+# Secrets 依赖（已在 GitHub repo settings 配好）：
+# - VPS_HOST: VPS hostname / IP
+# - VPS_USER: ssh 登录用户（okxtrade）
+# - VPS_SSH_PRIVATE_KEY: ed25519 deploy key 私钥
+# - VPS_KNOWN_HOSTS: ssh-keyscan 输出（防 MITM）
+
+on:
+  push:
+    branches: [main]
+    # 只在影响 VPS 的变更上触发（避免 docs-only 改动重启 service）
+    paths:
+      - 'src/**'
+      - 'configs/**'
+      - 'scripts/**'
+      - 'pyproject.toml'
+      - '.github/workflows/deploy-on-push.yml'
+  workflow_dispatch:  # 允许手动触发
+
+concurrency:
+  group: deploy-okx-vps
+  cancel-in-progress: false  # 串行部署，避免并发 pull / restart 撞车
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout (for log only)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Set up SSH
+        run: |
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          echo "${{ secrets.VPS_SSH_PRIVATE_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          echo "${{ secrets.VPS_KNOWN_HOSTS }}" > ~/.ssh/known_hosts
+          chmod 644 ~/.ssh/known_hosts
+
+      - name: Deploy on okx-vps
+        run: |
+          ssh -i ~/.ssh/deploy_key \
+            -o UserKnownHostsFile=~/.ssh/known_hosts \
+            ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }} \
+            'set -e
+             cd /home/okxtrade/okx-trade
+             echo "=== Before pull ==="
+             git log -1 --oneline
+             git pull --ff-only origin main
+             echo "=== After pull ==="
+             git log -1 --oneline
+             echo "=== Restart okx-trade ==="
+             sudo systemctl restart okx-trade
+             sleep 10
+             sudo systemctl is-active okx-trade
+             echo "=== Healthcheck ==="
+             /home/okxtrade/okx-trade/.venv/bin/python /home/okxtrade/okx-trade/scripts/healthcheck.py'
+
+      - name: Post-deploy verification (strategy registry)
+        run: |
+          ssh -i ~/.ssh/deploy_key \
+            -o UserKnownHostsFile=~/.ssh/known_hosts \
+            ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }} \
+            'sleep 5 && journalctl -u okx-trade --since "30 seconds ago" --no-pager | grep -E "strategies registered|RUNNING|ERROR|Traceback" | tail -20'
+
+      - name: Cleanup
+        if: always()
+        run: |
+          rm -f ~/.ssh/deploy_key ~/.ssh/known_hosts
