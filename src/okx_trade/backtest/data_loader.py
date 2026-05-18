@@ -108,8 +108,14 @@ async def prepare_backtest_catalog(
     *,
     total: int = 1500,
     catalog_path: str | Path = "./data",
+    taker_fee_bps: float | None = None,
+    maker_fee_bps: float | None = None,
 ) -> tuple[NTInstrument, list[Bar]]:
     """一站式：拉数据 → 解析 instrument → 翻译 bars → 写 catalog。
+
+    Args:
+        taker_fee_bps / maker_fee_bps: 可选，把手续费率（bps）烘到 instrument 上，供
+            回测的 ``MakerTakerFeeModel`` 读取。None = 沿用 NT 默认（零手续费）。
 
     Returns:
         ``(instrument, bars)``。已写入 catalog；调用方接着构造 ``BacktestDataConfig``。
@@ -119,7 +125,10 @@ async def prepare_backtest_catalog(
     # 1) 拉 instrument 规格
     inst_type = InstType.SWAP if inst_id.endswith("-SWAP") else InstType.SPOT
     okx_inst = await client.public.get_instrument(inst_type, inst_id)
-    nt_inst = parse_okx_instrument(okx_inst, ts_init=0)  # ts 在回测中无关
+    nt_inst = parse_okx_instrument(
+        okx_inst, ts_init=0,
+        taker_fee_bps=taker_fee_bps, maker_fee_bps=maker_fee_bps,
+    )
 
     # 2) 拉 K 线
     candles = await download_historical_bars(client, inst_id, bar_period, total=total)

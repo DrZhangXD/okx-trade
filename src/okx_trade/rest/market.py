@@ -1,7 +1,7 @@
 """行情接口。"""
 from __future__ import annotations
 
-from ..enums import BarSize
+from ..enums import BarSize, InstType
 from ..models.market import Candle, OrderBook, Ticker, Trade
 from .transport import Transport
 
@@ -105,6 +105,18 @@ class MarketEndpoints:
             from ..exceptions import OKXAPIError
             raise OKXAPIError("not_found", f"ticker {inst_id} not found", endpoint="/market/ticker")
         return Ticker.model_validate(data[0])
+
+    async def get_tickers(self, inst_type: InstType | str) -> list[Ticker]:
+        """批量拉某品类全部 ticker（如 SWAP / SPOT）。
+
+        ``scripts/live.py`` 的 universe resolver 用它按 24h 成交额排 top-N USDT 永续。
+        """
+        inst_type_str = inst_type.value if isinstance(inst_type, InstType) else inst_type
+        data = await self._t.request(
+            "GET", "/api/v5/market/tickers",
+            params={"instType": inst_type_str}, group="market.tickers",
+        )
+        return [Ticker.model_validate(row) for row in data]
 
     async def get_books(self, inst_id: str, *, sz: int = 5) -> OrderBook:
         """获取深度。``sz`` 为深度档数（1/5/10/20/50/400 等，按 OKX 文档支持值）。"""

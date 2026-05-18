@@ -53,7 +53,7 @@ class Ticker(OKXModel):
 
     inst_id: str = Field(alias="instId")
     inst_type: str = Field(alias="instType")
-    last: Decimal
+    last: Decimal = Decimal("0")  # 极冷门 SWAP（如 tokenized stock）OKX 偶尔返回空 → 默认 0
     last_sz: Decimal = Field(alias="lastSz", default=Decimal("0"))
     ask_px: Decimal = Field(alias="askPx", default=Decimal("0"))
     ask_sz: Decimal = Field(alias="askSz", default=Decimal("0"))

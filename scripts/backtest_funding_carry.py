@@ -40,6 +40,8 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--max-position-pct", type=float, default=0.30)
     p.add_argument("--entry-apr-threshold", type=float, default=0.08)
     p.add_argument("--exit-apr-threshold", type=float, default=0.02)
+    p.add_argument("--fee-bps", type=float, default=0.0,
+                   help="taker 手续费率 (bps)，每次进/出仓 4 legs（spot in/out + perp in/out）")
     return p.parse_args()
 
 
@@ -99,21 +101,45 @@ async def _main(args: argparse.Namespace) -> None:
           f"in_position={n_settlements_in_pos} "
           f"enters={n_enters} exits={n_exits}")
 
+    # 手续费扣减：每次完整 round-trip = 4 legs (spot 进/出 + perp 进/出)
+    n_round_trips = min(n_enters, n_exits)
+    fee_cost = 0.0
+    if args.fee_bps > 0:
+        # 每条 leg 都按 notional × fee_bps/1e4；4 legs / round-trip
+        fee_cost = n_round_trips * 4 * notional * args.fee_bps / 10000.0
+        # 若还在持仓中（最后一笔 enter 未配对 exit），也算开仓 2 legs
+        if n_enters > n_exits:
+            fee_cost += 2 * notional * args.fee_bps / 10000.0
+    net_funding_pnl = total_funding_pnl - fee_cost
+
     # 年化（按实际跨度日历日 → 年）
-    apr = (total_funding_pnl / args.equity) / span_days * 365 if span_days > 0 else 0.0
+    apr = (net_funding_pnl / args.equity) / span_days * 365 if span_days > 0 else 0.0
+    gross_apr = (total_funding_pnl / args.equity) / span_days * 365 if span_days > 0 else 0.0
     in_pos_pct = n_settlements_in_pos / n_settlements_total if n_settlements_total else 0
 
     print("\n=== RESULT ===")
     print(f"span_days       = {span_days:.1f}")
     print(f"notional        = {notional:.0f} USDT  ({args.max_position_pct:.0%} of {args.equity:.0f})")
-    print(f"funding_pnl     = {total_funding_pnl:+.2f} USDT  "
+    print(f"gross_funding   = {total_funding_pnl:+.2f} USDT  "
           f"({total_funding_pnl/args.equity:+.2%} of equity)")
-    print(f"annualized_apr  = {apr:+.2%}  (over {span_days:.0f} days)")
+    if args.fee_bps > 0:
+        print(f"fee_cost        = {fee_cost:.2f} USDT  "
+              f"({n_round_trips} round-trips × 4 legs × {args.fee_bps:.1f} bps)")
+        print(f"net_funding_pnl = {net_funding_pnl:+.2f} USDT  "
+              f"({net_funding_pnl/args.equity:+.2%} of equity)")
+        print(f"gross_apr       = {gross_apr:+.2%}")
+        print(f"net_apr         = {apr:+.2%}  (over {span_days:.0f} days)")
+    else:
+        print(f"annualized_apr  = {apr:+.2%}  (over {span_days:.0f} days)")
     print(f"in_position     = {in_pos_pct:.1%} of settlement points")
     print(f"trades          = {n_enters} enter + {n_exits} exit = {n_enters + n_exits} legs (each = 2 NT orders)")
     print()
-    print("注：未含交易成本（taker 0.05% × 4 legs/round-trip）+ 滑点。"
-          "假设两腿 delta-neutral，价格 PnL 互相抵消（实际有 0.1-0.3% 残差）。")
+    if args.fee_bps > 0:
+        print(f"注：已扣 taker {args.fee_bps:.1f} bps × 4 legs/round-trip。"
+              f"未含滑点；假设两腿 delta-neutral，价格 PnL 残差近似 0。")
+    else:
+        print("注：未含交易成本（taker 0.05% × 4 legs/round-trip）+ 滑点。"
+              "假设两腿 delta-neutral，价格 PnL 互相抵消（实际有 0.1-0.3% 残差）。")
 
 
 if __name__ == "__main__":

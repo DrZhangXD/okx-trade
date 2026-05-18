@@ -59,6 +59,7 @@ def build_okx_venue_config(
     starting_balance_usdt: float = 10000.0,
     leverage: int = 10,
     base_currency: str | None = None,
+    enable_fees: bool = False,
 ) -> BacktestVenueConfig:
     """OKX 模拟交易所标准配置（NETTING + MARGIN + 默认 leverage=10）。
 
@@ -66,8 +67,22 @@ def build_okx_venue_config(
         starting_balance_usdt: 起始 USDT 余额，默认 10K（用户决策的资金体量下限）。
         leverage: 默认杠杆。
         base_currency: 账户基础币种；None → 多币种保证金（与 OKX cross 模式一致）。
+        enable_fees: True 时启用 NT ``MakerTakerFeeModel``，按 instrument 的
+            ``taker_fee`` / ``maker_fee``（在 ``prepare_backtest_catalog`` 里通过
+            ``taker_fee_bps`` 烘进 catalog）扣手续费。默认 False = 零手续费 PerfectFill。
     """
-    from nautilus_trader.backtest.config import BacktestVenueConfig
+    from nautilus_trader.backtest.config import (
+        BacktestVenueConfig,
+        ImportableFeeModelConfig,
+    )
+
+    fee_model: ImportableFeeModelConfig | None = None
+    if enable_fees:
+        fee_model = ImportableFeeModelConfig(
+            fee_model_path="nautilus_trader.backtest.models.fee:MakerTakerFeeModel",
+            config_path="nautilus_trader.backtest.config:MakerTakerFeeModelConfig",
+            config={},
+        )
 
     return BacktestVenueConfig(
         name=str(OKX_VENUE),
@@ -76,6 +91,7 @@ def build_okx_venue_config(
         starting_balances=[f"{starting_balance_usdt} USDT"],
         base_currency=base_currency,
         default_leverage=Decimal(leverage),
+        fee_model=fee_model,
         # 其余字段用 NT 默认（fill_model=PerfectFill / latency=0 等）
     )
 
