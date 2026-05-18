@@ -69,7 +69,7 @@ def _populate_60_days(
 
 
 def test_m5_end_to_end_pipeline(tmp_path: Path) -> None:
-    strategies = ["range_breakout", "funding_carry", "xs_momentum", "liq_reversal"]
+    strategies = ["funding_carry", "xs_momentum", "liq_reversal"]
     tracker = PnLTracker(tmp_path / "pnl.sqlite")
     _populate_60_days(tracker, strategies=strategies)
 
@@ -110,7 +110,10 @@ def test_m5_end_to_end_pipeline(tmp_path: Path) -> None:
     total = Decimal("10000")
     eq_out = eq_alloc.allocate(strategies, tracker, total_equity_usdt=total)
     rb_out = rb_alloc.allocate(strategies, tracker, total_equity_usdt=total)
-    assert all(v == Decimal("2500") for v in eq_out.values())
+    # 3 个策略平分 10000 → 每个 ~3333.33（Decimal 末位会差 1 ULP，宽容比较）
+    expected_each = total / len(strategies)
+    assert all(abs(v - expected_each) < Decimal("0.0001") for v in eq_out.values())
+    assert sum(eq_out.values()) == total
     # rb 应至少与 equal 不同（高 vol 策略权重小）
     assert eq_out != rb_out
     assert sum(rb_out.values()) == total
@@ -200,8 +203,8 @@ def test_m5_paper_trading_dry_run_yaml_loads(tmp_path: Path) -> None:
     live_cfg["pnl_db"] = ":memory:"
 
     ctx = build_live_context(live_cfg, build_node=False)
-    assert "range_breakout" in ctx.strategies
     assert "funding_carry" in ctx.strategies
     assert "xs_momentum" in ctx.strategies
     assert "liq_reversal" in ctx.strategies
+    # M5 新策略默认 enabled=false，需手动开启
     ctx.tracker.close()

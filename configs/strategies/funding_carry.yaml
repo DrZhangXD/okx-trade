@@ -13,7 +13,10 @@ account_equity_usdt: 10000.0
 check_interval_sec: 1800      # 30 分钟检查一次 funding rate
 
 # Delta-neutral 仓位 vol≈0，vol_target 没意义；只开 drawdown
+# regime gate 关掉——delta-neutral 的 carry 与方向 regime 无关
 risk:
   enable_drawdown: true
   drawdown_daily_pct: 0.03
   drawdown_weekly_pct: 0.08
+  enable_regime_gate: false
+  regime_strategy_kind: neutral

@@ -2,15 +2,6 @@
 
 支持的策略：
 
-- ``range_breakout``：单标的 1H 信号 + 1D 区间。
-  ::
-
-      python scripts/backtest.py \\
-          --strategy range_breakout \\
-          --symbol BTC-USDT-SWAP \\
-          --signal-bar 1H --range-bar 1D \\
-          --total-bars 8760
-
 - ``xs_momentum``：多标的 1D 横截面动量。
   ::
 
@@ -41,24 +32,17 @@ from okx_trade import OKXRestClient, OKXSettings  # noqa: E402
 from okx_trade.adapter.constants import OKX_VENUE  # noqa: E402
 from okx_trade.adapter.parsing import make_bar_type, parse_okx_instrument  # noqa: E402
 from okx_trade.backtest import (  # noqa: E402
-    bars_to_nt_bars,
     build_okx_venue_config,
-    download_historical_bars,
     extract_equity_curve,
     plot_equity_curve_html,
     run_backtest,
     run_backtest_with_node,
-    write_bars_to_catalog,
 )
 from okx_trade.backtest.data_loader import prepare_backtest_catalog  # noqa: E402
 from okx_trade.enums import InstType  # noqa: E402
 
 
 SUPPORTED_STRATEGIES = {
-    "range_breakout": (
-        "okx_trade.strategies.range_breakout:RangeBreakoutStrategy",
-        "okx_trade.strategies.range_breakout:RangeBreakoutConfig",
-    ),
     "xs_momentum": (
         "okx_trade.strategies.xs_momentum:XSMomentumStrategy",
         "okx_trade.strategies.xs_momentum:XSMomentumConfig",
@@ -73,7 +57,6 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--instrument-ids",
                    help="多标的策略用，逗号分隔（e.g. BTC-USDT-SWAP,ETH-USDT-SWAP,SOL-USDT-SWAP）")
     p.add_argument("--signal-bar", default="1H", help="信号 K 线周期，默认 1H")
-    p.add_argument("--range-bar", default="1D", help="区间 K 线周期（仅 range_breakout 用），默认 1D")
     p.add_argument("--total-bars", type=int, default=2000, help="信号 K 线拉取根数")
     p.add_argument("--equity", type=float, default=10000.0, help="起始资金 USDT")
     p.add_argument("--risk-pct", type=float, default=0.005, help="单笔风险占净值")
@@ -85,6 +68,23 @@ def _parse_args() -> argparse.Namespace:
                    help="保存净值曲线 HTML 到指定路径（plotly 交互图，缺省不绘图）")
     p.add_argument("--equity-csv", default=None,
                    help="同时导出 equity DataFrame 为 CSV（调试用，可选）")
+    # xs_momentum 高级配置（不传则用 configs/strategies/xs_momentum.yaml 默认值）
+    p.add_argument("--top-n", type=int, default=5,
+                   help="xs_momentum 多腿数量（默认与实盘一致 = 5）")
+    p.add_argument("--bot-n", type=int, default=5,
+                   help="xs_momentum 空腿数量（默认与实盘一致 = 5）")
+    p.add_argument("--max-inst-count", type=int, default=4,
+                   help="xs_momentum 单次 rebalance 最大 inst 数（默认实盘 throttle = 4）")
+    p.add_argument("--lookback-days", type=int, default=7,
+                   help="xs_momentum 动量窗口天数（默认 7）")
+    p.add_argument("--target-vol-annualized", type=float, default=0.15,
+                   help="xs_momentum 目标年化波动率（默认 0.15）")
+    # 手续费模型（默认零费用，与历史行为兼容）
+    p.add_argument("--taker-fee-bps", type=float, default=0.0,
+                   help="taker 手续费率 (bps)。>0 时开启 NT MakerTakerFeeModel；"
+                        "OKX 实盘 taker = 5 bps")
+    p.add_argument("--maker-fee-bps", type=float, default=2.0,
+                   help="maker 手续费率 (bps)，仅在 --taker-fee-bps > 0 时生效")
     return p.parse_args()
 
 
@@ -138,88 +138,6 @@ def _run_and_maybe_plot(
 
 
 # ---------------------------------------------------------------------------
-# range_breakout：单标的 1H 信号 + 1D 区间
-# ---------------------------------------------------------------------------
-
-
-async def _run_range_breakout(args: argparse.Namespace) -> None:
-    if not args.symbol:
-        raise SystemExit("range_breakout 需要 --symbol")
-
-    if not args.reuse_data:
-        print(f"[1/3] downloading {args.total_bars} bars × ({args.signal_bar}, {args.range_bar})...")
-        async with OKXRestClient(OKXSettings()) as client:
-            inst, signal_bars = await prepare_backtest_catalog(
-                client, args.symbol, args.signal_bar,
-                total=args.total_bars, catalog_path=args.catalog,
-            )
-            range_total = max(50, args.total_bars // 24)
-            range_candles = await download_historical_bars(
-                client, args.symbol, args.range_bar, total=range_total,
-            )
-            range_bars = bars_to_nt_bars(range_candles, inst, args.range_bar)
-            write_bars_to_catalog(args.catalog, inst, range_bars)
-            print(f"        signal_bars={len(signal_bars)} range_bars={len(range_bars)}")
-    else:
-        print("[1/3] reusing catalog (--reuse-data)")
-        async with OKXRestClient(OKXSettings()) as client:
-            inst = await _resolve_instrument(client, args.symbol)
-
-    print("[2/3] building backtest config...")
-    from nautilus_trader.backtest.config import BacktestDataConfig
-    from nautilus_trader.config import ImportableStrategyConfig
-    from nautilus_trader.model.data import Bar
-
-    instrument_id = f"{args.symbol}.{OKX_VENUE}"
-    signal_bar_type = make_bar_type(args.symbol, args.signal_bar)
-    range_bar_type = make_bar_type(args.symbol, args.range_bar)
-
-    data_configs = [
-        BacktestDataConfig(
-            catalog_path=str(Path(args.catalog).resolve()),
-            data_cls=Bar.fully_qualified_name(),
-            instrument_id=instrument_id,
-            bar_types=[str(signal_bar_type)],
-        ),
-        BacktestDataConfig(
-            catalog_path=str(Path(args.catalog).resolve()),
-            data_cls=Bar.fully_qualified_name(),
-            instrument_id=instrument_id,
-            bar_types=[str(range_bar_type)],
-        ),
-    ]
-
-    venue = build_okx_venue_config(
-        starting_balance_usdt=args.equity,
-        leverage=args.leverage,
-    )
-
-    strategy_path, config_path = SUPPORTED_STRATEGIES["range_breakout"]
-    strategy_config = ImportableStrategyConfig(
-        strategy_path=strategy_path,
-        config_path=config_path,
-        config={
-            "instrument_id": instrument_id,
-            "range_bar_type": str(range_bar_type),
-            "signal_bar_type": str(signal_bar_type),
-            "risk_pct": args.risk_pct,
-            "account_equity_usdt": args.equity,
-        },
-    )
-
-    print("[3/3] running backtest...")
-    summary = _run_and_maybe_plot(
-        args,
-        venue=venue,
-        data=data_configs,
-        strategies=[strategy_config],
-        plot_title=f"range_breakout — {args.symbol}",
-    )
-    print("\n=== RESULT ===")
-    print(summary)
-
-
-# ---------------------------------------------------------------------------
 # xs_momentum：多标的 1D 横截面动量
 # ---------------------------------------------------------------------------
 
@@ -231,6 +149,11 @@ async def _run_xs_momentum(args: argparse.Namespace) -> None:
     if len(inst_id_list) < 2:
         raise SystemExit(f"xs_momentum 至少需要 2 个标的，得到 {len(inst_id_list)}")
 
+    fee_kwargs = {
+        "taker_fee_bps": args.taker_fee_bps,
+        "maker_fee_bps": args.maker_fee_bps,
+    } if args.taker_fee_bps > 0 else {}
+
     if not args.reuse_data:
         print(f"[1/3] downloading {args.total_bars} × {args.signal_bar} bars for "
               f"{len(inst_id_list)} instruments...")
@@ -239,6 +162,7 @@ async def _run_xs_momentum(args: argparse.Namespace) -> None:
                 _, bars = await prepare_backtest_catalog(
                     client, inst_id, args.signal_bar,
                     total=args.total_bars, catalog_path=args.catalog,
+                    **fee_kwargs,
                 )
                 print(f"        {inst_id}: {len(bars)} bars")
     else:
@@ -267,6 +191,7 @@ async def _run_xs_momentum(args: argparse.Namespace) -> None:
     venue = build_okx_venue_config(
         starting_balance_usdt=args.equity,
         leverage=args.leverage,
+        enable_fees=args.taker_fee_bps > 0,
     )
 
     # bar_type_template："{inst}-1-DAY-LAST-EXTERNAL"，每个 inst 自己 replace
@@ -275,8 +200,9 @@ async def _run_xs_momentum(args: argparse.Namespace) -> None:
     template_suffix = sample_bar_str.split(".OKX-", 1)[1]  # "1-DAY-LAST-EXTERNAL"
     bar_type_template = "{inst}-" + template_suffix
 
-    # 至少 4 个标的才能 top_n=2 + bot_n=2；少于 4 个把 top_n/bot_n 调到 1
-    top_n = bot_n = 2 if len(inst_id_list) >= 4 else 1
+    # CLI flag 与 universe 大小做下限保护：top_n + bot_n 不能超过 universe
+    top_n = min(args.top_n, max(1, len(inst_id_list) // 2))
+    bot_n = min(args.bot_n, max(1, len(inst_id_list) // 2))
 
     strategy_path, config_path = SUPPORTED_STRATEGIES["xs_momentum"]
     strategy_config = ImportableStrategyConfig(
@@ -287,12 +213,16 @@ async def _run_xs_momentum(args: argparse.Namespace) -> None:
             "bar_type_template": bar_type_template,
             "top_n": top_n,
             "bot_n": bot_n,
+            "max_inst_count": args.max_inst_count,
+            "lookback_days": args.lookback_days,
+            "target_vol_annualized": args.target_vol_annualized,
             "risk_pct": args.risk_pct,
             "account_equity_usdt": args.equity,
         },
     )
 
-    print(f"        universe={len(nt_instrument_ids)} top_n={top_n} bot_n={bot_n}")
+    print(f"        universe={len(nt_instrument_ids)} top_n={top_n} bot_n={bot_n} "
+          f"max_inst={args.max_inst_count} lookback={args.lookback_days}")
     print("[3/3] running backtest...")
     summary = _run_and_maybe_plot(
         args,
@@ -311,7 +241,6 @@ async def _run_xs_momentum(args: argparse.Namespace) -> None:
 
 
 _RUNNERS = {
-    "range_breakout": _run_range_breakout,
     "xs_momentum": _run_xs_momentum,
 }
 

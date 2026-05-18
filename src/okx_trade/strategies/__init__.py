@@ -5,17 +5,32 @@
 
 可用策略：
 
-- ``RangeBreakoutStrategy`` (M2): 区间假突破回归策略，移植自 scalp 项目
 - ``FundingCarryStrategy``  (M2): spot+perp delta-neutral 资金费率套利
 - ``XSMomentumStrategy``    (M4): 横截面动量（vol-managed），每日 UTC 0 点 rebalance
 - ``LiqReversalStrategy``   (M4): 强平瀑布反转（订阅 ``liquidation-orders`` z-score）
+- ``BasisArbStrategy``      (M5): 交割合约 vs 现货期现套利（spot long + futures short）
+- ``OBImbalanceStrategy``   (M5): 订单流 microprice / book imbalance 微观结构反转
 
 确认门控（不独立交易，作为 Strategy 的 helper）：
 
 - ``confirmation.OFIFilter`` (M4): trades 频道 OFI 反向时降仓 50% / 跳过
+
+已下线：
+
+- ``RangeBreakoutStrategy``（M5.X 下线）：crypto 区间突破 alpha 弱，与 xs_momentum 高度同向但噪音
+  更大；多次事故性 fix（commit 34666fc、a6a3c8b）说明实现层不稳定。
 """
 from __future__ import annotations
 
+from ._signals import (
+    BasisAction,
+    BasisArbParams,
+    annualized_basis,
+    basis_decision,
+    book_imbalance,
+    microprice,
+    ob_signal,
+)
 from .base import BarBuffer, BarSnapshot, ScalpSignal, position_contracts
 from .confirmation import OFIDecision, OFIFilter, TradeFlow, ofi_filter_decision, ofi_score
 from .funding_carry import (
@@ -34,13 +49,6 @@ from .liq_reversal import (
     liq_zscore,
     parse_okx_liq_frame,
 )
-from .range_breakout import (
-    RangeBreakoutConfig,
-    RangeBreakoutLogic,
-    RangeBreakoutStrategy,
-    detect_range_breakout_signal,
-    last_completed_range,
-)
 from .xs_momentum import (
     XSMomentumConfig,
     XSMomentumStrategy,
@@ -56,12 +64,14 @@ __all__ = [
     "BarSnapshot",
     "ScalpSignal",
     "position_contracts",
-    # Range Breakout (M2)
-    "RangeBreakoutConfig",
-    "RangeBreakoutLogic",
-    "RangeBreakoutStrategy",
-    "detect_range_breakout_signal",
-    "last_completed_range",
+    # Shared pure signals (M5)
+    "BasisAction",
+    "BasisArbParams",
+    "annualized_basis",
+    "basis_decision",
+    "book_imbalance",
+    "microprice",
+    "ob_signal",
     # Funding Carry (M2)
     "CarryAction",
     "FundingCarryConfig",

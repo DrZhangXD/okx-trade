@@ -34,8 +34,11 @@ buffer_size: 60                # ≥ lookback + vol_window + 5
 risk_pct: 0.01                 # 每个腿单笔风险 1%
 account_equity_usdt: 10000.0
 
-# vol_target 已在策略内部按品种维度做了，这里再叠一层会过缩；只开 drawdown
+# vol_target 已在策略内部按品种维度做了，这里再叠一层会过缩；只开 drawdown + regime
 risk:
   enable_drawdown: true
   drawdown_daily_pct: 0.03
   drawdown_weekly_pct: 0.08
+  # M5.X regime gate：xs_momentum 是 momentum 类，趋势市加满、震荡市砍 60%
+  enable_regime_gate: true
+  regime_strategy_kind: momentum

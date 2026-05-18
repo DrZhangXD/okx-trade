@@ -29,9 +29,9 @@ pytest tests/integration -v -m integration
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│  Strategy Layer  (4 strategies, NautilusTrader Strategy 子类)│
-│    range_breakout / xs_momentum / funding_carry /            │
-│    liq_reversal                                              │
+│  Strategy Layer  (NautilusTrader Strategy 子类)              │
+│    xs_momentum / funding_carry / liq_reversal /              │
+│    basis_arb / ob_imbalance (M5)                             │
 ├─────────────────────────────────────────────────────────────┤
 │  Risk + PnL + Portfolio + Monitor                            │
 │    KellyCheck / DrawdownTracker / VolTargetCheck /           │
@@ -81,14 +81,17 @@ asyncio.run(main())
 
 ## 策略层
 
-`src/okx_trade/strategies/` 下 4 个策略，全是 `nautilus_trader.trading.strategy.Strategy` 子类，回测和实盘共享同一份代码：
+`src/okx_trade/strategies/` 下的策略全是 `nautilus_trader.trading.strategy.Strategy` 子类，回测和实盘共享同一份代码：
 
 | 策略 | 思路 | 频率 | YAML |
 |---|---|---|---|
-| `RangeBreakoutStrategy` | 区间假突破回归 | 1H 信号 / 1D 区间 | [range_breakout.yaml](configs/strategies/range_breakout.yaml) |
 | `FundingCarryStrategy` | spot+perp delta-neutral 资金费率套利 | 8h funding cycle | [funding_carry.yaml](configs/strategies/funding_carry.yaml) |
 | `XSMomentumStrategy` | 横截面动量（vol-managed），多空各 5 腿 | 每日 UTC 00:00 rebalance | [xs_momentum.yaml](configs/strategies/xs_momentum.yaml) |
 | `LiqReversalStrategy` | 强平瀑布反转（z-score on `liquidation-orders`） | 事件驱动 | [liq_reversal.yaml](configs/strategies/liq_reversal.yaml) |
+| `BasisArbStrategy` (M5) | 交割合约 vs 现货期现套利（spot long + futures short） | 每小时检查 basis | [basis_arb.yaml](configs/strategies/basis_arb.yaml) |
+| `OBImbalanceStrategy` (M5) | 订单流 microprice + book imbalance 微观结构反转 | 秒级聚合，分钟级持仓 | [ob_imbalance.yaml](configs/strategies/ob_imbalance.yaml) |
+
+已下线：`RangeBreakoutStrategy`（M5.X，alpha 弱 + 实现不稳）。详见 [docs/strategy_roadmap.md](docs/strategy_roadmap.md)。
 
 ## 风控管道
 
@@ -180,7 +183,7 @@ src/okx_trade/
 
 scripts/
 ├── live.py                  # paper trading entrypoint (--check / --run / --report-only)
-├── backtest.py              # range_breakout / xs_momentum 回测
+├── backtest.py              # xs_momentum 回测（其他策略另有专用脚本）
 ├── backtest_funding_carry.py
 ├── backtest_m4_smoke.py
 ├── healthcheck.py           # systemd timer 调用
@@ -227,7 +230,7 @@ ruff check src/ tests/
 ## Roadmap
 
 - ✅ **M1**: REST + WS SDK
-- ✅ **M2**: range_breakout + funding_carry 策略 + 风控雏形
+- ✅ **M2**: range_breakout (已下线) + funding_carry 策略 + 风控雏形
 - ✅ **M3**: 完整风控管道（vol_target / kelly / drawdown / correlation）
 - ✅ **M3.6**: NT 集成（`RiskAwareStrategy` 在 `submit_order` 前注入）
 - ✅ **M4**: xs_momentum + liq_reversal + OFI confirmation + 回测引擎

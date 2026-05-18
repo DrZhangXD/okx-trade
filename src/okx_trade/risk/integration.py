@@ -2,7 +2,7 @@
 
 为什么单独一个 module？
 -------------------
-策略层（``range_breakout`` / ``funding_carry`` ...）和风控层（``risk/*``）应保持
+策略层（``xs_momentum`` / ``funding_carry`` / ``liq_reversal`` ...）和风控层（``risk/*``）应保持
 正交：策略不知道有哪些 check，风控不知道策略的下单细节。这个 module 是两者间的
 **唯一胶水**：
 
@@ -28,6 +28,7 @@ from .base import RiskAction, RiskCheck, RiskIntent, RiskManager
 from .correlation import CorrelationCheck
 from .drawdown import DrawdownCheck, DrawdownTracker
 from .kelly import KellyCheck
+from .regime import RegimeDetectorProtocol, RegimeGateCheck, StrategyKind
 from .vol_target import VolTargetCheck
 
 if TYPE_CHECKING:
@@ -68,6 +69,11 @@ class RiskConfig:
     correlation_threshold: float = 0.7
     correlation_high_corr_scale: float = 0.5
 
+    # regime gate (M5.X)
+    enable_regime_gate: bool = False
+    # 必须声明策略类型让 gate 知道往哪缩——momentum / reversal / neutral
+    regime_strategy_kind: StrategyKind = "neutral"
+
 
 @dataclass(frozen=True, slots=True)
 class RiskHandles:
@@ -81,22 +87,30 @@ class RiskHandles:
     kelly: KellyCheck | None = None
     drawdown_tracker: DrawdownTracker | None = None
     correlation: CorrelationCheck | None = None
+    # regime detector 由调用方传入（``live_node`` 单例 + 注入），所有启用
+    # regime gate 的策略共享同一引用
+    regime_detector: RegimeDetectorProtocol | None = None
 
 
 def build_risk_manager(
     config: RiskConfig | None,
+    *,
+    regime_detector: RegimeDetectorProtocol | None = None,
 ) -> tuple[RiskManager | None, RiskHandles]:
     """根据 config 构造 ``RiskManager`` + handles。
 
     Args:
         config: ``RiskConfig`` 或 None；后者完全跳过风控（返回 ``(None, RiskHandles())``）。
+        regime_detector: 可选 ``RegimeDetector`` 实例。当 ``config.enable_regime_gate``
+            为 True 且 detector 非空时，追加 ``RegimeGateCheck`` 到 pipeline。多个
+            策略应共享同一 detector 实例（``live_node`` 启动时构造）。
 
     Returns:
         ``(manager, handles)``。``manager`` 在所有 check 都关闭时也是 None
         （省一次 pipeline 调用）。
     """
     if config is None:
-        return None, RiskHandles()
+        return None, RiskHandles(regime_detector=regime_detector)
 
     checks: list[RiskCheck] = []
     handles_kwargs: dict[str, Any] = {}
@@ -138,6 +152,13 @@ def build_risk_manager(
         )
         checks.append(c)
         handles_kwargs["correlation"] = c
+
+    if config.enable_regime_gate and regime_detector is not None:
+        checks.append(RegimeGateCheck(
+            detector=regime_detector,
+            strategy_kind=config.regime_strategy_kind,
+        ))
+    handles_kwargs["regime_detector"] = regime_detector
 
     handles = RiskHandles(**handles_kwargs)
     if not checks:

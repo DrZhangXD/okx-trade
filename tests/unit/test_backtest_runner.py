@@ -79,33 +79,15 @@ class TestBacktestSmoke:
 
     def test_runs_without_error(self, tmp_catalog: str) -> None:
         inst = _make_swap_instrument()
-        # 写两套 bar：1m signal + 1H range（合成的）
+        # 写一套 1m bar；liq_reversal 单 bar 类型即可，subscribe_liquidations=False 时
+        # 策略不会启动 WS task（适合回测烟测）
         signal_candles = _make_synthetic_candles(
             start_ts_ms=1_700_000_000_000, count=200, interval_ms=60_000,
         )
         signal_bars = bars_to_nt_bars(signal_candles, inst, "1m")
-
-        # 1H bar：用每 60 根聚合成一根（取首/尾/最高/最低）
-        range_candles = []
-        for i in range(0, len(signal_candles), 60):
-            chunk = signal_candles[i:i + 60]
-            if not chunk:
-                continue
-            range_candles.append(Candle.from_array([
-                str(chunk[0].ts),
-                str(chunk[0].open),
-                str(max(c.high for c in chunk)),
-                str(min(c.low for c in chunk)),
-                str(chunk[-1].close),
-                "60",
-                "60", "60", "1",
-            ]))
-        range_bars = bars_to_nt_bars(range_candles, inst, "1H")
-
-        write_bars_to_catalog(tmp_catalog, inst, signal_bars + range_bars)
+        write_bars_to_catalog(tmp_catalog, inst, signal_bars)
 
         signal_bar_type = make_bar_type("BTC-USDT-SWAP", "1m")
-        range_bar_type = make_bar_type("BTC-USDT-SWAP", "1H")
         instrument_id = f"BTC-USDT-SWAP.{OKX_VENUE}"
 
         data_configs = [
@@ -115,23 +97,17 @@ class TestBacktestSmoke:
                 instrument_id=instrument_id,
                 bar_types=[str(signal_bar_type)],
             ),
-            BacktestDataConfig(
-                catalog_path=str(Path(tmp_catalog).resolve()),
-                data_cls=Bar.fully_qualified_name(),
-                instrument_id=instrument_id,
-                bar_types=[str(range_bar_type)],
-            ),
         ]
 
         venue = build_okx_venue_config(starting_balance_usdt=10000, leverage=10)
         strategy_config = ImportableStrategyConfig(
-            strategy_path="okx_trade.strategies.range_breakout:RangeBreakoutStrategy",
-            config_path="okx_trade.strategies.range_breakout:RangeBreakoutConfig",
+            strategy_path="okx_trade.strategies.liq_reversal:LiqReversalStrategy",
+            config_path="okx_trade.strategies.liq_reversal:LiqReversalConfig",
             config={
                 "instrument_id": instrument_id,
-                "range_bar_type": str(range_bar_type),
-                "signal_bar_type": str(signal_bar_type),
+                "bar_type": str(signal_bar_type),
                 "risk_pct": 0.005,
+                "subscribe_liquidations": False,
                 "account_equity_usdt": 10000.0,
             },
         )

@@ -8,6 +8,19 @@
 
 ## [Unreleased] — Paper trading 观察期
 
+### Added (M5.X strategy optimization)
+
+- **`feat(strategies)`** — 新增 `BasisArbStrategy`：OKX 交割合约 vs 现货期现套利（spot long + futures short），结算前 basis 锁定，比 funding_carry 更稳。需要 `InstType.FUTURES` 加载到 NT cache（本次顺便启用）。
+- **`feat(strategies)`** — 新增 `OBImbalanceStrategy`：订单流 microprice + book imbalance 微观结构反转，订阅 OKX `books5` 频道，30s–5min 中频持仓。
+- **`feat(risk)`** — 新增 `RegimeGate` 风控插件（规则版默认开 + 可选 HMM 实现），按 BTC 1d MA + 30d 实现波动率分位数判 `trending / mean_reverting / neutral`，对 momentum / reversal 类策略按映射表缩仓。
+- **`feat(adapter)`** — `parse_okx_instrument` 增加 `CryptoFuture` 解析分支；`OKXInstrumentProvider` 默认加载 SWAP + SPOT + FUTURES。
+- **`feat(strategies)`** — 新增 `_signals.py` 模块：`microprice` / `book_imbalance` / `ob_signal` / `annualized_basis` / `basis_decision` 跨策略共享纯函数。
+- **`docs`** — 新增 `docs/strategy_roadmap.md`：记录中长期策略（funding cross-section / funding skew momentum / option vol selling）。
+
+### Removed (M5.X)
+
+- **`refactor(strategies)`** — 下线 `RangeBreakoutStrategy`。理由：crypto 区间假突破在 OOS 上 alpha 弱、与 xs_momentum 高度同向但噪音更大；近期事故性 fix（commits 34666fc / a6a3c8b）反映实现层不稳。删除 `src/okx_trade/strategies/range_breakout.py`、`configs/strategies/range_breakout.yaml`、`tests/unit/test_strategy_range_breakout.py`，并清理 11 处引用（live_node 注册表、live.yaml、`scripts/backtest.py` SUPPORTED_STRATEGIES、`scripts/backtest_oneyear.py`、README、ARCHITECTURE）。
+
 ### Fixed
 
 - **`fix(exec)`** [`c966a47`](https://github.com/DrZhangXD/okx-trade/commit/c966a47) (2026-05-09) — `_build_order_request` 用 `self._instrument_provider.find()` 而非 `self.cache`（NT `LiveExecutionClient` 没有 `cache` 属性，前一版导致全部订单 reject）

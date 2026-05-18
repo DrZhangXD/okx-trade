@@ -26,7 +26,7 @@ from nautilus_trader.model.enums import (
     TimeInForce,
 )
 from nautilus_trader.model.identifiers import InstrumentId, Symbol, TradeId
-from nautilus_trader.model.instruments import CryptoPerpetual, CurrencyPair
+from nautilus_trader.model.instruments import CryptoFuture, CryptoPerpetual, CurrencyPair
 from nautilus_trader.model.objects import Currency, Price, Quantity
 
 from ..enums import InstType, OrdType, Side
@@ -94,19 +94,31 @@ def bar_spec_period_ms(spec: BarSpecification) -> int:
 # ---------------------------------------------------------------------------
 
 
-def parse_okx_instrument(okx_inst: OKXInstrument, ts_init: int) -> CryptoPerpetual | CurrencyPair:
+def parse_okx_instrument(
+    okx_inst: OKXInstrument,
+    ts_init: int,
+    *,
+    taker_fee_bps: float | None = None,
+    maker_fee_bps: float | None = None,
+) -> CryptoPerpetual | CurrencyPair:
     """OKX ``Instrument`` → NT ``CryptoPerpetual`` (SWAP) 或 ``CurrencyPair`` (SPOT)。
 
     Args:
         okx_inst: 从 ``client.public.get_instruments(...)`` 返回的 Pydantic 模型。
         ts_init: 当前时间戳（纳秒），通常取 ``LiveClock.timestamp_ns()``。
+        taker_fee_bps: 可选，回测用 taker 手续费率（bps）。设置后会写入 instrument 的
+            ``taker_fee``，供 NT ``MakerTakerFeeModel`` 在成交时读取。实盘不消费此字段
+            （OKX exec client 不会用 instrument-level fee），仅影响 backtest catalog。
+        maker_fee_bps: 同上，maker 手续费率。
 
     Returns:
         NT 不可变 Instrument 对象，可直接 ``provider.add(...)`` 注册。
 
     Raises:
-        ValueError: 未支持的 ``inst_type``（FUTURES/OPTION 暂不实现）。
+        ValueError: 未支持的 ``inst_type``（OPTION 暂不实现）。
     """
+    taker_fee = Decimal(taker_fee_bps) / Decimal(10000) if taker_fee_bps else None
+    maker_fee = Decimal(maker_fee_bps) / Decimal(10000) if maker_fee_bps else None
     instrument_id = to_instrument_id(okx_inst.inst_id)
     raw_symbol = Symbol(okx_inst.inst_id)
 
@@ -156,6 +168,8 @@ def parse_okx_instrument(okx_inst: OKXInstrument, ts_init: int) -> CryptoPerpetu
             size_increment=size_increment,
             multiplier=multiplier,
             min_quantity=min_quantity,
+            maker_fee=maker_fee,
+            taker_fee=taker_fee,
             ts_event=ts_init,
             ts_init=ts_init,
             info={"okx_state": okx_inst.state, "okx_inst_type": okx_inst.inst_type.value},
@@ -174,9 +188,59 @@ def parse_okx_instrument(okx_inst: OKXInstrument, ts_init: int) -> CryptoPerpetu
             price_increment=price_increment,
             size_increment=size_increment,
             min_quantity=min_quantity,
+            maker_fee=maker_fee,
+            taker_fee=taker_fee,
             ts_event=ts_init,
             ts_init=ts_init,
             info={"okx_state": okx_inst.state, "okx_inst_type": okx_inst.inst_type.value},
+        )
+
+    if okx_inst.inst_type == InstType.FUTURES:
+        # 交割合约：必须有 settle_ccy 与 expTime
+        if not okx_inst.settle_ccy:
+            raise ValueError(f"FUTURES instrument {okx_inst.inst_id} missing settleCcy")
+        if okx_inst.exp_time <= 0:
+            raise ValueError(f"FUTURES instrument {okx_inst.inst_id} missing expTime")
+        settle_ccy = Currency.from_str(okx_inst.settle_ccy, strict=False)
+        # OKX FUTURES 不返回 baseCcy/quoteCcy；从 instId 反推 (BTC-USDT-251226)
+        if base_ccy is None or quote_ccy is None:
+            parts = okx_inst.inst_id.split("-")
+            if len(parts) >= 3:
+                if base_ccy is None:
+                    base_ccy = Currency.from_str(parts[0], strict=False)
+                if quote_ccy is None:
+                    quote_ccy = Currency.from_str(parts[1], strict=False)
+        is_inverse = okx_inst.settle_ccy == okx_inst.base_ccy or (
+            base_ccy is not None and okx_inst.settle_ccy == base_ccy.code
+        )
+        multiplier = Quantity(float(okx_inst.ct_val), precision=8) if okx_inst.ct_val > 0 \
+            else Quantity(1, precision=0)
+        activation_ns = _ms_to_nanos(okx_inst.list_time) if okx_inst.list_time > 0 else ts_init
+        expiration_ns = _ms_to_nanos(okx_inst.exp_time)
+        return CryptoFuture(
+            instrument_id=instrument_id,
+            raw_symbol=raw_symbol,
+            underlying=base_ccy,
+            quote_currency=quote_ccy,
+            settlement_currency=settle_ccy,
+            is_inverse=is_inverse,
+            activation_ns=activation_ns,
+            expiration_ns=expiration_ns,
+            price_precision=price_precision,
+            size_precision=size_precision,
+            price_increment=price_increment,
+            size_increment=size_increment,
+            multiplier=multiplier,
+            min_quantity=min_quantity,
+            maker_fee=maker_fee,
+            taker_fee=taker_fee,
+            ts_event=ts_init,
+            ts_init=ts_init,
+            info={
+                "okx_state": okx_inst.state,
+                "okx_inst_type": okx_inst.inst_type.value,
+                "okx_exp_time_ms": okx_inst.exp_time,
+            },
         )
 
     raise ValueError(f"unsupported OKX instType: {okx_inst.inst_type}")

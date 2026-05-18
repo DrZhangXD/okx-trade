@@ -47,14 +47,17 @@ class OKXInstrumentProvider(InstrumentProvider):
         self._clock = clock
 
     async def load_all_async(self, filters: dict[str, Any] | None = None) -> None:
-        """拉 SWAP + SPOT 全集到 cache。
+        """拉 SWAP + SPOT + FUTURES 全集到 cache。
 
         ``filters`` 支持的键：
-        - ``inst_types``: ``list[InstType]``，限制 instType 子集（默认两个都拉）
+        - ``inst_types``: ``list[InstType]``，限制 instType 子集（默认三个都拉，
+          FUTURES 是 basis_arb 策略所需）
         - ``inst_ids``: ``set[str]``，仅保留特定 instId（如 ``{"BTC-USDT-SWAP"}``）
         """
         filters = filters or {}
-        inst_types: list[InstType] = filters.get("inst_types", [InstType.SWAP, InstType.SPOT])
+        inst_types: list[InstType] = filters.get(
+            "inst_types", [InstType.SWAP, InstType.SPOT, InstType.FUTURES]
+        )
         inst_ids_keep: set[str] | None = filters.get("inst_ids")
 
         # 并行拉所有 instType（两个 REST 请求）
@@ -93,13 +96,21 @@ class OKXInstrumentProvider(InstrumentProvider):
         # OKX REST 的 instId 参数只接受单个，因此需要并发多次调用；按 instType 分组优化
         spot_ids: list[str] = []
         swap_ids: list[str] = []
+        futures_ids: list[str] = []
         for nid in instrument_ids:
             okx_id = from_instrument_id(nid)
-            # 简单启发：以 ``-SWAP`` 结尾就是永续，否则当 spot
+            # 启发式分类：
+            # - 以 ``-SWAP`` 结尾 → 永续
+            # - 形如 ``BASE-QUOTE-YYMMDD``（末段全数字） → 交割合约
+            # - 其余 → 现货
             if okx_id.endswith("-SWAP"):
                 swap_ids.append(okx_id)
             else:
-                spot_ids.append(okx_id)
+                parts = okx_id.split("-")
+                if len(parts) >= 3 and parts[-1].isdigit():
+                    futures_ids.append(okx_id)
+                else:
+                    spot_ids.append(okx_id)
 
         ts_init = self._clock.timestamp_ns()
 
@@ -110,6 +121,7 @@ class OKXInstrumentProvider(InstrumentProvider):
 
         tasks = [_load_one(InstType.SWAP, x) for x in swap_ids]
         tasks += [_load_one(InstType.SPOT, x) for x in spot_ids]
+        tasks += [_load_one(InstType.FUTURES, x) for x in futures_ids]
         await asyncio.gather(*tasks)
 
     async def load_async(

@@ -29,9 +29,9 @@ pytest tests/integration -v -m integration
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│  Strategy Layer  (4 strategies, NautilusTrader subclasses)   │
-│    range_breakout / xs_momentum / funding_carry /            │
-│    liq_reversal                                              │
+│  Strategy Layer  (NautilusTrader Strategy subclasses)        │
+│    xs_momentum / funding_carry / liq_reversal /              │
+│    basis_arb / ob_imbalance (M5)                             │
 ├─────────────────────────────────────────────────────────────┤
 │  Risk + PnL + Portfolio + Monitor                            │
 │    KellyCheck / DrawdownTracker / VolTargetCheck /           │
@@ -81,14 +81,17 @@ More SDK examples in [`examples/`](examples/).
 
 ## Strategy layer
 
-`src/okx_trade/strategies/` ships four strategies, all subclasses of `nautilus_trader.trading.strategy.Strategy`. Backtest and live share the same code:
+`src/okx_trade/strategies/` ships strategies as subclasses of `nautilus_trader.trading.strategy.Strategy`. Backtest and live share the same code:
 
 | Strategy | Idea | Cadence | YAML |
 |---|---|---|---|
-| `RangeBreakoutStrategy` | Mean-reversion on false breakout | 1H signal / 1D range | [range_breakout.yaml](configs/strategies/range_breakout.yaml) |
 | `FundingCarryStrategy` | Spot+perp delta-neutral funding rate carry | 8h funding cycle | [funding_carry.yaml](configs/strategies/funding_carry.yaml) |
 | `XSMomentumStrategy` | Cross-sectional momentum, vol-managed, 5 long + 5 short legs | Daily UTC 00:00 rebalance | [xs_momentum.yaml](configs/strategies/xs_momentum.yaml) |
 | `LiqReversalStrategy` | Liquidation cascade reversal (z-score on `liquidation-orders`) | Event-driven | [liq_reversal.yaml](configs/strategies/liq_reversal.yaml) |
+| `BasisArbStrategy` (M5) | Delivery futures vs spot basis arbitrage (spot long + futures short) | Hourly basis check | [basis_arb.yaml](configs/strategies/basis_arb.yaml) |
+| `OBImbalanceStrategy` (M5) | Order-flow microprice + book imbalance microstructure reversion | Sub-second aggregation, minute-scale holding | [ob_imbalance.yaml](configs/strategies/ob_imbalance.yaml) |
+
+Retired: `RangeBreakoutStrategy` (M5.X, weak alpha + unstable implementation). See [docs/strategy_roadmap.md](docs/strategy_roadmap.md).
 
 ## Risk pipeline
 
@@ -180,7 +183,7 @@ src/okx_trade/
 
 scripts/
 ├── live.py                  # Paper trading entrypoint (--check / --run / --report-only)
-├── backtest.py              # range_breakout / xs_momentum backtest
+├── backtest.py              # xs_momentum backtest (other strategies have their own scripts)
 ├── backtest_funding_carry.py
 ├── backtest_m4_smoke.py
 ├── healthcheck.py           # Invoked by systemd timer
@@ -227,7 +230,7 @@ Commit conventions: [Conventional Commits](https://www.conventionalcommits.org/)
 ## Roadmap
 
 - ✅ **M1**: REST + WS SDK
-- ✅ **M2**: range_breakout + funding_carry strategies + risk pipeline scaffolding
+- ✅ **M2**: range_breakout (retired) + funding_carry strategies + risk pipeline scaffolding
 - ✅ **M3**: full risk pipeline (vol_target / kelly / drawdown / correlation)
 - ✅ **M3.6**: NT integration (`RiskAwareStrategy` injects check before `submit_order`)
 - ✅ **M4**: xs_momentum + liq_reversal + OFI confirmation + backtest engine

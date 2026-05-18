@@ -53,6 +53,9 @@ class Instrument(OKXModel):
     lot_sz: Decimal = Field(default=Decimal("0"), alias="lotSz")
     min_sz: Decimal = Field(default=Decimal("0"), alias="minSz")
     state: str = Field(default="", alias="state")  # live / suspend / preopen / settlement
+    # 交割合约（FUTURES）专属：到期/上市时间（毫秒），SPOT/SWAP 缺省为 0
+    exp_time: int = Field(default=0, alias="expTime")
+    list_time: int = Field(default=0, alias="listTime")
 
 
 class FundingRate(OKXModel):

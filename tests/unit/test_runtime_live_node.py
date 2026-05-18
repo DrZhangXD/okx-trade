@@ -14,12 +14,12 @@ from okx_trade.runtime import build_live_context
 @pytest.fixture
 def minimal_live_cfg(tmp_path: Path) -> dict:
     """两个 enabled 策略的最小可用 live_cfg。"""
-    rb_cfg = tmp_path / "rb.yaml"
-    rb_cfg.write_text(yaml.safe_dump({
+    lr_cfg = tmp_path / "lr.yaml"
+    lr_cfg.write_text(yaml.safe_dump({
         "instrument_id": "BTC-USDT-SWAP.OKX",
-        "range_bar_type": "BTC-USDT-SWAP.OKX-1-DAY-LAST-EXTERNAL",
-        "signal_bar_type": "BTC-USDT-SWAP.OKX-1-HOUR-LAST-EXTERNAL",
+        "bar_type": "BTC-USDT-SWAP.OKX-1-MINUTE-LAST-EXTERNAL",
         "risk_pct": 0.005,
+        "subscribe_liquidations": False,
         "account_equity_usdt": 5000.0,  # 应该被 allocator 覆盖
     }))
     fc_cfg = tmp_path / "fc.yaml"
@@ -33,7 +33,7 @@ def minimal_live_cfg(tmp_path: Path) -> dict:
         "account": {"equity_usdt": 10000.0, "paper_trading": True},
         "pnl_db": ":memory:",
         "strategies": {
-            "range_breakout": {"enabled": True, "config": str(rb_cfg)},
+            "liq_reversal": {"enabled": True, "config": str(lr_cfg)},
             "funding_carry": {"enabled": True, "config": str(fc_cfg)},
         },
         "risk_defaults": {
@@ -48,7 +48,7 @@ def minimal_live_cfg(tmp_path: Path) -> dict:
 def test_build_live_context_dry_run_two_strategies(minimal_live_cfg: dict) -> None:
     ctx = build_live_context(minimal_live_cfg, build_node=False)
     assert ctx.node is None
-    assert set(ctx.strategies.keys()) == {"range_breakout", "funding_carry"}
+    assert set(ctx.strategies.keys()) == {"liq_reversal", "funding_carry"}
     assert isinstance(ctx.allocator, EqualWeightAllocator)
 
 
@@ -62,7 +62,7 @@ def test_build_live_context_uses_risk_budget_when_configured(
 
 def test_build_live_context_allocates_equity_evenly(minimal_live_cfg: dict) -> None:
     ctx = build_live_context(minimal_live_cfg, build_node=False)
-    eq_a = ctx.strategies["range_breakout"]["allocated_equity_usdt"]
+    eq_a = ctx.strategies["liq_reversal"]["allocated_equity_usdt"]
     eq_b = ctx.strategies["funding_carry"]["allocated_equity_usdt"]
     assert eq_a == 5000.0
     assert eq_b == 5000.0

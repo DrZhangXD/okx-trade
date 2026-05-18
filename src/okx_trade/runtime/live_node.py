@@ -47,19 +47,30 @@ if TYPE_CHECKING:
 # 在 NT 不可用环境（``[strategy]`` extra 未装）下不导入这些类
 # ---------------------------------------------------------------------------
 def _strategy_registry() -> dict[str, tuple[Any, Any]]:
+    """注册表：``type 字段 → (Config, Strategy)``。
+
+    新策略按需添加。lazy import 是为了 NT 不可用环境（``[strategy]`` extra 未装）
+    也能 ``import okx_trade.runtime``。
+    """
     from ..strategies.funding_carry import FundingCarryConfig, FundingCarryStrategy
     from ..strategies.liq_reversal import LiqReversalConfig, LiqReversalStrategy
-    from ..strategies.range_breakout import (
-        RangeBreakoutConfig,
-        RangeBreakoutStrategy,
-    )
     from ..strategies.xs_momentum import XSMomentumConfig, XSMomentumStrategy
-    return {
-        "range_breakout": (RangeBreakoutConfig, RangeBreakoutStrategy),
+    registry: dict[str, tuple[Any, Any]] = {
         "funding_carry": (FundingCarryConfig, FundingCarryStrategy),
         "xs_momentum": (XSMomentumConfig, XSMomentumStrategy),
         "liq_reversal": (LiqReversalConfig, LiqReversalStrategy),
     }
+    try:
+        from ..strategies.basis_arb import BasisArbConfig, BasisArbStrategy
+        registry["basis_arb"] = (BasisArbConfig, BasisArbStrategy)
+    except ImportError:
+        pass
+    try:
+        from ..strategies.ob_imbalance import OBImbalanceConfig, OBImbalanceStrategy
+        registry["ob_imbalance"] = (OBImbalanceConfig, OBImbalanceStrategy)
+    except ImportError:
+        pass
+    return registry
 
 
 # ---------------------------------------------------------------------------
@@ -77,6 +88,8 @@ class LiveContext:
         monitor: ``LiveMonitor`` 实例（外部 spawn ``run()`` task）。
         reporter: ``DailyReporter``（外部按需 ``write_for_today()``）。
         sinks: alert sink 列表（外部可在运行时 ``append`` 新 sink）。
+        regime_detector: 共享的 ``RegimeDetectorProtocol`` 实例（多策略共用），
+            若没有策略启用 ``enable_regime_gate`` 则为 None。
     """
 
     node: Any | None
@@ -86,6 +99,7 @@ class LiveContext:
     monitor: LiveMonitor | None = None
     reporter: DailyReporter | None = None
     sinks: list[AlertSink] = field(default_factory=list)
+    regime_detector: Any = None
 
 
 # ---------------------------------------------------------------------------
@@ -168,10 +182,22 @@ def _build_risk_config(d: dict[str, Any] | None) -> RiskConfig | None:
             "enable_drawdown", "drawdown_daily_pct", "drawdown_weekly_pct",
             "enable_correlation", "correlation_window",
             "correlation_threshold", "correlation_high_corr_scale",
+            "enable_regime_gate", "regime_strategy_kind",
         )
     }
     kw = {k: v for k, v in d.items() if k in fields}
     return RiskConfig(**kw)
+
+
+def _any_strategy_enables_regime(specs: list[tuple[str, str, dict[str, Any]]],
+                                  risk_defaults: dict[str, Any]) -> bool:
+    """扫描所有 enabled 策略，看是否至少一个开了 regime gate（用于决定是否构造 detector）。"""
+    for _, _, raw in specs:
+        risk_block = (raw.get("risk") or {})
+        merged = {**risk_defaults, **risk_block}
+        if merged.get("enable_regime_gate"):
+            return True
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -218,6 +244,18 @@ def build_live_context(
     strategies: dict[str, Any] = {}
     handles_map: dict[str, RiskHandles] = {}
 
+    # M5.X regime gate：如果任何 enabled 策略声明了 enable_regime_gate，
+    # 构造单例 RuleBasedRegimeDetector（HMM 实现可通过 live_cfg.regime.impl 切换）。
+    # 共享同一引用是关键——monitor 只喂一次 BTC 1d bar，所有 gate 看到同一 state。
+    regime_detector = None
+    if _any_strategy_enables_regime(specs, risk_defaults):
+        from ..risk.regime import HMMRegimeDetector, RuleBasedRegimeDetector
+        impl = (live_cfg.get("regime", {}) or {}).get("impl", "rule")
+        if impl == "hmm":
+            regime_detector = HMMRegimeDetector()
+        else:
+            regime_detector = RuleBasedRegimeDetector()
+
     if build_node:
         node = _build_trading_node(live_cfg)
         registry = _strategy_registry()
@@ -231,6 +269,13 @@ def build_live_context(
             cfg = cfg_cls(**kwargs)
             strategy = strat_cls(cfg)
             strategy._pnl_tracker = tracker
+            # 重建 risk manager，注入 regime detector（如果该策略启用 gate）
+            if regime_detector is not None and cfg.risk_config is not None \
+                    and cfg.risk_config.enable_regime_gate:
+                from ..risk.integration import build_risk_manager as _build_rm
+                new_mgr, new_handles = _build_rm(cfg.risk_config, regime_detector=regime_detector)
+                strategy._risk_manager = new_mgr
+                strategy._risk_handles = new_handles
             node.trader.add_strategy(strategy)
             strategies[name] = strategy
             handles_map[name] = strategy._risk_handles
@@ -262,6 +307,14 @@ def build_live_context(
         strategies_by_name=strategies if build_node else None,
         pnl_tracker=tracker,
         alloc_interval_s=int(monitor_cfg.get("alloc_interval_s", 3600)),
+        regime_detector=regime_detector,
+        regime_inst_id=(live_cfg.get("regime", {}) or {}).get("inst_id", "BTC-USDT-SWAP"),
+        regime_refresh_interval_s=int(
+            (live_cfg.get("regime", {}) or {}).get("refresh_interval_s", 86400)
+        ),
+        regime_bootstrap_days=int(
+            (live_cfg.get("regime", {}) or {}).get("bootstrap_days", 400)
+        ),
     ) if handles_map else None
 
     reporter = DailyReporter(
@@ -272,6 +325,7 @@ def build_live_context(
     return LiveContext(
         node=node, tracker=tracker, allocator=alloc,
         strategies=strategies, monitor=monitor, reporter=reporter, sinks=sinks,
+        regime_detector=regime_detector,
     )
 
 

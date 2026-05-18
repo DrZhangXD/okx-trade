@@ -93,6 +93,10 @@ class LiveMonitor:
         strategies_by_name: dict[str, Any] | None = None,
         pnl_tracker: Any = None,
         alloc_interval_s: int = 3600,
+        regime_detector: Any = None,
+        regime_inst_id: str = "BTC-USDT-SWAP",
+        regime_refresh_interval_s: int = 86400,
+        regime_bootstrap_days: int = 400,
     ) -> None:
         self.handles_by_strategy = handles_by_strategy
         self.sinks = sinks
@@ -118,6 +122,12 @@ class LiveMonitor:
         self._pnl_tracker = pnl_tracker
         self.alloc_interval_s = alloc_interval_s
         self._last_alloc_ms: int = 0
+        # Regime detector：单例共享给所有启用 regime_gate 的策略
+        self._regime_detector = regime_detector
+        self._regime_inst_id = regime_inst_id
+        self._regime_refresh_interval_s = regime_refresh_interval_s
+        self._regime_bootstrap_days = regime_bootstrap_days
+        self._last_regime_ms: int = 0
 
     def stop(self) -> None:
         self._stopped.set()
@@ -216,6 +226,52 @@ class LiveMonitor:
             except Exception:
                 pass
 
+    async def _refresh_regime(self, *, bootstrap: bool = False) -> None:
+        """从 OKX REST 拉 BTC 1d candle 喂 detector。
+
+        - ``bootstrap=True``: 拉最近 ``regime_bootstrap_days`` 根（让 detector 立即可用）。
+        - ``bootstrap=False``: 只拉最近 1 根（日常 incremental update）。
+
+        失败静默——detector 退化到 "neutral"，不阻塞策略。
+        """
+        if self._regime_detector is None:
+            return
+        try:
+            from .. import OKXRestClient, OKXSettings
+            settings = OKXSettings()
+            async with OKXRestClient(settings) as client:
+                limit = self._regime_bootstrap_days if bootstrap else 2
+                candles = await client.market.get_candles_extended(
+                    self._regime_inst_id, "1D", total=limit,
+                )
+                for c in candles:
+                    if c.confirm:
+                        self._regime_detector.update(
+                            ts_ms=int(c.ts), close=float(c.close),
+                        )
+            try:
+                state = self._regime_detector.current_state()
+                fan_out(self.sinks, Alert(
+                    severity=AlertSeverity.INFO,
+                    source="regime",
+                    message=f"regime detector updated: state={state} bootstrap={bootstrap}",
+                    ts_ms=self._clock(),
+                    context={"state": state, "bootstrap": bootstrap},
+                ))
+            except Exception:
+                pass
+        except Exception as exc:  # noqa: BLE001
+            try:
+                fan_out(self.sinks, Alert(
+                    severity=AlertSeverity.WARN,
+                    source="regime",
+                    message=f"regime refresh failed: {exc}",
+                    ts_ms=self._clock(),
+                    context={},
+                ))
+            except Exception:
+                pass
+
     def _emit_service_started(self) -> None:
         """启动入口 emit 一条 INFO，让 ``alerts.jsonl`` 在每次 systemd 拉起服务
         时都留痕，方便外部统计 NRestarts / 服务可用率。"""
@@ -253,6 +309,13 @@ class LiveMonitor:
             self._last_alloc_ms = self._clock()
         except Exception:
             pass
+        # 启动立即 bootstrap regime detector（拉 400 根 BTC 1d 让 detector 可用）
+        if self._regime_detector is not None:
+            try:
+                await self._refresh_regime(bootstrap=True)
+                self._last_regime_ms = self._clock()
+            except Exception:
+                pass
         while not self._stopped.is_set():
             try:
                 self.poll_once()
@@ -266,6 +329,14 @@ class LiveMonitor:
                 try:
                     await self._refresh_allocations()
                     self._last_alloc_ms = now_ms
+                except Exception:
+                    pass
+            # 周期性 regime refresh（默认每 86400s = 1d 拉一次）
+            if (self._regime_detector is not None
+                    and (now_ms - self._last_regime_ms) >= self._regime_refresh_interval_s * 1000):
+                try:
+                    await self._refresh_regime(bootstrap=False)
+                    self._last_regime_ms = now_ms
                 except Exception:
                     pass
             # poll 成功（或被异常吞掉但 monitor task 仍在跑）→ 刷 heartbeat

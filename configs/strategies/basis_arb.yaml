@@ -1,0 +1,34 @@
+# Basis Arb (M5)：期现交割合约 vs 现货套利
+# 实现：src/okx_trade/strategies/basis_arb.py
+#
+# OKX 同一标的的交割合约（次周 / 当季 / 次季）会形成期现 basis。当年化 basis 高于
+# entry_basis_apr 时同时下 spot long + futures short，到期前或 basis 收敛时平仓。
+#
+# 默认目标当季 BTC：futures inst_id 中的日期段（YYMMDD）需要在每个交割周期手动更新，
+# 或由更高层 universe resolver 动态选取。
+
+type: basis_arb
+
+# 必填 inst id（注意：futures 的 YYMMDD 后缀需手动更新）
+spot_instrument_id: BTC-USDT.OKX
+futures_instrument_id: BTC-USDT-260626.OKX
+spot_bar_type: BTC-USDT.OKX-1-HOUR-LAST-EXTERNAL
+
+# 入场 / 平仓阈值
+entry_basis_apr: 0.12      # 年化 basis ≥ 12% 入场
+exit_basis_apr: 0.02       # 年化 basis ≤ 2% 平仓
+force_close_days_before_expiry: 2
+
+# 仓位
+max_position_pct: 0.30
+check_interval_sec: 3600   # 每小时 poll 一次（basis 是慢变量）
+
+# 风控（delta-neutral，关掉 vol_target / kelly / correlation；只留 drawdown）
+risk:
+  enable_drawdown: true
+  enable_vol_target: false
+  enable_kelly: false
+  enable_correlation: false
+  # M5 regime gate 默认关（delta-neutral 与 regime 无关）
+  enable_regime_gate: false
+  regime_strategy_kind: neutral

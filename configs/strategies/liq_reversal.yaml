@@ -22,3 +22,6 @@ risk:
   enable_drawdown: true
   drawdown_daily_pct: 0.03
   drawdown_weekly_pct: 0.08
+  # M5.X regime gate：liq_reversal 是 reversal 类，震荡市加满、趋势市砍 60%
+  enable_regime_gate: true
+  regime_strategy_kind: reversal

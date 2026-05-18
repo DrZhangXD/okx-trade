@@ -10,8 +10,8 @@ from enum import Enum
 class InstType(str, Enum):
     SPOT = "SPOT"
     SWAP = "SWAP"
-    # 第一阶段不支持，但保留定义便于未来扩展
-    # FUTURES = "FUTURES"
+    FUTURES = "FUTURES"   # 交割合约（basis_arb 使用）
+    # 未来扩展
     # OPTION = "OPTION"
     # MARGIN = "MARGIN"
 

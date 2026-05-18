@@ -15,9 +15,6 @@ xs_momentum_universe:
   sort_by: vol24h           # 按 24h 成交额排
 
 strategies:
-  range_breakout:
-    enabled: true
-    config: configs/strategies/range_breakout.yaml
   funding_carry:
     enabled: true
     config: configs/strategies/funding_carry.yaml
@@ -27,6 +24,13 @@ strategies:
   liq_reversal:
     enabled: true
     config: configs/strategies/liq_reversal.yaml
+  # M5 新策略：默认 enabled=false，需手动 paper 验证后再开。
+  basis_arb:
+    enabled: false
+    config: configs/strategies/basis_arb.yaml
+  ob_imbalance:
+    enabled: false
+    config: configs/strategies/ob_imbalance.yaml
 
 # 全局风控默认值（策略 yaml 的 risk: 字段会优先生效）
 # Kelly / Correlation 默认开：M5 PnL tracker 已接入，足量历史前自动样本不足放行
@@ -46,6 +50,13 @@ risk_defaults:
   enable_correlation: true
   correlation_window: 30
   correlation_threshold: 0.7
+
+# M5.X Regime detector（共享单例，由 monitor 每日喂 BTC 1d candle）
+regime:
+  impl: rule                # rule | hmm（hmm 需 pip install hmmlearn）
+  inst_id: BTC-USDT-SWAP    # 喂 detector 用的 BTC perp 标识
+  refresh_interval_s: 86400 # 每日刷新一次
+  bootstrap_days: 400       # 启动时 backfill 400 根 1d candle
 
 # Portfolio optimizer：冷启动 equal-weight；30 日数据后切 risk_budget
 portfolio_optimizer:

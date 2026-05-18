@@ -1,21 +1,24 @@
-"""4 策略并行 paper trading 启动脚手架（M5）。
+"""多策略并行 paper trading 启动脚手架（M5）。
 
 用法::
 
     # 校验 yaml + universe（不启动 NT engine）
     python scripts/live.py --config configs/live.yaml --check
 
-    # 实际启动 NT TradingNode + monitor + 4 策略
+    # 实际启动 NT TradingNode + monitor + 策略
     python scripts/live.py --config configs/live.yaml --run
 
     # 只跑一次 daily report 生成
     python scripts/live.py --config configs/live.yaml --report-only
 
-支持的 4 个策略：
-- range_breakout (M2)
+支持的策略（启用与否看 configs/live.yaml.strategies.<name>.enabled）：
 - funding_carry  (M2)
 - xs_momentum    (M4)
 - liq_reversal   (M4)
+- basis_arb      (M5)  期现交割合约套利
+- ob_imbalance   (M5)  订单流 microprice 微观结构反转
+
+已下线：range_breakout (M5.X，alpha 弱 + 实现不稳)
 """
 from __future__ import annotations
 

@@ -88,7 +88,8 @@ flowchart TB
 | `okx_trade.adapter.execution` | NT `LiveExecutionClient`：下单 / 撤单 / reconciliation |
 | `okx_trade.adapter.factories` | 装配 NT TradingNode 用 |
 | `okx_trade.strategies.base` | `BarBuffer` / `position_contracts` / strategy helpers |
-| `okx_trade.strategies.{range_breakout,xs_momentum,funding_carry,liq_reversal}` | 4 个策略本体 |
+| `okx_trade.strategies.{xs_momentum,funding_carry,liq_reversal,basis_arb,ob_imbalance}` | 策略本体（range_breakout 已 M5.X 下线） |
+| `okx_trade.strategies._signals` | 跨策略共享纯函数（microprice / book_imbalance / annualized_basis 等） |
 | `okx_trade.strategies.confirmation` | OFI 反向时降仓 50%（共用 helper） |
 | `okx_trade.strategies.pnl_hook` | 把 NT PositionEvent 转成 `PnLTracker.record_trade` |
 | `okx_trade.risk.base` | `RiskCheck` / `RiskManager` / `RiskAction` / `RiskIntent` |
@@ -145,10 +146,11 @@ configs/
 ├── live.yaml                 # 主入口：策略列表 + risk_defaults + portfolio + monitor + alerts
 ├── risk.yaml                 # 参考样板（live.yaml 内联实际值）
 └── strategies/
-    ├── range_breakout.yaml   # 单策略参数（risk: 块覆盖 risk_defaults）
-    ├── funding_carry.yaml
+    ├── funding_carry.yaml     # 单策略参数（risk: 块覆盖 risk_defaults）
     ├── xs_momentum.yaml
-    └── liq_reversal.yaml
+    ├── liq_reversal.yaml
+    ├── basis_arb.yaml         # M5：交割合约 vs 现货期现套利
+    └── ob_imbalance.yaml      # M5：订单流 microprice 反转
 ```
 
 加载顺序：`live.yaml.risk_defaults` 是基线 → 各 strategy yaml 的 `risk:` 块如果显式设值就覆盖。**dataclass `RiskConfig` 的硬编码默认是兜底**，但容易掉坑（比如 Kelly），尽量在 yaml 里显式。

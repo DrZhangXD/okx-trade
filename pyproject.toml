@@ -51,6 +51,11 @@ dev = [
   "ruff>=0.4",
   "mypy>=1.10",
 ]
+# M5.X：HMM regime detector（可选；规则版 detector 零依赖，是默认实现）
+# 安装：pip install -e ".[regime-hmm]"
+regime-hmm = [
+  "hmmlearn>=0.3",
+]
 
 [project.urls]
 Homepage = "https://github.com/zhangxudong/okx-trade"
