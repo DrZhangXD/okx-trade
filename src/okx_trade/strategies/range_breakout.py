@@ -35,6 +35,7 @@ from .base import (
     BarSnapshot,
     Direction,
     ScalpSignal,
+    effective_equity_usdt,
     position_contracts,
     to_bar_snapshots,
 )
@@ -309,6 +310,8 @@ if _NT_AVAILABLE:
 
             self._active_signal: ScalpSignal | None = None
             self._position_contracts: float = 0.0
+            # 由 LiveMonitor 周期写入(OKX 真实余额 + allocator);None 退 cfg
+            self._allocated_equity_usdt: float | None = None
 
             # M3.6 风控（None config → 透明跳过）
             self._risk_manager, self._risk_handles = build_risk_manager(config.risk_config)
@@ -407,7 +410,9 @@ if _NT_AVAILABLE:
                 size=base_size,
                 entry_price=signal.entry_price,
                 stop_price=signal.stop_price,
-                account_equity_usdt=self.config.account_equity_usdt,
+                account_equity_usdt=effective_equity_usdt(
+                    self._allocated_equity_usdt, self.config.account_equity_usdt,
+                ),
             )
 
         def on_stop(self) -> None:
@@ -430,7 +435,9 @@ if _NT_AVAILABLE:
             min_sz = float(inst.size_increment)  # NT 没显式 min_sz，用 size_increment 当下限
 
             contracts = position_contracts(
-                account_equity_usdt=self.config.account_equity_usdt,
+                account_equity_usdt=effective_equity_usdt(
+                    self._allocated_equity_usdt, self.config.account_equity_usdt,
+                ),
                 risk_pct=self.config.risk_pct,
                 entry_price=signal.entry_price,
                 stop_price=signal.stop_price,
@@ -542,7 +549,9 @@ if _NT_AVAILABLE:
                     exit_price=exit_price,
                     contracts=contracts,
                     ct_val=ct_val,
-                    risk_usdt=cfg.account_equity_usdt * cfg.risk_pct,
+                    risk_usdt=effective_equity_usdt(
+                        self._allocated_equity_usdt, cfg.account_equity_usdt,
+                    ) * cfg.risk_pct,
                 )
 
             self._active_signal = None

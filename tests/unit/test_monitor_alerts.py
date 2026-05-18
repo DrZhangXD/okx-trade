@@ -287,3 +287,207 @@ def test_heartbeat_overwrites_on_repeat_call(tmp_path) -> None:  # type: ignore[
     assert hb.read_text().strip() == "3000"
     # 临时文件不应残留
     assert not (tmp_path / "heartbeat.ts.tmp").exists()
+
+
+# ---------------------------------------------------------------------------
+# Alloc refresh:把 OKX 实时余额 重新分配 写到每个 strategy 实例
+# 回归 2026-05-18 发现:live.yaml 的 account.equity_usdt 硬编码 10000,demo
+# 真实 81k 没参与 sizing → 持仓只占总资金 ~10%。
+# ---------------------------------------------------------------------------
+
+
+class _FakeStrategy:
+    """裸壳 Strategy 替身,只承载 `_allocated_equity_usdt` 属性。"""
+
+    def __init__(self) -> None:
+        self._allocated_equity_usdt: float | None = None
+
+
+class _FakeAllocator:
+    """按 total / N 平均分(equal-weight),足够测试 monitor 的写回路径。"""
+
+    def __init__(self, raises: Exception | None = None) -> None:
+        self._raises = raises
+        self.calls: list[tuple[list[str], Any]] = []
+
+    def allocate(self, names, tracker, *, total_equity_usdt):  # noqa: ANN001
+        self.calls.append((list(names), float(total_equity_usdt)))
+        if self._raises:
+            raise self._raises
+        share = float(total_equity_usdt) / max(1, len(names))
+        return {n: share for n in names}
+
+
+async def _mk_mon_with_alloc(equity_value, allocator=None, strategies=None,
+                              alloc_interval_s=3600):  # noqa: ANN001
+    cfg = RiskConfig(enable_kelly=True)
+    _, handles = build_risk_manager(cfg)
+    if equity_value is None:
+        provider = lambda: None  # noqa: E731
+    elif callable(equity_value):
+        provider = equity_value
+    else:
+        async def provider():  # noqa
+            return equity_value
+    strategies = strategies if strategies is not None else {
+        "s1": _FakeStrategy(), "s2": _FakeStrategy(),
+    }
+    allocator = allocator or _FakeAllocator()
+    mon = LiveMonitor(
+        {"s1": handles, "s2": handles}, [],
+        clock=lambda: 1_000_000,
+        heartbeat_path=None,
+        equity_provider=provider,
+        allocator=allocator,
+        strategies_by_name=strategies,
+        pnl_tracker=None,
+        alloc_interval_s=alloc_interval_s,
+    )
+    return mon, allocator, strategies
+
+
+@pytest.mark.asyncio
+async def test_alloc_refresh_writes_equity_to_strategies() -> None:
+    """正常路径:provider → allocator → 每个 strategy 拿到 share。"""
+    mon, alloc, strategies = await _mk_mon_with_alloc(80000.0)
+    await mon._refresh_allocations()
+    assert strategies["s1"]._allocated_equity_usdt == 40000.0
+    assert strategies["s2"]._allocated_equity_usdt == 40000.0
+    assert len(alloc.calls) == 1
+    assert alloc.calls[0][1] == 80000.0
+
+
+@pytest.mark.asyncio
+async def test_alloc_refresh_provider_returns_none_skips() -> None:
+    """provider 返回 None → 不改 strategy 状态。"""
+    mon, _alloc, strategies = await _mk_mon_with_alloc(None)
+    strategies["s1"]._allocated_equity_usdt = 999.0  # 先有上次值
+    await mon._refresh_allocations()
+    assert strategies["s1"]._allocated_equity_usdt == 999.0
+
+
+@pytest.mark.asyncio
+async def test_alloc_refresh_provider_returns_zero_skips() -> None:
+    """provider 返回 0 / 负数 → 跳过(防 sizing 算 0)。"""
+    mon, _alloc, strategies = await _mk_mon_with_alloc(0.0)
+    strategies["s1"]._allocated_equity_usdt = 100.0
+    await mon._refresh_allocations()
+    assert strategies["s1"]._allocated_equity_usdt == 100.0
+
+
+@pytest.mark.asyncio
+async def test_alloc_refresh_provider_exception_emits_warn() -> None:
+    """provider 异常 → emit WARN alert,不挂 monitor。"""
+    received: list[Alert] = []
+    class Cap:
+        def emit(self, a: Alert) -> None: received.append(a)
+    async def boom():
+        raise RuntimeError("net down")
+    cfg = RiskConfig(enable_kelly=True)
+    _, handles = build_risk_manager(cfg)
+    strategies = {"s1": _FakeStrategy()}
+    mon = LiveMonitor(
+        {"s1": handles}, [Cap()],
+        clock=lambda: 1234,
+        heartbeat_path=None,
+        equity_provider=boom,
+        allocator=_FakeAllocator(),
+        strategies_by_name=strategies,
+    )
+    await mon._refresh_allocations()
+    assert strategies["s1"]._allocated_equity_usdt is None
+    assert any(a.source == "alloc_refresh" and a.severity == AlertSeverity.WARN
+               for a in received)
+
+
+@pytest.mark.asyncio
+async def test_alloc_refresh_allocator_exception_emits_warn() -> None:
+    """allocator.allocate 异常 → emit WARN,strategy 不动。"""
+    received: list[Alert] = []
+    class Cap:
+        def emit(self, a: Alert) -> None: received.append(a)
+    cfg = RiskConfig(enable_kelly=True)
+    _, handles = build_risk_manager(cfg)
+    strategies = {"s1": _FakeStrategy()}
+    mon = LiveMonitor(
+        {"s1": handles}, [Cap()],
+        clock=lambda: 1234,
+        heartbeat_path=None,
+        equity_provider=lambda: 50000.0,
+        allocator=_FakeAllocator(raises=RuntimeError("bad allocator")),
+        strategies_by_name=strategies,
+    )
+    await mon._refresh_allocations()
+    assert strategies["s1"]._allocated_equity_usdt is None
+    assert any(a.source == "alloc_refresh" and a.severity == AlertSeverity.WARN
+               for a in received)
+
+
+@pytest.mark.asyncio
+async def test_alloc_refresh_emits_info_on_change() -> None:
+    """成功 re-allocate 且 allocations 变了 → INFO alert with allocations 字典。"""
+    received: list[Alert] = []
+    class Cap:
+        def emit(self, a: Alert) -> None: received.append(a)
+    cfg = RiskConfig(enable_kelly=True)
+    _, handles = build_risk_manager(cfg)
+    strategies = {"s1": _FakeStrategy(), "s2": _FakeStrategy()}
+    mon = LiveMonitor(
+        {"s1": handles, "s2": handles}, [Cap()],
+        clock=lambda: 1234,
+        heartbeat_path=None,
+        equity_provider=lambda: 100000.0,
+        allocator=_FakeAllocator(),
+        strategies_by_name=strategies,
+    )
+    await mon._refresh_allocations()
+    info_alerts = [a for a in received if a.source == "alloc_refresh"
+                   and a.severity == AlertSeverity.INFO]
+    assert len(info_alerts) == 1
+    ctx = info_alerts[0].context
+    assert ctx["total_equity"] == 100000.0
+    assert ctx["allocations"] == {"s1": 50000.0, "s2": 50000.0}
+
+
+@pytest.mark.asyncio
+async def test_alloc_refresh_no_info_when_unchanged() -> None:
+    """同一 equity 调两次 → 第二次 allocations 没变,不再 emit INFO(降噪)。"""
+    received: list[Alert] = []
+    class Cap:
+        def emit(self, a: Alert) -> None: received.append(a)
+    cfg = RiskConfig(enable_kelly=True)
+    _, handles = build_risk_manager(cfg)
+    strategies = {"s1": _FakeStrategy()}
+    mon = LiveMonitor(
+        {"s1": handles}, [Cap()],
+        clock=lambda: 1234,
+        heartbeat_path=None,
+        equity_provider=lambda: 100000.0,
+        allocator=_FakeAllocator(),
+        strategies_by_name=strategies,
+    )
+    await mon._refresh_allocations()
+    await mon._refresh_allocations()
+    info_alerts = [a for a in received if a.source == "alloc_refresh"
+                   and a.severity == AlertSeverity.INFO]
+    assert len(info_alerts) == 1  # 只第一次
+
+
+@pytest.mark.asyncio
+async def test_alloc_refresh_noop_when_provider_missing() -> None:
+    """没配 equity_provider → 完全 no-op,不调 allocator。"""
+    cfg = RiskConfig(enable_kelly=True)
+    _, handles = build_risk_manager(cfg)
+    alloc = _FakeAllocator()
+    strategies = {"s1": _FakeStrategy()}
+    mon = LiveMonitor(
+        {"s1": handles}, [],
+        clock=lambda: 1234,
+        heartbeat_path=None,
+        equity_provider=None,
+        allocator=alloc,
+        strategies_by_name=strategies,
+    )
+    await mon._refresh_allocations()
+    assert alloc.calls == []
+    assert strategies["s1"]._allocated_equity_usdt is None

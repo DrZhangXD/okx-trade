@@ -132,6 +132,20 @@ def position_contracts(
     return contracts
 
 
+def effective_equity_usdt(allocated: float | None, fallback: float) -> float:
+    """优先用 LiveMonitor 周期写入的 ``allocated``,``None`` 时退到 cfg 静态值。
+
+    背景:``configs/live.yaml`` 的 ``account.equity_usdt`` 是静态硬编码(默认 10000)
+    + Allocator 平均分给 4 策略 = 每策略 2500。Demo / 实盘 充值到 81k 时,这套
+    完全不感知,sizing 还是按 2500 算 → 持仓只有总资金的 ~10%。
+
+    Fix:LiveMonitor 周期查 OKX 真实 USDT free,重新 ``alloc.allocate()``,把新
+    预算写到每个 strategy 实例的 ``_allocated_equity_usdt`` 属性。sizing 代码
+    通过此 helper 读取,有就用,没有(还没 refresh / 测试场景)退 cfg。
+    """
+    return fallback if allocated is None else allocated
+
+
 def to_bar_snapshots(bars: Iterable) -> list[BarSnapshot]:
     """把 NT ``Bar`` 序列转成 ``BarSnapshot`` 序列（便于走纯函数管线）。
 
@@ -156,6 +170,7 @@ __all__ = [
     "BarSnapshot",
     "Direction",
     "ScalpSignal",
+    "effective_equity_usdt",
     "position_contracts",
     "to_bar_snapshots",
 ]

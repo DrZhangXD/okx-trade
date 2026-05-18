@@ -38,7 +38,7 @@ from ..risk import (
     apply_risk_manager,
     build_risk_manager,
 )
-from .base import BarSnapshot, position_contracts, to_bar_snapshots
+from .base import BarSnapshot, effective_equity_usdt, position_contracts, to_bar_snapshots
 from .pnl_hook import record_strategy_equity_daily, record_strategy_trade
 from .qty import safe_make_qty
 
@@ -307,6 +307,9 @@ if _NT_AVAILABLE:
             self._stop_price: float = 0.0
             self._tp_price: float = 0.0
             self._position_contracts: float = 0.0
+            # 由 LiveMonitor 周期写入(根据 OKX 真实余额 + allocator 重算);None
+            # 时退到 cfg.account_equity_usdt(回测/测试场景)
+            self._allocated_equity_usdt: float | None = None
 
             self._risk_manager, self._risk_handles = build_risk_manager(config.risk_config)
             self._prev_close: float | None = None
@@ -462,8 +465,9 @@ if _NT_AVAILABLE:
                 stop = entry * (1.0 + cfg.entry_stop_distance_pct)
                 tp = entry - (stop - entry) * cfg.entry_tp_rr_ratio
 
+            equity = effective_equity_usdt(self._allocated_equity_usdt, cfg.account_equity_usdt)
             contracts = position_contracts(
-                account_equity_usdt=cfg.account_equity_usdt,
+                account_equity_usdt=equity,
                 risk_pct=cfg.risk_pct,
                 entry_price=entry,
                 stop_price=stop,
@@ -482,7 +486,7 @@ if _NT_AVAILABLE:
                 size=contracts,
                 entry_price=entry,
                 stop_price=stop,
-                account_equity_usdt=cfg.account_equity_usdt,
+                account_equity_usdt=equity,
             )
             adjusted = apply_risk_manager(self, self._risk_manager, intent)
             if adjusted is None or adjusted <= 0:
@@ -579,7 +583,9 @@ if _NT_AVAILABLE:
                     exit_price=exit_price,
                     contracts=contracts,
                     ct_val=ct_val,
-                    risk_usdt=cfg.account_equity_usdt * cfg.risk_pct,
+                    risk_usdt=effective_equity_usdt(
+                        self._allocated_equity_usdt, cfg.account_equity_usdt,
+                    ) * cfg.risk_pct,
                 )
 
             self._active_direction = None

@@ -246,11 +246,22 @@ def build_live_context(
 
     sinks = _build_sinks(live_cfg)
     monitor_cfg = live_cfg.get("monitor", {}) or {}
+    # 周期 alloc refresh:从 live_cfg.account.equity_provider 决定数据源
+    # - "okx_rest"(默认): 启动 + 每 alloc_interval_s 调 OKX REST 拉真实 USDT free
+    # - "static" / None:  不刷新,沿用启动时静态分配
+    equity_provider = None
+    if account.get("equity_provider", "okx_rest") == "okx_rest":
+        equity_provider = _build_okx_equity_provider()
     monitor = LiveMonitor(
         handles_map, sinks,
         poll_interval_s=int(monitor_cfg.get("poll_interval_s", 60)),
         thresholds=_build_thresholds(live_cfg.get("alerts", {}) or {}),
         heartbeat_path=monitor_cfg.get("heartbeat_path", "var/heartbeat.ts"),
+        equity_provider=equity_provider,
+        allocator=alloc,
+        strategies_by_name=strategies if build_node else None,
+        pnl_tracker=tracker,
+        alloc_interval_s=int(monitor_cfg.get("alloc_interval_s", 3600)),
     ) if handles_map else None
 
     reporter = DailyReporter(
@@ -262,6 +273,32 @@ def build_live_context(
         node=node, tracker=tracker, allocator=alloc,
         strategies=strategies, monitor=monitor, reporter=reporter, sinks=sinks,
     )
+
+
+def _build_okx_equity_provider() -> Any:
+    """返回 async () → float | None 的 equity provider:查 OKX REST USDT free balance。
+
+    LiveMonitor 启动 + 每 ``alloc_interval_s`` 调用一次。失败(网络 / 凭证错)
+    返回 None,monitor 静默跳过本次刷新(保留上次分配)。
+    """
+    async def _provider() -> float | None:
+        from .. import OKXRestClient, OKXSettings
+        try:
+            settings = OKXSettings()
+            async with OKXRestClient(settings) as client:
+                balance = await client.account.get_balance(ccy="USDT")
+                detail = balance.get("USDT")
+                if detail is None:
+                    return None
+                # 用 ``avail_eq``(可用净值,demo/实盘都是 OKX 的 cross/iso 可用)
+                # 退一步取 ``eq``(总净值)。两者通常相同除非有大额 unrealized loss。
+                val = getattr(detail, "avail_eq", None) or getattr(detail, "eq", None)
+                if val is None:
+                    return None
+                return float(val)
+        except Exception:
+            return None
+    return _provider
 
 
 def _build_thresholds(alerts_cfg: dict[str, Any]) -> MonitorThresholds:

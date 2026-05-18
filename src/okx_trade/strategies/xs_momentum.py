@@ -35,7 +35,7 @@ from ..risk import (
     realized_vol_annualized,
     vol_target_position_size,
 )
-from .base import BarBuffer, BarSnapshot, to_bar_snapshots
+from .base import BarBuffer, BarSnapshot, effective_equity_usdt, to_bar_snapshots
 
 # xs_momentum 走每日 rebalance + 增量订单，不存在清晰的"一笔成交"边界，
 # PnL 主要通过 equity snapshot 喂 correlation；不需要 record_strategy_trade。
@@ -341,6 +341,8 @@ if _NT_AVAILABLE:
             self._last_close_date: dict[str, date] = {}
             self._last_rebalance_date: date | None = None
             self._target_contracts: dict[str, float] = {}
+            # 由 LiveMonitor 周期写入(OKX 真实余额 + allocator);None 退 cfg
+            self._allocated_equity_usdt: float | None = None
 
             # M3.6 风控
             self._risk_manager, self._risk_handles = build_risk_manager(config.risk_config)
@@ -524,7 +526,8 @@ if _NT_AVAILABLE:
                 vol_window=cfg.vol_window,
                 periods_per_year=365,
             )
-            notional = abs(scaled) * cfg.account_equity_usdt
+            equity = effective_equity_usdt(self._allocated_equity_usdt, cfg.account_equity_usdt)
+            notional = abs(scaled) * equity
             raw_contracts = notional / (close * ct_val)
             # 对齐 lot
             from decimal import ROUND_DOWN
@@ -544,7 +547,7 @@ if _NT_AVAILABLE:
                 size=contracts,
                 entry_price=close,
                 stop_price=close * (0.98 if direction == "long" else 1.02),
-                account_equity_usdt=cfg.account_equity_usdt,
+                account_equity_usdt=equity,
             )
             adjusted = apply_risk_manager(self, self._risk_manager, intent)
             if adjusted is None or adjusted <= 0:

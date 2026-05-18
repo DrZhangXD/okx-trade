@@ -19,15 +19,21 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import os
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from decimal import Decimal
 from pathlib import Path
+from typing import Any
 
 from ..risk import DrawdownState
 from ..risk.integration import RiskHandles
 from .alerts import Alert, AlertSeverity, AlertSink, fan_out
+
+# 类型别名:equity_provider 可同步 () → float | None 或异步 await
+EquityProvider = Callable[[], "float | None | Awaitable[float | None]"]
 
 
 @dataclass(slots=True)
@@ -61,6 +67,16 @@ class LiveMonitor:
         heartbeat_path: 每次 poll 后写入当前 ms 的 heartbeat 文件路径；
             外部 healthcheck 据此判活。``None`` → 关闭 heartbeat（仅测试用）。
             默认 ``var/heartbeat.ts``。
+        equity_provider: 每 ``alloc_interval_s`` 调一次的回调,返回当前 OKX 真实
+            USDT 余额(同步或 awaitable)。``None`` → 跳过 alloc refresh,保持
+            策略 cfg 静态 equity。
+        allocator: 与 ``equity_provider`` 配对,把新 total_equity 重新分配到每
+            个策略;接 ``portfolio.base.Allocator`` 协议。
+        strategies_by_name: ``{strategy_name: Strategy 实例}``,monitor 用来写
+            ``strategy._allocated_equity_usdt``。key 须与 allocator.allocate 接
+            收的 strategy_ids 一致。
+        pnl_tracker: 喂给 ``allocator.allocate`` 算策略历史(risk_budget mode 需要)。
+        alloc_interval_s: equity 重新分配间隔(秒,默认 3600 = 1h)。
     """
 
     def __init__(
@@ -72,6 +88,11 @@ class LiveMonitor:
         thresholds: MonitorThresholds | None = None,
         clock: Callable[[], int] | None = None,
         heartbeat_path: str | Path | None = "var/heartbeat.ts",
+        equity_provider: EquityProvider | None = None,
+        allocator: Any = None,
+        strategies_by_name: dict[str, Any] | None = None,
+        pnl_tracker: Any = None,
+        alloc_interval_s: int = 3600,
     ) -> None:
         self.handles_by_strategy = handles_by_strategy
         self.sinks = sinks
@@ -90,6 +111,13 @@ class LiveMonitor:
         )
         if self.heartbeat_path is not None:
             self.heartbeat_path.parent.mkdir(parents=True, exist_ok=True)
+        # equity refresh / re-allocation
+        self._equity_provider = equity_provider
+        self._allocator = allocator
+        self._strategies_by_name: dict[str, Any] = strategies_by_name or {}
+        self._pnl_tracker = pnl_tracker
+        self.alloc_interval_s = alloc_interval_s
+        self._last_alloc_ms: int = 0
 
     def stop(self) -> None:
         self._stopped.set()
@@ -110,6 +138,83 @@ class LiveMonitor:
         except Exception:
             # heartbeat 写失败不影响 monitor 主流程
             pass
+
+    async def _refresh_allocations(self) -> None:
+        """查 OKX 真实余额 → allocator 重算每策略预算 → 写入 strategy 实例。
+
+        - ``equity_provider`` 异常 / 返回 None / 返回 <= 0 → 静默跳过(保留上次值)。
+        - 写入失败逐策略捕获,不挂整个 monitor。
+        - emit INFO alert,方便审计每次 re-allocate 的总额和分配。
+        """
+        if not (self._equity_provider and self._allocator and self._strategies_by_name):
+            return
+        try:
+            result = self._equity_provider()
+            if inspect.isawaitable(result):
+                total_equity = await result
+            else:
+                total_equity = result
+        except Exception as exc:  # noqa: BLE001
+            try:
+                fan_out(self.sinks, Alert(
+                    severity=AlertSeverity.WARN,
+                    source="alloc_refresh",
+                    message=f"equity_provider raised: {exc}",
+                    ts_ms=self._clock(),
+                    context={},
+                ))
+            except Exception:
+                pass
+            return
+        if total_equity is None or total_equity <= 0:
+            return
+
+        names = list(self._strategies_by_name.keys())
+        try:
+            allocations = self._allocator.allocate(
+                names, self._pnl_tracker,
+                total_equity_usdt=Decimal(str(total_equity)),
+            )
+        except Exception as exc:  # noqa: BLE001
+            try:
+                fan_out(self.sinks, Alert(
+                    severity=AlertSeverity.WARN,
+                    source="alloc_refresh",
+                    message=f"allocator.allocate raised: {exc}",
+                    ts_ms=self._clock(),
+                    context={"total_equity": float(total_equity)},
+                ))
+            except Exception:
+                pass
+            return
+
+        changed: dict[str, float] = {}
+        for name, strategy in self._strategies_by_name.items():
+            new_equity = float(allocations.get(name, 0))
+            if new_equity <= 0:
+                continue
+            old = getattr(strategy, "_allocated_equity_usdt", None)
+            strategy._allocated_equity_usdt = new_equity
+            if old != new_equity:
+                changed[name] = new_equity
+
+        if changed:
+            try:
+                fan_out(self.sinks, Alert(
+                    severity=AlertSeverity.INFO,
+                    source="alloc_refresh",
+                    message=(
+                        f"re-allocated total={float(total_equity):.2f} USDT "
+                        f"across {len(changed)} strategies"
+                    ),
+                    ts_ms=self._clock(),
+                    context={
+                        "total_equity": float(total_equity),
+                        "allocations": changed,
+                    },
+                ))
+            except Exception:
+                pass
 
     def _emit_service_started(self) -> None:
         """启动入口 emit 一条 INFO，让 ``alerts.jsonl`` 在每次 systemd 拉起服务
@@ -141,12 +246,28 @@ class LiveMonitor:
             pass
         # 启动即写一次 heartbeat，避免冷启动 30s 窗口内 healthcheck 误报
         self._write_heartbeat()
+        # 启动立即跑一次 alloc refresh:让策略第一秒就拿到真实 OKX 余额,而不
+        # 是要等 alloc_interval_s(默认 1h)
+        try:
+            await self._refresh_allocations()
+            self._last_alloc_ms = self._clock()
+        except Exception:
+            pass
         while not self._stopped.is_set():
             try:
                 self.poll_once()
             except Exception:
                 # 监控自己挂掉不能影响主流程
                 pass
+            # 周期性 re-allocate(若上次距今 ≥ alloc_interval_s)
+            now_ms = self._clock()
+            if (self._equity_provider is not None
+                    and (now_ms - self._last_alloc_ms) >= self.alloc_interval_s * 1000):
+                try:
+                    await self._refresh_allocations()
+                    self._last_alloc_ms = now_ms
+                except Exception:
+                    pass
             # poll 成功（或被异常吞掉但 monitor task 仍在跑）→ 刷 heartbeat
             self._write_heartbeat()
             try:

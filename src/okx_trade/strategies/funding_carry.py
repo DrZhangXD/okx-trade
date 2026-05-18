@@ -42,6 +42,7 @@ from enum import Enum
 from typing import TYPE_CHECKING
 
 from ..risk import RiskConfig, RiskIntent, apply_risk_manager, build_risk_manager
+from .base import effective_equity_usdt
 from .pnl_hook import record_strategy_equity_daily, record_strategy_trade
 from .qty import safe_make_qty
 
@@ -211,6 +212,8 @@ if _NT_AVAILABLE:
             )
 
             self._has_position: bool = False
+            # 由 LiveMonitor 周期写入(OKX 真实余额 + allocator);None 退 cfg
+            self._allocated_equity_usdt: float | None = None
             self._spot_qty: float = 0.0
             self._perp_contracts: float = 0.0
             self._latest_spot_price: float = 0.0
@@ -336,8 +339,11 @@ if _NT_AVAILABLE:
                 return
 
             ct_val = float(perp_inst.multiplier) if float(perp_inst.multiplier) > 0 else 1.0
+            equity = effective_equity_usdt(
+                self._allocated_equity_usdt, self.config.account_equity_usdt,
+            )
             spot_qty, perp_contracts = carry_position_size(
-                account_equity_usdt=self.config.account_equity_usdt,
+                account_equity_usdt=equity,
                 max_position_pct=self._params.max_position_pct,
                 spot_price=self._latest_spot_price,
                 perp_ct_val=ct_val,
@@ -356,7 +362,7 @@ if _NT_AVAILABLE:
                 size=perp_contracts,
                 entry_price=self._latest_spot_price,
                 stop_price=self._latest_spot_price,  # delta-neutral 无传统 stop
-                account_equity_usdt=self.config.account_equity_usdt,
+                account_equity_usdt=equity,
             )
             adjusted = apply_risk_manager(self, self._risk_manager, intent)
             if adjusted is None:
@@ -456,7 +462,9 @@ if _NT_AVAILABLE:
                 exit_price=self._latest_spot_price,
                 contracts=self._perp_contracts,
                 ct_val=float(perp_inst.multiplier) if float(perp_inst.multiplier) > 0 else 1.0,
-                risk_usdt=cfg.account_equity_usdt * cfg.max_position_pct,
+                risk_usdt=effective_equity_usdt(
+                    self._allocated_equity_usdt, cfg.account_equity_usdt,
+                ) * cfg.max_position_pct,
             )
 
             self._has_position = False
