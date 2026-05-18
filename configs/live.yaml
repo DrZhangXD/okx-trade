@@ -24,12 +24,17 @@ strategies:
   liq_reversal:
     enabled: true
     config: configs/strategies/liq_reversal.yaml
-  # M5 新策略：默认 enabled=false，需手动 paper 验证后再开。
+  # M5 新策略（2026-05-18 paper trading 上线）：
+  # - basis_arb：当前 BTC basis ~3.77% APR < 12% 入场阈值，启动后默认 hold；
+  #   到期日临近时 basis 收敛接近 0，需要每季度手动更新 futures_instrument_id 的
+  #   YYMMDD 后缀到下一个当季合约（260626 → 260925 → 261225 ...）。
+  # - ob_imbalance：订阅 books5 WS，秒级聚合，30s 滚动 imbalance；信号触发后
+  #   target 30s–5min 持仓，单笔 risk_pct=0.3%。
   basis_arb:
-    enabled: false
+    enabled: true
     config: configs/strategies/basis_arb.yaml
   ob_imbalance:
-    enabled: false
+    enabled: true
     config: configs/strategies/ob_imbalance.yaml
 
 # 全局风控默认值（策略 yaml 的 risk: 字段会优先生效）
