@@ -4,8 +4,6 @@
 # 中频版本：每秒聚合 books5 snapshot，30s 滚动平均 imbalance，命中阈值入场，
 # 目标持仓 30s–5min，单笔风险 0.3%。
 
-type: ob_imbalance
-
 instrument_id: BTC-USDT-SWAP.OKX
 bar_type: BTC-USDT-SWAP.OKX-1-MINUTE-LAST-EXTERNAL
 

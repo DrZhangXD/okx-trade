@@ -7,8 +7,6 @@
 # 默认目标当季 BTC：futures inst_id 中的日期段（YYMMDD）需要在每个交割周期手动更新，
 # 或由更高层 universe resolver 动态选取。
 
-type: basis_arb
-
 # 必填 inst id（注意：futures 的 YYMMDD 后缀需手动更新）
 spot_instrument_id: BTC-USDT.OKX
 futures_instrument_id: BTC-USDT-260626.OKX
