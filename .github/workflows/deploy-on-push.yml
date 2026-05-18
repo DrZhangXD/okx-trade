@@ -58,8 +58,8 @@ jobs:
              git pull --ff-only origin main
              echo "=== After pull ==="
              git log -1 --oneline
-             echo "=== Sync optional deps (idempotent, ~1s if already installed) ==="
-             /home/okxtrade/okx-trade/.venv/bin/pip install -e ".[strategy,stat-arb,ml-fusion,regime-hmm]" --quiet
+             echo "=== Sync optional deps via uv (idempotent, ~1s if already installed) ==="
+             VIRTUAL_ENV=/home/okxtrade/okx-trade/.venv /usr/local/bin/uv pip install -e ".[strategy,stat-arb,ml-fusion,regime-hmm]" --quiet
              echo "=== Restart okx-trade ==="
              sudo systemctl restart okx-trade
              sleep 10
