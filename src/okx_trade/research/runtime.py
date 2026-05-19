@@ -227,16 +227,27 @@ async def cmd_backtest_portfolio(
     catalog_path: Path,
     taker_fee_bps: float = 5.0,
     maker_fee_bps: float = 2.0,
+    warmup_days: int = 0,
+    warmup_panel_dir: Path | None = None,
 ) -> dict:
     """Run FactorPortfolioStrategy backtest on freshly-downloaded bars.
 
     Reads instruments + factor weights from ``yaml_cfg`` (a parsed factor_portfolio.yaml).
     Downloads bars for each instrument, builds NT BacktestDataConfig, runs the strategy.
     Returns a summary dict (pnl, sharpe, max_drawdown, total_orders, etc.).
+
+    ``warmup_days``: if > 0, fetches an additional panel covering ``warmup_days``
+    before the backtest window and saves to ``warmup_panel_dir/warmup_panel.parquet``.
+    The strategy will load it in on_start to pre-populate buffers, so rolling-window
+    factors (basis_z_30d, funding_z_30d need 30d) are active from bar 1 instead
+    of after their warmup period elapses.
     """
+    import time as _time
+
     from okx_trade.adapter.constants import OKX_VENUE
     from okx_trade.adapter.parsing import make_bar_type
     from okx_trade.backtest import build_okx_venue_config, run_backtest
+    from .data import _save_cache, fetch_panel
     from okx_trade.backtest.data_loader import prepare_backtest_catalog
 
     inst_ids_with_venue: list[str] = list(yaml_cfg.get("instrument_ids", []))
@@ -304,6 +315,33 @@ async def cmd_backtest_portfolio(
         enable_fees=True,
     )
 
+    # Optional pre-fetch a warmup panel + save to disk, so the strategy can
+    # load it in on_start and start with hot rolling-window buffers.
+    warmup_panel_cache_path: str | None = None
+    if warmup_days > 0:
+        bar_ms = _bar_to_minutes(bar) * 60_000
+        bt_start_ms = int(_time.time() * 1000) - (total_bars * bar_ms)
+        warmup_start_ms = bt_start_ms - (warmup_days * 24 * 3_600_000)
+        warmup_end_ms = bt_start_ms - 1
+        print(
+            f"[1.5/3] fetching warmup panel ({warmup_days} days × {len(bare_ids)} perps)"
+        )
+        warmup_panel = await fetch_panel(
+            rest_client=rest_client,
+            inst_ids=bare_ids,
+            start_ms=warmup_start_ms,
+            end_ms=warmup_end_ms,
+            bar=bar,
+            include=("close", "volume_usdt", "funding_rate", "open_interest", "basis_apr"),
+            cache_dir=warmup_panel_dir,
+        )
+        out_dir = warmup_panel_dir or catalog_path.parent
+        out_dir.mkdir(parents=True, exist_ok=True)
+        warmup_path = out_dir / "warmup_panel.parquet"
+        _save_cache(warmup_panel, warmup_path)
+        warmup_panel_cache_path = str(warmup_path)
+        print(f"        wrote warmup parquet → {warmup_path} (T={warmup_panel.t})")
+
     strategy_config = ImportableStrategyConfig(
         strategy_path="okx_trade.strategies.factor_portfolio:FactorPortfolioStrategy",
         config_path="okx_trade.strategies.factor_portfolio:FactorPortfolioConfig",
@@ -326,8 +364,10 @@ async def cmd_backtest_portfolio(
             # Backtest's simulated clock doesn't match real OKX time, so REST
             # polling for funding/OI would buffer "now" values that don't align
             # with the simulated bar timestamps. Force off; factors that need
-            # funding/OI will return NaN in backtest and be skipped.
+            # funding/OI will return NaN in backtest UNLESS a warmup panel
+            # (--warmup-days) provided pre-populated funding/OI buffers.
             "enable_rest_polling": False,
+            "warmup_panel_cache_path": warmup_panel_cache_path,
         },
     )
 

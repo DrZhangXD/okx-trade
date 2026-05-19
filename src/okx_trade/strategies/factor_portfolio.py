@@ -198,6 +198,11 @@ if _NT_AVAILABLE:
         subscribe_spot_for_basis: bool = True
         enable_rest_polling: bool = True
         rest_poll_interval_sec: int = 300
+        # If set, on_start reads a fetch_panel parquet from this path and pre-populates
+        # all per-inst buffers (close/volume/funding/OI/derived-spot-close). This warms
+        # the rolling-window factors (basis_z_30d, funding_z_30d need 30d) so they're
+        # active from bar 1 instead of bar 720. Used by backtest CLI --warmup-days N.
+        warmup_panel_cache_path: str | None = None
         risk_config: RiskConfig | None = None
 
 
@@ -258,6 +263,11 @@ if _NT_AVAILABLE:
             self._pnl_tracker = None  # type: ignore[var-annotated]
 
         def on_start(self) -> None:
+            # Pre-populate buffers from a fetched panel cache (backtest --warmup-days).
+            # Must happen before subscribe_bars so the first incoming bar appends to
+            # already-warm history rather than starting from scratch.
+            if self.config.warmup_panel_cache_path:
+                self._load_warmup_panel(self.config.warmup_panel_cache_path)
             for bar_type in self._bar_types.values():
                 self.subscribe_bars(bar_type)
             for spot_bar_type in self._spot_bar_types.values():
@@ -298,6 +308,67 @@ if _NT_AVAILABLE:
                 self._rest_poll_task.cancel()
                 self._rest_poll_task = None
             self.log.info(f"factor_portfolio stop; open_legs={len(self._positions)}")
+
+        def _load_warmup_panel(self, path: str) -> None:
+            """Pre-populate buffers from a fetch_panel parquet cache.
+
+            Reconstructs spot_close from basis_apr algebraically:
+              basis = (perp - spot) / spot  →  spot = perp / (1 + basis)
+            so we don't need spot_close as a separate column in the cache file.
+            NaN values are skipped per (ts, inst) cell so partial coverage is OK.
+            """
+            from pathlib import Path as _Path
+
+            from ..research.data import _load_cache
+
+            panel = _load_cache(_Path(path))
+            if panel is None:
+                self.log.warning(
+                    f"factor_portfolio: warmup panel not found / not loadable: {path}"
+                )
+                return
+
+            # Match strategy inst ids (may include .OKX venue suffix) against panel
+            # ids (typically bare like BTC-USDT-SWAP). Try both forms.
+            col_by_inst: dict[str, int] = {}
+            for i, panel_iid in enumerate(panel.inst_ids):
+                col_by_inst[panel_iid] = i
+            counts = {"close": 0, "spot": 0, "funding": 0, "oi": 0}
+            for inst_iid in self._closes.keys():
+                bare = inst_iid.split(".")[0]
+                col = col_by_inst.get(inst_iid)
+                if col is None:
+                    col = col_by_inst.get(bare)
+                if col is None:
+                    continue
+                for row, ts in enumerate(panel.timestamps_ms):
+                    close = float(panel.close[row, col])
+                    if not np.isnan(close):
+                        self._closes[inst_iid].append((ts, close))
+                        vol = float(panel.volume_usdt[row, col])
+                        self._volumes[inst_iid].append((ts, vol if not np.isnan(vol) else 0.0))
+                        counts["close"] += 1
+                        if panel.basis_apr is not None:
+                            basis = float(panel.basis_apr[row, col])
+                            if not np.isnan(basis):
+                                spot = close / (1.0 + basis)
+                                if spot > 0:
+                                    self._spot_closes[inst_iid].append((ts, spot))
+                                    counts["spot"] += 1
+                    if panel.funding_rate is not None:
+                        fr = float(panel.funding_rate[row, col])
+                        if not np.isnan(fr):
+                            self._funding_rates[inst_iid].append((ts, fr))
+                            counts["funding"] += 1
+                    if panel.open_interest is not None:
+                        oi = float(panel.open_interest[row, col])
+                        if not np.isnan(oi):
+                            self._open_interests[inst_iid].append((ts, oi))
+                            counts["oi"] += 1
+            self.log.info(
+                f"factor_portfolio: warmup loaded — close={counts['close']} "
+                f"spot={counts['spot']} funding={counts['funding']} oi={counts['oi']}"
+            )
 
         async def _poll_rest_loop(self) -> None:
             """Background task: poll funding + OI for each perp every N seconds.

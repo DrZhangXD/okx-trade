@@ -239,3 +239,73 @@ def test_factor_portfolio_polling_config_has_safe_defaults() -> None:
     )
     assert cfg.enable_rest_polling is True
     assert cfg.rest_poll_interval_sec == 300
+
+
+def test_load_warmup_panel_populates_all_buffers(tmp_path) -> None:
+    """End-to-end: build a panel, save via _save_cache, load via warmup."""
+    import numpy as np
+    from okx_trade.research.data import _save_cache
+    from okx_trade.research.panel import FactorPanel
+    from okx_trade.strategies.factor_portfolio import (
+        FactorPortfolioConfig, FactorPortfolioStrategy,
+    )
+
+    # Synthetic panel with all 5 fields populated for one inst
+    T = 100
+    ts_axis = tuple(1_700_000_000_000 + i * 3_600_000 for i in range(T))
+    panel = FactorPanel(
+        inst_ids=("BTC-USDT-SWAP",),
+        timestamps_ms=ts_axis,
+        close=np.linspace(100.0, 120.0, T).reshape(T, 1),
+        volume_usdt=np.ones((T, 1)) * 1e6,
+        funding_rate=(np.ones((T, 1)) * 0.0001),
+        open_interest=(np.ones((T, 1)) * 5e6),
+        basis_apr=(np.ones((T, 1)) * 0.01),  # 1% premium → spot = perp / 1.01
+    )
+    cache_path = tmp_path / "warmup.parquet"
+    _save_cache(panel, cache_path)
+    assert cache_path.exists()
+
+    cfg = FactorPortfolioConfig(
+        instrument_ids=["BTC-USDT-SWAP.OKX"],  # NT requires venue; loader handles bare panel ids
+        bar_type_template="{inst}-1-HOUR-LAST-EXTERNAL",
+        rebalance_hours=4, top_k_long=1, top_k_short=1,
+        risk_pct=0.002, account_equity_usdt=10_000.0,
+        factor_weights=[("basis_z_30d", 1.0)],
+        subscribe_spot_for_basis=False,  # no NT subscribe in unit test
+        enable_rest_polling=False,
+        warmup_panel_cache_path=str(cache_path),
+    )
+    s = FactorPortfolioStrategy(cfg)
+    # Call the loader directly (since on_start needs NT framework)
+    s._load_warmup_panel(str(cache_path))
+
+    inst = "BTC-USDT-SWAP.OKX"
+    assert len(s._closes[inst]) == T
+    assert len(s._volumes[inst]) == T
+    assert len(s._funding_rates[inst]) == T
+    assert len(s._open_interests[inst]) == T
+    assert len(s._spot_closes[inst]) == T
+
+    # Verify reconstruction: spot = perp / (1 + basis); for basis=0.01, ratio is fixed
+    perp_first = s._closes[inst][0][1]
+    spot_first = s._spot_closes[inst][0][1]
+    assert spot_first == pytest.approx(perp_first / 1.01)
+
+
+def test_load_warmup_panel_missing_file_warns_does_not_crash(tmp_path) -> None:
+    """Bad path shouldn't kill the strategy."""
+    from okx_trade.strategies.factor_portfolio import (
+        FactorPortfolioConfig, FactorPortfolioStrategy,
+    )
+    cfg = FactorPortfolioConfig(
+        instrument_ids=["BTC-USDT-SWAP.OKX"],
+        bar_type_template="{inst}-1-HOUR-LAST-EXTERNAL",
+        subscribe_spot_for_basis=False,
+        enable_rest_polling=False,
+        warmup_panel_cache_path=str(tmp_path / "nope.parquet"),
+    )
+    s = FactorPortfolioStrategy(cfg)
+    s._load_warmup_panel(cfg.warmup_panel_cache_path)
+    # All buffers stay empty
+    assert len(s._closes["BTC-USDT-SWAP.OKX"]) == 0
