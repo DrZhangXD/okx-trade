@@ -361,6 +361,15 @@ class OKXLiveExecutionClient(LiveExecutionClient):
             td_mode=td_mode,
         )
 
+        # M6+.X bug fix：OKX SPOT MARKET BUY 默认把 sz 当 quote (USDT) 数量。
+        # 我们策略层算的是 base (BTC) 数量，必须显式设 tgtCcy=base_ccy，否则
+        # OKX 把 0.04 BTC 解读为 0.04 USDT → sCode=51020 minimum order amount。
+        tgt_ccy: str | None = None
+        if (td_mode == TdMode.CASH
+                and ord_type == OrdType.MARKET
+                and side == Side.BUY):
+            tgt_ccy = "base_ccy"
+
         return OrderRequest(
             inst_id=inst_id,
             td_mode=td_mode,
@@ -371,6 +380,7 @@ class OKXLiveExecutionClient(LiveExecutionClient):
             px=px,
             cl_ord_id=self._sanitize_cl_ord_id(order.client_order_id),
             reduce_only=reduce_only_val,
+            tgt_ccy=tgt_ccy,
         )
 
     # ------------------------------------------------------------------

@@ -38,6 +38,9 @@ class OrderRequest(OKXModel):
     pos_side: PosSide | None = Field(default=None, alias="posSide")
     px: str | None = None              # 限价；市价单不传
     ccy: str | None = None             # 保证金币种（cross + 单币种保证金时用）
+    # SPOT MARKET BUY 时必须设 ``base_ccy``，否则 sz 被 OKX 解读为 quote 数量
+    # （USDT）。我们传的是 base (BTC) 数量，不显式标会被当 USDT → sCode=51020。
+    tgt_ccy: str | None = Field(default=None, alias="tgtCcy")
     cl_ord_id: str | None = Field(default=None, alias="clOrdId")
     tag: str | None = None
     reduce_only: bool | None = Field(default=None, alias="reduceOnly")
