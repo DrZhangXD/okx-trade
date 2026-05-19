@@ -20,5 +20,9 @@ factor_weights:
   - 0.3
 - - basis_z_30d
   - 0.4
+- - funding_current
+  - 0.05
+- - funding_z_30d
+  - 0.1
 - - momentum_1d_reversal
   - 0.2
