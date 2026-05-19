@@ -44,10 +44,10 @@ strategies:
   #   （instrument_provider 需要 option_ulys 配置；启用前手动验证）
   # - ml_fusion：XGBoost meta，需 xgboost + 训练好的模型文件
   funding_cross_section:
-    enabled: false
+    enabled: true
     config: configs/strategies/funding_cross_section.yaml
   funding_skew_momentum:
-    enabled: false
+    enabled: true
     config: configs/strategies/funding_skew_momentum.yaml
   stat_arb_pairs:
     enabled: false
