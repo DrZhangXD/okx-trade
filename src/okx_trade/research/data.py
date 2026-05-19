@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import time
 from pathlib import Path
 from typing import Iterable, Protocol
 
@@ -101,11 +102,15 @@ async def fetch_panel(
         if cached is not None:
             return cached
 
-    # Determine bar count required (used as ``total`` cap for the OKX paginator)
+    # Determine bar count required. OKX's paginator returns bars relative to "now"
+    # (paging backward from the most recent), so we need enough bars to reach from
+    # the present back to ``start_ms``. After fetching, we filter to [start, end].
     bar_ms = _bar_ms(bar)
     if bar_ms <= 0:
         raise ValueError(f"unsupported bar: {bar!r}")
-    n_bars = max(1, (end_ms - start_ms) // bar_ms + 1)
+    now_ms = int(time.time() * 1000)
+    # Reach back to start, with a small safety margin for late OKX clock + partial bars.
+    n_bars = max(1, (now_ms - start_ms) // bar_ms + 5)
 
     async def _fetch_one(inst: str) -> tuple[str, dict[str, list[tuple[int, float]]]]:
         fields: dict[str, list[tuple[int, float]]] = {}
@@ -140,9 +145,14 @@ async def fetch_panel(
         if "basis_apr" in include:
             spot_id = _spot_pair_for(inst)
             if spot_id is not None:
-                spot_candles = await rest_client.market.get_candles_extended(
-                    spot_id, bar, total=n_bars,
-                )
+                try:
+                    spot_candles = await rest_client.market.get_candles_extended(
+                        spot_id, bar, total=n_bars,
+                    )
+                except Exception:  # noqa: BLE001
+                    # Spot pair may not exist (some perps have no spot counterpart);
+                    # silently skip basis_apr for this inst rather than killing the fetch.
+                    spot_candles = []
                 spot_close_by_ts: dict[int, float] = {
                     c.ts: float(c.close) for c in spot_candles
                     if start_ms <= c.ts <= end_ms
@@ -155,7 +165,8 @@ async def fetch_panel(
                     spot_px = spot_close_by_ts.get(ts)
                     if spot_px is not None and spot_px > 0:
                         basis_series.append((ts, (perp_px - spot_px) / spot_px))
-                fields["basis_apr"] = basis_series
+                if basis_series:
+                    fields["basis_apr"] = basis_series
 
         return inst, fields
 

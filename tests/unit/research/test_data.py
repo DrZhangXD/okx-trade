@@ -160,3 +160,32 @@ async def test_fetch_panel_basis_apr_skipped_for_non_swap_inst(tmp_path: Path) -
     )
     # No spot derivation possible → basis_apr never set → outer-join → None
     assert panel.basis_apr is None
+
+
+@pytest.mark.asyncio
+async def test_fetch_panel_basis_apr_skipped_when_spot_pair_404(tmp_path: Path) -> None:
+    """Some perps have no spot counterpart (e.g. obscure index perps).
+    Spot fetch may raise — fetch_panel should swallow and continue without basis."""
+
+    class _FailingMarket(_StubMarket):
+        async def get_candles_extended(self, inst_id, bar, *, total):
+            if inst_id == "FOOBAR-USDT":
+                raise RuntimeError("instrument not found")
+            return self.candles_by_inst.get(inst_id, [])
+
+    rest = _StubRest(
+        market=_FailingMarket(candles_by_inst={
+            "FOOBAR-USDT-SWAP": [_candle(1000, 100.0, 1e6)],
+        }),
+        public=_StubPublic(funding_by_inst={}, oi_by_inst={}),
+    )
+    panel = await fetch_panel(
+        rest_client=rest, inst_ids=["FOOBAR-USDT-SWAP"],  # type: ignore[arg-type]
+        start_ms=1000, end_ms=1000, bar="1H",
+        include=("close", "volume_usdt", "basis_apr"),
+        cache_dir=tmp_path,
+    )
+    # No basis_apr was populated because spot lookup failed
+    assert panel.basis_apr is None
+    # But close still arrived
+    assert panel.close[0, 0] == pytest.approx(100.0)
