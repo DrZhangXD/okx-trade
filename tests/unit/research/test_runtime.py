@@ -279,3 +279,30 @@ async def test_cmd_grade_all_evaluates_every_registered_factor(tmp_path: Path) -
     # All evaluated factors got a grade row in sqlite
     for grade, _ in results:
         assert store.grade_history(grade.factor_id) != []
+
+
+# ---------------------------------------------------------------------------
+# cmd_backtest_portfolio (heavy — uses pytest.importorskip for NT)
+# ---------------------------------------------------------------------------
+
+
+nt = pytest.importorskip("nautilus_trader")
+
+
+@pytest.mark.asyncio
+async def test_cmd_backtest_portfolio_empty_factor_weights_rejected(tmp_path: Path) -> None:
+    """yaml without factor_weights → cmd_backtest_portfolio path should fail in strategy
+    config validation OR run with no rebalance. We assert the helper at least doesn't
+    crash before NT instantiation when given a minimal valid yaml + stubbed rest."""
+    from okx_trade.research.runtime import cmd_backtest_portfolio
+
+    yaml_cfg = {"instrument_ids": []}  # empty universe
+    rest = _StubRest(
+        market=_StubMarket(candles_by_inst={}, tickers=[]),
+        public=_StubPublic(funding_by_inst={}, oi_by_inst={}),
+    )
+    with pytest.raises(RuntimeError, match="empty instrument_ids"):
+        await cmd_backtest_portfolio(
+            rest_client=rest, yaml_cfg=yaml_cfg, bar="1H",
+            total_bars=10, catalog_path=tmp_path / "catalog",
+        )

@@ -83,8 +83,13 @@ def build_parser() -> argparse.ArgumentParser:
     _common(pr)
 
     pb = sub.add_parser("backtest-portfolio")
-    pb.add_argument("--start", required=True)
-    pb.add_argument("--end", required=True)
+    pb.add_argument("--bar", default="1H")
+    pb.add_argument("--total-bars", type=int, default=2000,
+                    help="Number of bars to download per instrument (default: 2000)")
+    pb.add_argument("--catalog", default="var/backtest_catalog_factor_portfolio",
+                    help="NT ParquetDataCatalog path")
+    pb.add_argument("--taker-fee-bps", type=float, default=5.0)
+    pb.add_argument("--maker-fee-bps", type=float, default=2.0)
     _common(pb)
 
     prp = sub.add_parser("report")
@@ -211,13 +216,43 @@ def _cmd_grade_all_online(args: argparse.Namespace, store: FactorStore) -> int:
 
 
 def _cmd_backtest_portfolio_online(args: argparse.Namespace) -> int:
-    """Placeholder — implemented in P2-B1 follow-up."""
-    print(
-        "[error] backtest-portfolio not yet implemented; see "
-        "docs/superpowers/plans/2026-05-19-factor-research-lab.md (P2-B1)",
-        file=sys.stderr,
-    )
-    return 2
+    import asyncio
+
+    from .. import OKXRestClient, OKXSettings
+    from .runtime import cmd_backtest_portfolio
+
+    yaml_path = Path(args.yaml)
+    if not yaml_path.exists():
+        print(f"[error] yaml not found: {yaml_path}", file=sys.stderr)
+        return 1
+    yaml_cfg = yaml.safe_load(yaml_path.read_text()) or {}
+    if not yaml_cfg.get("factor_weights"):
+        print(
+            f"[error] {yaml_path} has empty factor_weights; "
+            "approve at least one factor first via `python -m okx_trade.research approve ...`",
+            file=sys.stderr,
+        )
+        return 1
+
+    async def _run() -> int:
+        async with OKXRestClient(OKXSettings()) as client:
+            summary = await cmd_backtest_portfolio(
+                rest_client=client,
+                yaml_cfg=yaml_cfg,
+                bar=args.bar,
+                total_bars=args.total_bars,
+                catalog_path=Path(args.catalog),
+                taker_fee_bps=args.taker_fee_bps,
+                maker_fee_bps=args.maker_fee_bps,
+            )
+        print("\n=== RESULT ===")
+        for k, v in summary.items():
+            if k.startswith("_"):
+                continue
+            print(f"  {k}: {v}")
+        return 0
+
+    return asyncio.run(_run())
 
 
 def _cmd_list(store: FactorStore) -> int:

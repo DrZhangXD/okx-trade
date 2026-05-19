@@ -11,6 +11,7 @@ Public surface used by ``cli.py``:
 - ``cmd_fetch``
 - ``cmd_eval``
 - ``cmd_grade_all``
+- ``cmd_backtest_portfolio``
 """
 from __future__ import annotations
 
@@ -217,6 +218,103 @@ async def cmd_grade_all(
 # ---------------------------------------------------------------------------
 
 
+async def cmd_backtest_portfolio(
+    *,
+    rest_client: _RestClient,
+    yaml_cfg: dict,
+    bar: str,
+    total_bars: int,
+    catalog_path: Path,
+    taker_fee_bps: float = 5.0,
+    maker_fee_bps: float = 2.0,
+) -> dict:
+    """Run FactorPortfolioStrategy backtest on freshly-downloaded bars.
+
+    Reads instruments + factor weights from ``yaml_cfg`` (a parsed factor_portfolio.yaml).
+    Downloads bars for each instrument, builds NT BacktestDataConfig, runs the strategy.
+    Returns a summary dict (pnl, sharpe, max_drawdown, total_orders, etc.).
+    """
+    from okx_trade.adapter.constants import OKX_VENUE
+    from okx_trade.adapter.parsing import make_bar_type
+    from okx_trade.backtest import build_okx_venue_config, run_backtest
+    from okx_trade.backtest.data_loader import prepare_backtest_catalog
+
+    inst_ids_with_venue: list[str] = list(yaml_cfg.get("instrument_ids", []))
+    if not inst_ids_with_venue:
+        raise RuntimeError(
+            "factor_portfolio yaml has empty instrument_ids; cannot run backtest"
+        )
+    # Strip ".OKX" suffix to get bare OKX inst id for REST calls
+    bare_ids = [s.split(".")[0] for s in inst_ids_with_venue]
+
+    print(f"[1/3] downloading {total_bars} × {bar} bars for {len(bare_ids)} instruments")
+    for inst_id in bare_ids:
+        try:
+            _, bars = await prepare_backtest_catalog(
+                rest_client, inst_id, bar,  # type: ignore[arg-type]
+                total=total_bars, catalog_path=catalog_path,
+                taker_fee_bps=taker_fee_bps, maker_fee_bps=maker_fee_bps,
+            )
+            print(f"        {inst_id}: {len(bars)} bars")
+        except Exception as exc:  # noqa: BLE001
+            print(f"        {inst_id}: FAILED ({exc})")
+            raise
+
+    print("[2/3] building backtest config")
+    from nautilus_trader.backtest.config import BacktestDataConfig
+    from nautilus_trader.config import ImportableStrategyConfig
+    from nautilus_trader.model.data import Bar
+
+    bar_types = [make_bar_type(s, bar) for s in bare_ids]
+    data_configs = [
+        BacktestDataConfig(
+            catalog_path=str(catalog_path.resolve()),
+            data_cls=Bar.fully_qualified_name(),
+            instrument_id=instrument_id,
+            bar_types=[str(bar_type)],
+        )
+        for instrument_id, bar_type in zip(inst_ids_with_venue, bar_types)
+    ]
+
+    venue = build_okx_venue_config(
+        starting_balance_usdt=float(yaml_cfg.get("account_equity_usdt", 10_000.0)),
+        leverage=10,
+        enable_fees=True,
+    )
+
+    strategy_config = ImportableStrategyConfig(
+        strategy_path="okx_trade.strategies.factor_portfolio:FactorPortfolioStrategy",
+        config_path="okx_trade.strategies.factor_portfolio:FactorPortfolioConfig",
+        config={
+            "instrument_ids": list(inst_ids_with_venue),
+            "bar_type_template": yaml_cfg.get(
+                "bar_type_template", "{inst}-1-HOUR-LAST-EXTERNAL",
+            ),
+            "rebalance_hours": int(yaml_cfg.get("rebalance_hours", 4)),
+            "top_k_long": int(yaml_cfg.get("top_k_long", 5)),
+            "top_k_short": int(yaml_cfg.get("top_k_short", 5)),
+            "risk_pct": float(yaml_cfg.get("risk_pct", 0.002)),
+            "account_equity_usdt": float(yaml_cfg.get("account_equity_usdt", 10_000.0)),
+            "factor_weights": [
+                tuple(pair) for pair in yaml_cfg.get("factor_weights", [])
+            ],
+        },
+    )
+
+    print(f"[3/3] running backtest (factors: "
+          f"{len(yaml_cfg.get('factor_weights', []))})")
+    summary = run_backtest(venue=venue, data=data_configs, strategies=[strategy_config])
+
+    return {
+        "pnl_pct": getattr(summary, "pnl_pct", None),
+        "sharpe_ratio": getattr(summary, "sharpe_ratio", None),
+        "max_drawdown_pct": getattr(summary, "max_drawdown_pct", None),
+        "win_rate": getattr(summary, "win_rate", None),
+        "total_orders": getattr(summary, "total_orders", None),
+        "_raw": summary,
+    }
+
+
 def _bar_to_minutes(bar: str) -> int:
     """``1H`` → 60; ``5m`` → 5; ``1D`` → 1440."""
     s = bar.strip()
@@ -258,6 +356,7 @@ def _write_report(report_dir: Path, grade: FactorGrade) -> Path:
 
 
 __all__ = [
+    "cmd_backtest_portfolio",
     "cmd_eval",
     "cmd_fetch",
     "cmd_grade_all",
