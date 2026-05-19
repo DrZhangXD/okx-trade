@@ -1,0 +1,17 @@
+# Factor Portfolio Strategy config (managed by `okx_trade.research.cli`)
+# `factors` is populated by `python -m okx_trade.research approve --factor ... --weight ...`
+# (DO NOT hand-edit — use the CLI to keep sqlite + yaml in sync.)
+
+bar: "1H"
+rebalance_hours: 4
+top_k_long: 5
+top_k_short: 5
+risk_pct_per_leg: 0.002
+account_equity_usdt: 10000.0
+
+universe:
+  size: 30
+  settle_ccy: USDT
+  sort_by: vol24h
+
+factors: []   # populated by CLI
