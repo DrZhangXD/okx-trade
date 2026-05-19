@@ -2,9 +2,14 @@
 
 Entry: ``python -m okx_trade.research <subcommand>`` (via __main__.py).
 
-Subcommands route to small helper functions; expensive ones (fetch / eval / backtest)
-return non-zero and print a clear error if asyncio + REST credentials aren't available
-in the current environment, keeping CLI tests cheap.
+Offline subcommands (no REST):
+    list / approve / reject / report
+
+Online subcommands (build an OKXRestClient from env, async):
+    fetch / eval / grade-all / backtest-portfolio
+
+The online subcommands delegate to ``research.runtime`` which contains the asyncio
+wrappers; cli.py stays focused on argparse + sqlite + yaml I/O.
 """
 from __future__ import annotations
 
@@ -45,6 +50,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     pe = sub.add_parser("eval")
     pe.add_argument("--factor", required=True)
+    pe.add_argument("--start", required=True, help="YYYY-MM-DD")
+    pe.add_argument("--end", required=True)
+    pe.add_argument("--universe", default="top30")
+    pe.add_argument("--bar", default="1H")
     pe.add_argument("--horizon", default="1d", help="1d/4h/1h")
     pe.add_argument("--top-k", type=int, default=5)
     pe.add_argument("--panel-cache", default=str(_DEFAULT_PANEL_DIR))
@@ -52,7 +61,12 @@ def build_parser() -> argparse.ArgumentParser:
     _common(pe)
 
     pa = sub.add_parser("grade-all")
+    pa.add_argument("--start", required=True, help="YYYY-MM-DD")
+    pa.add_argument("--end", required=True)
+    pa.add_argument("--universe", default="top30")
+    pa.add_argument("--bar", default="1H")
     pa.add_argument("--horizon", default="1d")
+    pa.add_argument("--top-k", type=int, default=5)
     pa.add_argument("--panel-cache", default=str(_DEFAULT_PANEL_DIR))
     pa.add_argument("--report-dir", default=str(_DEFAULT_REPORT_DIR))
     _common(pa)
@@ -69,8 +83,13 @@ def build_parser() -> argparse.ArgumentParser:
     _common(pr)
 
     pb = sub.add_parser("backtest-portfolio")
-    pb.add_argument("--start", required=True)
-    pb.add_argument("--end", required=True)
+    pb.add_argument("--bar", default="1H")
+    pb.add_argument("--total-bars", type=int, default=2000,
+                    help="Number of bars to download per instrument (default: 2000)")
+    pb.add_argument("--catalog", default="var/backtest_catalog_factor_portfolio",
+                    help="NT ParquetDataCatalog path")
+    pb.add_argument("--taker-fee-bps", type=float, default=5.0)
+    pb.add_argument("--maker-fee-bps", type=float, default=2.0)
     _common(pb)
 
     prp = sub.add_parser("report")
@@ -105,17 +124,135 @@ def run(argv: Sequence[str] | None = None) -> int:
         return _cmd_reject(store, Path(args.yaml), args.factor)
     if cmd == "report":
         return _cmd_report(store, Path(args.report_dir), args.factor)
-    if cmd in ("fetch", "eval", "grade-all", "backtest-portfolio"):
-        print(
-            f"[error] '{cmd}' requires OKX REST + asyncio runtime;\n"
-            f"        run it via the wrapper script: scripts/factor_research_smoke.sh\n"
-            f"        or call okx_trade.research.cli helpers from a script with\n"
-            f"        a constructed OKXRestClient.",
-            file=sys.stderr,
-        )
-        return 2
+    if cmd == "fetch":
+        return _cmd_fetch_online(args)
+    if cmd == "eval":
+        return _cmd_eval_online(args, store)
+    if cmd == "grade-all":
+        return _cmd_grade_all_online(args, store)
+    if cmd == "backtest-portfolio":
+        return _cmd_backtest_portfolio_online(args)
 
     return 1
+
+
+# ---------------------------------------------------------------------------
+# Online subcommand wrappers (asyncio + REST)
+# ---------------------------------------------------------------------------
+
+
+def _cmd_fetch_online(args: argparse.Namespace) -> int:
+    import asyncio
+
+    from .. import OKXRestClient, OKXSettings
+    from .runtime import cmd_fetch
+
+    async def _run() -> int:
+        async with OKXRestClient(OKXSettings()) as client:
+            panel = await cmd_fetch(
+                rest_client=client,
+                start=args.start, end=args.end,
+                universe=args.universe, bar=args.bar,
+                cache_dir=Path(args.cache_dir),
+            )
+        print(
+            f"fetched panel: {panel.t} bars × {panel.n} inst — cached under {args.cache_dir}"
+        )
+        return 0
+
+    return asyncio.run(_run())
+
+
+def _cmd_eval_online(args: argparse.Namespace, store: FactorStore) -> int:
+    import asyncio
+
+    from .. import OKXRestClient, OKXSettings
+    from .runtime import cmd_eval
+
+    async def _run() -> int:
+        async with OKXRestClient(OKXSettings()) as client:
+            grade, report_path = await cmd_eval(
+                rest_client=client,
+                factor_id=args.factor,
+                start=args.start, end=args.end,
+                universe=args.universe, bar=args.bar,
+                horizon=args.horizon, top_k=args.top_k,
+                panel_cache=Path(args.panel_cache),
+                report_dir=Path(args.report_dir),
+                store=store,
+            )
+        print(
+            f"{grade.factor_id}: IC={grade.ic_mean:+.4f} IR={grade.ir:+.3f} "
+            f"t={grade.ic_t_stat:+.2f} → {grade.verdict.upper()} "
+            f"(report: {report_path})"
+        )
+        return 0
+
+    return asyncio.run(_run())
+
+
+def _cmd_grade_all_online(args: argparse.Namespace, store: FactorStore) -> int:
+    import asyncio
+
+    from .. import OKXRestClient, OKXSettings
+    from .runtime import cmd_grade_all
+
+    async def _run() -> int:
+        async with OKXRestClient(OKXSettings()) as client:
+            results = await cmd_grade_all(
+                rest_client=client,
+                start=args.start, end=args.end,
+                universe=args.universe, bar=args.bar,
+                horizon=args.horizon, top_k=args.top_k,
+                panel_cache=Path(args.panel_cache),
+                report_dir=Path(args.report_dir),
+                store=store,
+            )
+        passed = sum(1 for g, _ in results if g.verdict == "pass")
+        print(f"grade-all: {len(results)} factors evaluated, {passed} passed threshold")
+        return 0
+
+    return asyncio.run(_run())
+
+
+def _cmd_backtest_portfolio_online(args: argparse.Namespace) -> int:
+    import asyncio
+
+    from .. import OKXRestClient, OKXSettings
+    from .runtime import cmd_backtest_portfolio
+
+    yaml_path = Path(args.yaml)
+    if not yaml_path.exists():
+        print(f"[error] yaml not found: {yaml_path}", file=sys.stderr)
+        return 1
+    yaml_cfg = yaml.safe_load(yaml_path.read_text()) or {}
+    if not yaml_cfg.get("factor_weights"):
+        print(
+            f"[error] {yaml_path} has empty factor_weights; "
+            "approve at least one factor first via `python -m okx_trade.research approve ...`",
+            file=sys.stderr,
+        )
+        return 1
+
+    async def _run() -> int:
+        async with OKXRestClient(OKXSettings()) as client:
+            summary = await cmd_backtest_portfolio(
+                rest_client=client,
+                yaml_cfg=yaml_cfg,
+                bar=args.bar,
+                total_bars=args.total_bars,
+                catalog_path=Path(args.catalog),
+                taker_fee_bps=args.taker_fee_bps,
+                maker_fee_bps=args.maker_fee_bps,
+            )
+        print("\n=== RESULT ===")
+        for k, v in summary.items():
+            if k.startswith("_"):
+                continue
+            print(f"  {k}: {v}")
+        return 0
+
+    return asyncio.run(_run())
 
 
 def _cmd_list(store: FactorStore) -> int:
