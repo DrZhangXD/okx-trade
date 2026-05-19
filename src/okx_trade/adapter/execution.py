@@ -148,15 +148,30 @@ def resolve_td_mode(inst_id: str, default_mode: TdMode) -> TdMode:
 
     - **现货**（``BTC-USDT`` / ``ETH-USDT`` 等）→ ``cash``：OKX 现货账户必须用 cash，
       否则报 51005；
-    - **永续 / 交割**（``BTC-USDT-SWAP`` 等）→ ``default_mode``（一般 ``cross``）。
+    - **永续 / 交割 / 期权** → ``default_mode``（一般 ``cross`` 或 ``isolated``）。
 
-    判断启发式：``-SWAP`` 后缀的是永续，否则按现货处理（M1/M2 阶段未支持
-    FUTURES/OPTION，所以这个二分够用；扩展 FUTURES 时改启发式即可）。
+    判断启发式（按 OKX instId 命名规则）：
+      - ``BTC-USDT-SWAP``        → SWAP（permanent suffix）
+      - ``BTC-USDT-260626``      → FUTURES（3 段，末段全数字 YYMMDD）
+      - ``BTC-USD-260626-100000-C`` → OPTION（5+ 段，末段 C/P）
+      - ``BTC-USDT``             → SPOT
+
+    M6+.X bug fix：原版只识别 -SWAP，FUTURES 被误判为 SPOT → td_mode=cash +
+    posSide=None → OKX 51000 'Parameter posSide error'（2026-05-19 basis_arb
+    入场被拒的根因）。
 
     模块级纯函数：便于单测，不依赖 LiveExecutionClient 实例。
     """
     if inst_id.endswith("-SWAP"):
         return default_mode
+    if inst_id.endswith("-C") or inst_id.endswith("-P"):
+        # OPTION
+        return default_mode
+    parts = inst_id.split("-")
+    # FUTURES：3 段，末段全数字（YYMMDD）
+    if len(parts) == 3 and parts[-1].isdigit() and len(parts[-1]) == 6:
+        return default_mode
+    # 其余按现货
     return TdMode.CASH
 
 

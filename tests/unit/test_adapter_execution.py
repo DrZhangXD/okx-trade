@@ -28,11 +28,30 @@ class TestResolveTdMode:
         ("BTC-USDT", TdMode.CROSS, TdMode.CASH),
         ("ETH-USDT", TdMode.ISOLATED, TdMode.CASH),
         ("SOL-USDC", TdMode.CROSS, TdMode.CASH),
+        # M6+.X：FUTURES (3 段，末段全 6 位数字 YYMMDD) → 用默认（cross）
+        # 这是 2026-05-19 basis_arb 入场被拒 51000 的根因 fix
+        ("BTC-USDT-260626", TdMode.CROSS, TdMode.CROSS),
+        ("BTC-USDT-260925", TdMode.ISOLATED, TdMode.ISOLATED),
+        ("ETH-USDT-261225", TdMode.CROSS, TdMode.CROSS),
+        # M6+.X：OPTION (5 段，末段 C/P) → 用默认
+        ("BTC-USD-260626-100000-C", TdMode.CROSS, TdMode.CROSS),
+        ("BTC-USD-260925-80000-P", TdMode.ISOLATED, TdMode.ISOLATED),
     ])
     def test_routes_per_instrument(
         self, inst_id: str, default_mode: TdMode, expected: TdMode,
     ) -> None:
         assert resolve_td_mode(inst_id, default_mode) == expected
+
+    def test_futures_open_short_yields_posside_short(self) -> None:
+        """Regression：FUTURES SELL 开空，td_mode 必须是 cross/isolated 才能拿
+        到 posSide=SHORT；否则 td_mode=cash → posSide=None → OKX 51000。"""
+        td_mode = resolve_td_mode("BTC-USDT-260626", TdMode.CROSS)
+        assert td_mode == TdMode.CROSS
+        ps = resolve_pos_side(
+            Side.SELL, reduce_only=False,
+            pos_side_mode="long_short", td_mode=td_mode,
+        )
+        assert ps == PosSide.SHORT
 
 
 class TestResolvePosSide:

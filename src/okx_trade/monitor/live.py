@@ -208,6 +208,22 @@ class LiveMonitor:
             if old != new_equity:
                 changed[name] = new_equity
 
+        # M6+.X fix #4: 把真实 OKX 余额推到每个策略的 drawdown_tracker。
+        # 之前各策略各自从 portfolio.account.balance_total(USDT) 读 NT 内部 cached
+        # 余额，paper 模式下与 OKX REST 真实余额不同步——5/18 ob_imbalance 死亡
+        # 螺旋时账户从 80,878 跌到 63,799 (-21%) 但 daily_breach 没触发，因为各策略
+        # 的 NT 内部 account 没反映真实跌幅。
+        # 现在统一由 monitor 用 OKX REST 余额 + wall clock ts 喂所有 drawdown_tracker。
+        try:
+            now_ms = self._clock()
+            for sid, handles in self.handles_by_strategy.items():
+                if handles.drawdown_tracker is not None:
+                    handles.drawdown_tracker.record_equity(
+                        ts_ms=now_ms, equity=float(total_equity),
+                    )
+        except Exception:
+            pass
+
         if changed:
             try:
                 fan_out(self.sinks, Alert(

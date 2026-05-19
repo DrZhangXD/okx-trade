@@ -28,6 +28,11 @@ if TYPE_CHECKING:
 Direction = Literal["long", "short"]
 
 
+# 默认 taker 手续费率（bps）。OKX 现货 taker = 8bps、SWAP/FUTURES taker = 5bps。
+# 这里取保守一点的 5bps。各策略可通过 ``fee_bps`` 参数覆盖。
+DEFAULT_TAKER_FEE_BPS = 5.0
+
+
 def realized_pnl_and_r(
     *,
     direction: Direction,
@@ -36,10 +41,14 @@ def realized_pnl_and_r(
     contracts: float,
     ct_val: float,
     risk_usdt: float,
+    fee_bps: float = DEFAULT_TAKER_FEE_BPS,
+    n_legs: int = 2,
 ) -> tuple[Decimal, float]:
-    """近似计算一笔已平仓交易的 (PnL_usdt, r_multiple)。
+    """近似计算一笔已平仓交易的 (PnL_usdt, r_multiple)，扣 round-trip 手续费。
 
     PnL = sign × (exit - entry) × contracts × ct_val
+          - (entry_notional + exit_notional) × fee_bps / 1e4
+
     r   = PnL / risk_usdt   （risk_usdt = equity × risk_pct，即入场时承担的最大亏损）
 
     Args:
@@ -51,12 +60,25 @@ def realized_pnl_and_r(
         ct_val: 合约面值（USDT-Margined SWAP 的 multiplier，如 BTC = 0.01）。
         risk_usdt: 入场时的"风险预算"（USDT，正值），用于算 r_multiple。0 时
             r_multiple 取 0（避免 div-by-zero）。
+        fee_bps: taker 费率（bps）。0 表示不扣手续费（仅向后兼容）。
+        n_legs: 总成交腿数。单标的 round-trip = 2 (open + close)；delta-neutral
+            两腿 round-trip = 4 (long-spot + short-perp + close-spot + close-perp)。
 
     Returns:
         ``(pnl_usdt, r_multiple)``。``pnl_usdt`` 是 ``Decimal``（写库）。
+
+    Note:
+        这是**估算**的 PnL；NT 真实成交 fee 由 ``MakerTakerFeeModel`` 在
+        SimulatedExchange 计算，但 NT 那部分 fee 是从账户 balance 扣，并不会
+        反过来传到这里。我们这里**在策略层独立扣 fee**，让 trades.pnl_usdt
+        反映扣完 fee 后的净 PnL，避免 dashboard 显示净值虚高。
     """
     sign = 1.0 if direction == "long" else -1.0
-    pnl_f = sign * (exit_price - entry_price) * contracts * ct_val
+    gross_pnl = sign * (exit_price - entry_price) * contracts * ct_val
+    # 估算手续费：每腿 notional × fee_bps / 1e4；entry + exit 各一腿
+    notional_per_leg = contracts * ct_val * (entry_price + exit_price) / 2.0
+    fee = abs(notional_per_leg) * (fee_bps / 10000.0) * n_legs
+    pnl_f = gross_pnl - fee
     r = pnl_f / risk_usdt if risk_usdt > 0 else 0.0
     return Decimal(str(pnl_f)), float(r)
 
@@ -73,8 +95,14 @@ def record_strategy_trade(
     contracts: float,
     ct_val: float,
     risk_usdt: float,
+    fee_bps: float = DEFAULT_TAKER_FEE_BPS,
+    n_legs: int = 2,
 ) -> None:
-    """把一笔已平仓交易写进 tracker。``tracker is None`` 时静默跳过。"""
+    """把一笔已平仓交易写进 tracker。``tracker is None`` 时静默跳过。
+
+    ``fee_bps`` / ``n_legs`` 透传给 ``realized_pnl_and_r``，让 trades.pnl_usdt
+    反映扣完 round-trip 手续费的净 PnL。
+    """
     if tracker is None:
         return
     pnl, r = realized_pnl_and_r(
@@ -84,6 +112,8 @@ def record_strategy_trade(
         contracts=contracts,
         ct_val=ct_val,
         risk_usdt=risk_usdt,
+        fee_bps=fee_bps,
+        n_legs=n_legs,
     )
     from ..pnl import TradeRecord
     tracker.record_trade(TradeRecord(

@@ -390,6 +390,7 @@ if _NT_AVAILABLE:
                 risk_usdt=effective_equity_usdt(
                     self._allocated_equity_usdt, cfg.account_equity_usdt,
                 ) * cfg.risk_pct,
+                n_legs=4,  # left enter + right enter + left exit + right exit
             )
             self._position = None
             self._left_contracts = 0.0

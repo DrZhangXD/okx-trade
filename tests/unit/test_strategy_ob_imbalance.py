@@ -97,3 +97,22 @@ def test_config_default_values_sane() -> None:
     assert 30 <= cfg.hold_max_sec <= 3600
     # 单笔风险不超 1%
     assert cfg.risk_pct <= 0.01
+    # M6+.X 死亡螺旋防御：SL 不能太紧，必须覆盖 round-trip fee + slippage
+    # round-trip fee = 2 × taker(5bp) = 10bp；SL 至少要 2x 它才有正期望
+    assert cfg.stop_distance_bps >= 20.0, "stop too tight, will be eaten by fees"
+    # reentry cooldown 至少 30s（防 1-second churning）
+    assert cfg.reentry_cooldown_sec >= 30
+    assert cfg.reentry_requires_reversal is True
+
+
+def test_reentry_cooldown_blocks_immediate_retrigger() -> None:
+    """5/18 死亡螺旋：平仓 1 秒内重新入场 → reentry_cooldown 必须拒绝。"""
+    from okx_trade.strategies.ob_imbalance import OBImbalanceConfig
+    cfg = OBImbalanceConfig(
+        instrument_id="BTC-USDT-SWAP.OKX",
+        bar_type="BTC-USDT-SWAP.OKX-1-MINUTE-LAST-EXTERNAL",
+    )
+    # cooldown 配置存在且 ≥ 30s
+    assert cfg.reentry_cooldown_sec >= 30, (
+        f"cooldown {cfg.reentry_cooldown_sec}s too short — 5/18 churn was 1 sec"
+    )

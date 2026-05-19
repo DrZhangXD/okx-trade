@@ -31,17 +31,19 @@ strategies:
   # - ob_imbalance：订阅 books5 WS，秒级聚合，30s 滚动 imbalance；信号触发后
   #   target 30s–5min 持仓，单笔 risk_pct=0.3%。
   basis_arb:
-    # 2026-05-19 hotfix-disable: paper 账户 sCode=51000 posSide error，单笔
-    # 入场被 OKX 拒。需先排查 pos_side_mode 配置 / OKX paper posMode 是否一致。
-    enabled: false
+    # 2026-05-19 修复后重启：execution.resolve_td_mode 加 FUTURES 分支
+    # （3 段 + 末段全 6 位数字识别为 FUTURES，td_mode=cross，发 posSide）。
+    # OKX paper posMode 已确认为 long_short_mode，跟 yaml 对齐。
+    enabled: true
     config: configs/strategies/basis_arb.yaml
   ob_imbalance:
-    # 2026-05-19 hotfix-disable: 过度交易（每秒 1 笔）+ trades.pnl_usdt 不扣
-    # 手续费 → 账面 +6413 USDT 但实际亏 ~8500 USDT (5/18 22:51 启动后)。
-    # 根因：8bp SL / 12bp TP 对 BTC tick 太紧，几秒内必触发；fee 5bp × 2 腿
-    # × 496 笔 = ~7200 USDT 被吃掉。下一轮：调宽 SL/TP 或 cooldown，PnL hook
-    # 加 fee 计算。
-    enabled: false
+    # 2026-05-19 修复后重启：
+    # - SL 8bp → 30bp（让 alpha 覆盖 10bp round-trip fee）
+    # - 加 reentry_cooldown_sec=60 + reentry_requires_reversal=true
+    # - risk_pct 0.3% → 0.2%
+    # - pnl_hook.realized_pnl_and_r 现扣 round-trip fee (default 5bps×2 legs)
+    # 这些一起防止 5/18 死亡螺旋复发（496 笔/天，账面 +6413 实际 ~-2800）。
+    enabled: true
     config: configs/strategies/ob_imbalance.yaml
   # M6+ 新策略（默认 enabled: false，逐个 paper 验证后启用）：
   # - funding_cross_section：多空 funding 横截面，需 universe + β 历史 ≥ 30 天

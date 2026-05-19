@@ -98,12 +98,18 @@ if _NT_AVAILABLE:
         bar_type: str
         aggregation_sec: int = 1
         imbalance_window_sec: int = 30
-        imbalance_threshold: float = 0.35
-        microprice_premium_bps: float = 3.0
+        imbalance_threshold: float = 0.45
+        microprice_premium_bps: float = 5.0
         hold_max_sec: int = 300
-        stop_distance_bps: float = 8.0
+        # M6+.X 修：原 8bp SL 太紧（BTC tick 0.5 USDT，几秒必触发）→ 死亡螺旋。
+        # 改 30bp 让单笔 alpha 有空间覆盖 round-trip fee（5bps × 2 legs = 10bps）。
+        stop_distance_bps: float = 30.0
         tp_rr_ratio: float = 1.5
-        risk_pct: float = 0.003
+        # M6+.X 修：reentry cooldown，平仓后 60s 内不能再入场
+        reentry_cooldown_sec: int = 60
+        # M6+.X 修：reentry 要求 imbalance 先反转（跨过 0）才能再入场，避免同方向连扫
+        reentry_requires_reversal: bool = True
+        risk_pct: float = 0.002
         account_equity_usdt: float = 10000.0
         subscribe_books5: bool = True
         depth: int = 5
@@ -138,6 +144,11 @@ if _NT_AVAILABLE:
             self._position_contracts: float = 0.0
             self._entry_ts_ms: int = 0
             self._allocated_equity_usdt: float | None = None
+
+            # M6+.X reentry cooldown / reversal lock
+            self._last_exit_ts_ms: int = 0
+            self._last_exit_imb_sign: int = 0  # +1 long → 平仓时 imb 是正；-1 short
+            self._imb_sign_flipped_since_exit: bool = False
 
             self._risk_manager, self._risk_handles = build_risk_manager(config.risk_config)
             self._prev_close: float | None = None
@@ -232,6 +243,21 @@ if _NT_AVAILABLE:
             # 滚动平均
             avg_imb = sum(v for _, v in self._imb_history) / max(1, len(self._imb_history))
             avg_micro = sum(v for _, v in self._micro_history) / max(1, len(self._micro_history))
+
+            # M6+.X reentry gate：平仓后 cooldown + 要求 imbalance 反转
+            # 才能再入场，避免同方向连扫（5/18 死亡螺旋根因）
+            if self._last_exit_ts_ms > 0:
+                cooldown_ms = self.config.reentry_cooldown_sec * 1000
+                if now_ms - self._last_exit_ts_ms < cooldown_ms:
+                    return  # 冷却期内
+                if self.config.reentry_requires_reversal:
+                    # imbalance 当前 sign 跟上次 exit 时反向 → 标记 flipped
+                    cur_sign = 1 if avg_imb > 0 else (-1 if avg_imb < 0 else 0)
+                    if cur_sign != 0 and cur_sign == -self._last_exit_imb_sign:
+                        self._imb_sign_flipped_since_exit = True
+                    if not self._imb_sign_flipped_since_exit:
+                        return  # imbalance 还没反转过，禁止入场
+
             decision = ob_signal(
                 imbalance=avg_imb,
                 mid_px=mid,
@@ -431,6 +457,11 @@ if _NT_AVAILABLE:
                         self._allocated_equity_usdt, cfg.account_equity_usdt,
                     ) * cfg.risk_pct,
                 )
+
+            # M6+.X 记录 last_exit 状态供 reentry gate 用
+            self._last_exit_ts_ms = ts_ms or int(time.time() * 1000)
+            self._last_exit_imb_sign = 1 if self._active_direction == "long" else -1
+            self._imb_sign_flipped_since_exit = False
 
             self._active_direction = None
             self._position_contracts = 0.0

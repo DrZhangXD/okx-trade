@@ -537,6 +537,9 @@ if _NT_AVAILABLE:
                 contracts=self._call_qty,
                 ct_val=1.0,
                 risk_usdt=cfg.max_notional_per_leg_usdt * 2,
+                # call enter + put enter + call exit + put exit + perp hedge fills
+                # (perp re-hedges 频次不定，按 1 个等价 round-trip = 2 legs 折中)
+                n_legs=6,
             )
 
             self._call_inst_id = None

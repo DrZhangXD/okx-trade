@@ -402,6 +402,7 @@ if _NT_AVAILABLE:
                 risk_usdt=effective_equity_usdt(
                     self._allocated_equity_usdt, cfg.account_equity_usdt,
                 ) * cfg.max_position_pct,
+                n_legs=4,  # spot enter + futures enter + spot exit + futures exit
             )
 
             self._has_position = False
