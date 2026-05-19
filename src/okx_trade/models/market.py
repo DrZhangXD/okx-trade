@@ -111,4 +111,36 @@ class Trade(OKXModel):
     ts: int
 
 
-__all__ = ["Candle", "OrderBook", "OrderBookLevel", "Ticker", "Trade"]
+class OpenInterest(OKXModel):
+    """``GET /api/v5/public/open-interest`` 单条响应。
+
+    OKX 返回三种 OI 口径：
+    - ``oi``: 张数（contracts），最原始
+    - ``oi_ccy``: base 币种名义（适合跨币种比较）
+    - ``oi_usd``: USD 名义（适合 OI/volume 比例计算）
+    """
+    inst_id: str = Field(alias="instId")
+    inst_type: str = Field(default="SWAP", alias="instType")
+    oi: Decimal = Field(default=Decimal("0"), alias="oi")
+    oi_ccy: Decimal = Field(default=Decimal("0"), alias="oiCcy")
+    oi_usd: Decimal = Field(default=Decimal("0"), alias="oiUsd")
+    ts: int = Field(default=0, alias="ts")
+
+
+class OpenInterestPoint(OKXModel):
+    """``GET /api/v5/rubik/stat/contracts/open-interest-volume`` 单条历史点。
+
+    rubik 端点返回数组 ``[ts, oiCcy, volCcy]`` 而非 dict，需要 ``from_array`` 解析。
+    历史 OI 只暴露 base 币种口径（``oi_ccy``），不带 USD/contracts。
+    """
+    ts: int
+    oi_ccy: Decimal = Decimal("0")
+    vol_ccy: Decimal = Decimal("0")
+
+    @classmethod
+    def from_array(cls, row: list[str]) -> OpenInterestPoint:
+        ts, oi_ccy, vol_ccy = row[0], row[1], row[2]
+        return cls(ts=int(ts), oi_ccy=Decimal(oi_ccy), vol_ccy=Decimal(vol_ccy))
+
+
+__all__ = ["Candle", "OrderBook", "OrderBookLevel", "Ticker", "Trade", "OpenInterest", "OpenInterestPoint"]
