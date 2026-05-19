@@ -90,6 +90,12 @@ def build_parser() -> argparse.ArgumentParser:
                     help="NT ParquetDataCatalog path")
     pb.add_argument("--taker-fee-bps", type=float, default=5.0)
     pb.add_argument("--maker-fee-bps", type=float, default=2.0)
+    pb.add_argument("--warmup-days", type=int, default=0,
+                    help="Pre-populate strategy buffers with N days of history before "
+                         "the backtest window (so basis_z_30d / funding_z_30d are warm "
+                         "from bar 1). 0 = cold start. 30 = match real-mode warmup.")
+    pb.add_argument("--warmup-panel-dir", default=str(_DEFAULT_PANEL_DIR),
+                    help="Where to save the fetched warmup panel parquet")
     _common(pb)
 
     prp = sub.add_parser("report")
@@ -244,6 +250,8 @@ def _cmd_backtest_portfolio_online(args: argparse.Namespace) -> int:
                 catalog_path=Path(args.catalog),
                 taker_fee_bps=args.taker_fee_bps,
                 maker_fee_bps=args.maker_fee_bps,
+                warmup_days=args.warmup_days,
+                warmup_panel_dir=Path(args.warmup_panel_dir),
             )
         print("\n=== RESULT ===")
         for k, v in summary.items():
