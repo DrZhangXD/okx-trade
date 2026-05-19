@@ -45,6 +45,12 @@ strategies:
     # 这些一起防止 5/18 死亡螺旋复发（496 笔/天，账面 +6413 实际 ~-2800）。
     enabled: true
     config: configs/strategies/ob_imbalance.yaml
+  factor_portfolio:
+    # P1 strategy (factor research lab output). Default disabled —
+    # only enable after `python -m okx_trade.research approve ...` populates
+    # configs/factor_portfolio.yaml with ≥ 3 factors that passed grade.
+    enabled: false
+    config: configs/factor_portfolio.yaml
   # M6+ 新策略（默认 enabled: false，逐个 paper 验证后启用）：
   # - funding_cross_section：多空 funding 横截面，需 universe + β 历史 ≥ 30 天
   # - funding_skew_momentum：funding z-score ±2σ 反向（BTC instance）

@@ -99,6 +99,13 @@ def _strategy_registry() -> dict[str, tuple[Any, Any]]:
         registry["ml_fusion"] = (MLFusionConfig, MLFusionStrategy)
     except ImportError:
         pass
+    try:
+        from ..strategies.factor_portfolio import (
+            FactorPortfolioConfig, FactorPortfolioStrategy,
+        )
+        registry["factor_portfolio"] = (FactorPortfolioConfig, FactorPortfolioStrategy)
+    except ImportError:
+        pass
     return registry
 
 

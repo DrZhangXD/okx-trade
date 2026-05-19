@@ -21,6 +21,7 @@
 | [`StatArbStrategy`](../src/okx_trade/strategies/stat_arb_pairs.py) | mean-reverting | 1H bar | **M6+** | ❌ false | BTC-ETH 协整套利（默认 pair） |
 | [`OptionVolStrategy`](../src/okx_trade/strategies/option_vol_selling.py) | vol carry | 1h check | **M6+** | ❌ false | BTC short straddle + delta hedge |
 | [`MLFusionStrategy`](../src/okx_trade/strategies/ml_fusion.py) | meta | 每 4h | **M6+** | ❌ false | XGBoost 多空均匀腿 |
+| [`FactorPortfolioStrategy`](../src/okx_trade/strategies/factor_portfolio.py) | meta | bar-driven (4h default) | **P1** | ❌ false | Generic factor synthesizer; reads configs/factor_portfolio.yaml populated by research lab |
 
 ---
 
@@ -57,6 +58,26 @@
    `var/ml_fusion_model.pkl`
 3. paper 跑 ≥ 2 周看分类准确率 > 52%（高于随机基准 50%）
 4. monitor 加 alert：CV 分数掉到 < 51% 触发 WARN（v1 暂不实现）
+
+---
+
+## Factor Research Lab (P1, 2026-05-19)
+
+新模块 `okx_trade.research`：CLI-driven 因子评估 pipeline + 通用 FactorPortfolio 策略。
+
+- 设计文档: [`docs/superpowers/specs/2026-05-19-factor-research-lab-design.md`](superpowers/specs/2026-05-19-factor-research-lab-design.md)
+- 实施计划: [`docs/superpowers/plans/2026-05-19-factor-research-lab.md`](superpowers/plans/2026-05-19-factor-research-lab.md)
+- 入口: `python -m okx_trade.research <list|fetch|eval|approve|reject|backtest-portfolio|report>`
+- 因子库 (v1, 15 个): momentum × 4, funding/OI × 4, basis × 2, volatility × 3, flow × 2
+
+启用步骤：
+
+1. `python -m okx_trade.research fetch --start 2025-11-01 --end 2026-05-15 --universe top30`
+2. `python -m okx_trade.research grade-all --horizon 1d`
+3. 看 `var/factor_research/reports/*.md` 选 3-5 个 verdict=pass 的因子
+4. `python -m okx_trade.research approve --factor <id> --weight <0.1-0.4>` 逐个加
+5. 改 `configs/live.yaml`: `factor_portfolio.enabled: true`
+6. paper 跑 7 天看与 xs_momentum 相关系数（< 0.7 OK，否则砍权重）
 
 ---
 
