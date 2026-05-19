@@ -218,6 +218,116 @@ async def cmd_grade_all(
 # ---------------------------------------------------------------------------
 
 
+async def cmd_wf_grade(
+    *,
+    rest_client: _RestClient,
+    factor_id: str,
+    start: str,
+    end: str,
+    universe: str,
+    bar: str,
+    horizon: str,
+    train_days: int,
+    test_days: int,
+    panel_cache: Path,
+) -> list:
+    """Walk-forward OOS grade: roll a (train, test) split + grade each test slice.
+
+    Returns list of FactorGrade. Prints a one-row-per-window summary table.
+    """
+    from .walk_forward_grade import walk_forward_grade
+
+    panel = await cmd_fetch(
+        rest_client=rest_client, start=start, end=end,
+        universe=universe, bar=bar, cache_dir=panel_cache,
+    )
+    bar_minutes = _bar_to_minutes(bar)
+    horizon_bars = parse_horizon_to_bars(horizon, bar_minutes=bar_minutes)
+    train_window = train_days * 24 * 60 // bar_minutes
+    test_window = test_days * 24 * 60 // bar_minutes
+
+    grades = walk_forward_grade(
+        factor_id, panel,
+        horizon_bars=horizon_bars,
+        train_window=train_window, test_window=test_window,
+    )
+    if not grades:
+        print(f"  {factor_id}: 0 windows (panel too short for train={train_days}d + test={test_days}d)")
+        return grades
+
+    print(f"\nWalk-forward OOS for {factor_id} ({train_days}d train + {test_days}d test):")
+    ics = [g.ic_mean for g in grades]
+    sign = 1 if sum(ics) >= 0 else -1
+    wins = sum(1 for x in ics if (x >= 0) == (sign >= 0))
+    ic_str = "  ".join(f"{x:+.3f}" for x in ics)
+    print(f"  windows: {len(grades)}   same-direction: {wins}/{len(grades)} ({wins/len(grades):.0%})")
+    print(f"  IC per window: [{ic_str}]")
+    return grades
+
+
+async def cmd_corr_matrix(
+    *,
+    rest_client: _RestClient,
+    factor_ids: list[str],
+    start: str,
+    end: str,
+    universe: str,
+    bar: str,
+    tail_days: int,
+    panel_cache: Path,
+) -> dict:
+    """Pairwise Pearson correlation of factor scores over the last ``tail_days``.
+
+    Returns dict with ``{factor_ids, matrix}``. Prints a pretty table.
+    """
+    import numpy as np
+
+    panel = await cmd_fetch(
+        rest_client=rest_client, start=start, end=end,
+        universe=universe, bar=bar, cache_dir=panel_cache,
+    )
+    bar_minutes = _bar_to_minutes(bar)
+    tail_bars = tail_days * 24 * 60 // bar_minutes
+
+    vals: dict[str, "np.ndarray"] = {}
+    for fid in factor_ids:
+        try:
+            arr = compute_factor(fid, panel)
+        except Exception as exc:  # noqa: BLE001
+            print(f"  skip {fid}: {exc}")
+            continue
+        vals[fid] = arr[-tail_bars:].flatten()
+    valid = list(vals.keys())
+    n = len(valid)
+    matrix = np.full((n, n), np.nan)
+    for i, a in enumerate(valid):
+        for j, b in enumerate(valid):
+            x, y = vals[a], vals[b]
+            m = ~(np.isnan(x) | np.isnan(y))
+            if m.sum() >= 50:
+                matrix[i, j] = float(np.corrcoef(x[m], y[m])[0, 1])
+
+    print(f"\nFactor correlation matrix (last {tail_days}d × {panel.n} inst):\n")
+    print(f"{'':<22}" + "".join(f"{v[:10]:>11}" for v in valid))
+    for i, a in enumerate(valid):
+        cells = []
+        for j in range(n):
+            c = matrix[i, j]
+            cells.append(f"{c:+.3f}".rjust(11) if not np.isnan(c) else "       nan ")
+        print(f"{a:<22}" + "".join(cells))
+    print("\nPairs with |corr| > 0.5 (potential duplicate alpha):")
+    flagged = 0
+    for i in range(n):
+        for j in range(i + 1, n):
+            c = matrix[i, j]
+            if not np.isnan(c) and abs(c) > 0.5:
+                print(f"  {valid[i]:<24} <-> {valid[j]:<24} corr={c:+.3f}")
+                flagged += 1
+    if flagged == 0:
+        print("  (none)")
+    return {"factor_ids": valid, "matrix": matrix}
+
+
 async def cmd_backtest_portfolio(
     *,
     rest_client: _RestClient,
@@ -246,7 +356,11 @@ async def cmd_backtest_portfolio(
 
     from okx_trade.adapter.constants import OKX_VENUE
     from okx_trade.adapter.parsing import make_bar_type
-    from okx_trade.backtest import build_okx_venue_config, run_backtest
+    from okx_trade.backtest import (
+        build_okx_venue_config,
+        extract_equity_curve,
+        run_backtest_with_node,
+    )
     from .data import _save_cache, fetch_panel
     from okx_trade.backtest.data_loader import prepare_backtest_catalog
 
@@ -373,15 +487,106 @@ async def cmd_backtest_portfolio(
 
     print(f"[3/3] running backtest (factors: "
           f"{len(yaml_cfg.get('factor_weights', []))})")
-    summary = run_backtest(venue=venue, data=data_configs, strategies=[strategy_config])
+    summary, node = run_backtest_with_node(
+        venue=venue, data=data_configs, strategies=[strategy_config],
+    )
+
+    # Dual reporting strategy:
+    #
+    #  nt_* metrics: NT's BacktestSummary, derived from REALIZED trade PnL only.
+    #    Conservative — excludes mark-to-market on open positions at backtest end.
+    #    Often shows maxDD=0 because realized PnL on a trend-rotating strategy
+    #    never dips below 0 if each closed trade is positive.
+    #
+    #  equity_* metrics (pnl_pct, sharpe_ratio, max_drawdown_pct): derived from
+    #    the account equity curve (free + locked USDT including unrealized PnL on
+    #    open positions). This is what a portfolio manager sees on their screen.
+    #    Will differ from nt_* if the strategy ends with open positions whose
+    #    unrealized PnL is significant; for FactorPortfolioStrategy this is the
+    #    usual case (it always holds top_k_long + top_k_short legs between rebals).
+    #
+    # Both are reported; user should look at equity_* for "what would I actually
+    # have" and nt_* for "what's locked in." Production paper trading on the VPS
+    # will surface the true live equity via the existing daily_report system.
+    equity_metrics = _compute_equity_metrics(node, bar)
 
     return {
-        "pnl_pct": getattr(summary, "pnl_pct", None),
-        "sharpe_ratio": getattr(summary, "sharpe_ratio", None),
-        "max_drawdown_pct": getattr(summary, "max_drawdown_pct", None),
-        "win_rate": getattr(summary, "win_rate", None),
+        # NT-native (may differ from equity-based; kept for cross-check)
+        "nt_pnl_pct": getattr(summary, "pnl_pct", None),
+        "nt_sharpe_ratio": getattr(summary, "sharpe_ratio", None),
+        "nt_max_drawdown_pct": getattr(summary, "max_drawdown_pct", None),
+        "nt_win_rate": getattr(summary, "win_rate", None),
         "total_orders": getattr(summary, "total_orders", None),
+        # First-principles (equity curve based)
+        **equity_metrics,
         "_raw": summary,
+    }
+
+
+def _compute_equity_metrics(node, bar: str) -> dict:
+    """Compute portfolio-level metrics from the equity curve.
+
+    Sharpe is annualized using sqrt(periods_per_year) where periods_per_year is
+    derived from the bar interval. maxDD is peak-to-trough on the equity series.
+    """
+    import numpy as np
+
+    from okx_trade.adapter.constants import OKX_VENUE
+    from okx_trade.backtest import extract_equity_curve
+
+    try:
+        eq = extract_equity_curve(node, OKX_VENUE)
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "equity_error": str(exc),
+            "pnl_pct": None,
+            "sharpe_ratio": None,
+            "max_drawdown_pct": None,
+            "annualized_return_pct": None,
+            "n_equity_samples": 0,
+        }
+    if eq.empty or "total" not in eq.columns:
+        return {
+            "pnl_pct": None,
+            "sharpe_ratio": None,
+            "max_drawdown_pct": None,
+            "annualized_return_pct": None,
+            "n_equity_samples": 0,
+        }
+    total = eq["total"].astype(float)
+    if len(total) < 2:
+        return {
+            "pnl_pct": 0.0,
+            "sharpe_ratio": None,
+            "max_drawdown_pct": 0.0,
+            "annualized_return_pct": None,
+            "n_equity_samples": int(len(total)),
+        }
+    pnl_pct = float(total.iloc[-1] / total.iloc[0] - 1.0) * 100.0
+    drawdown = (total / total.cummax() - 1.0).min()
+    max_dd_pct = float(drawdown) * 100.0
+    # Approximate periods/year from bar (1H → 24*365 = 8760)
+    bar_mins = _bar_to_minutes(bar)
+    periods_per_year = (365 * 24 * 60) / max(1, bar_mins)
+    # Resample equity to bar frequency to get per-period returns
+    rets = total.pct_change().dropna()
+    if len(rets) < 2 or rets.std() == 0:
+        sharpe = None
+    else:
+        sharpe = float(rets.mean() / rets.std() * np.sqrt(periods_per_year))
+    # Annualized return from total pnl + actual elapsed time
+    elapsed_seconds = (total.index[-1] - total.index[0]).total_seconds()
+    if elapsed_seconds > 0:
+        years = elapsed_seconds / (365 * 24 * 3600)
+        ann_ret_pct = float(((total.iloc[-1] / total.iloc[0]) ** (1.0 / years) - 1.0)) * 100.0 if years > 0 else None
+    else:
+        ann_ret_pct = None
+    return {
+        "pnl_pct": pnl_pct,
+        "sharpe_ratio": sharpe,
+        "max_drawdown_pct": max_dd_pct,
+        "annualized_return_pct": ann_ret_pct,
+        "n_equity_samples": int(len(total)),
     }
 
 
@@ -427,9 +632,11 @@ def _write_report(report_dir: Path, grade: FactorGrade) -> Path:
 
 __all__ = [
     "cmd_backtest_portfolio",
+    "cmd_corr_matrix",
     "cmd_eval",
     "cmd_fetch",
     "cmd_grade_all",
+    "cmd_wf_grade",
     "parse_horizon_to_bars",
     "parse_ymd_to_ms",
     "resolve_universe",

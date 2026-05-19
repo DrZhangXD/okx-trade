@@ -28,7 +28,7 @@ def _ensure_factors_registered():
 def test_parser_recognizes_all_subcommands() -> None:
     p = build_parser()
     for cmd in ("list", "fetch", "eval", "grade-all", "approve", "reject",
-                "backtest-portfolio", "report"):
+                "backtest-portfolio", "report", "wf-grade", "corr-matrix"):
         assert cmd in p._subparsers._group_actions[0].choices  # type: ignore[attr-defined]
 
 

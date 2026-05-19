@@ -103,6 +103,31 @@ def build_parser() -> argparse.ArgumentParser:
     prp.add_argument("--report-dir", default=str(_DEFAULT_REPORT_DIR))
     _common(prp)
 
+    pwf = sub.add_parser("wf-grade",
+                         help="walk-forward OOS grade for one factor")
+    pwf.add_argument("--factor", required=True)
+    pwf.add_argument("--start", required=True, help="YYYY-MM-DD")
+    pwf.add_argument("--end", required=True)
+    pwf.add_argument("--universe", default="top30")
+    pwf.add_argument("--bar", default="1H")
+    pwf.add_argument("--horizon", default="1d")
+    pwf.add_argument("--train-days", type=int, default=60)
+    pwf.add_argument("--test-days", type=int, default=30)
+    pwf.add_argument("--panel-cache", default=str(_DEFAULT_PANEL_DIR))
+    _common(pwf)
+
+    pcm = sub.add_parser("corr-matrix",
+                         help="pairwise correlation of factor scores")
+    pcm.add_argument("--factors", required=True,
+                     help="comma-separated factor ids, e.g. momentum_7d,basis_z_30d,funding_z_30d")
+    pcm.add_argument("--start", required=True)
+    pcm.add_argument("--end", required=True)
+    pcm.add_argument("--universe", default="top30")
+    pcm.add_argument("--bar", default="1H")
+    pcm.add_argument("--tail-days", type=int, default=60)
+    pcm.add_argument("--panel-cache", default=str(_DEFAULT_PANEL_DIR))
+    _common(pcm)
+
     return p
 
 
@@ -138,6 +163,10 @@ def run(argv: Sequence[str] | None = None) -> int:
         return _cmd_grade_all_online(args, store)
     if cmd == "backtest-portfolio":
         return _cmd_backtest_portfolio_online(args)
+    if cmd == "wf-grade":
+        return _cmd_wf_grade_online(args)
+    if cmd == "corr-matrix":
+        return _cmd_corr_matrix_online(args)
 
     return 1
 
@@ -216,6 +245,54 @@ def _cmd_grade_all_online(args: argparse.Namespace, store: FactorStore) -> int:
             )
         passed = sum(1 for g, _ in results if g.verdict == "pass")
         print(f"grade-all: {len(results)} factors evaluated, {passed} passed threshold")
+        return 0
+
+    return asyncio.run(_run())
+
+
+def _cmd_wf_grade_online(args: argparse.Namespace) -> int:
+    import asyncio
+
+    from .. import OKXRestClient, OKXSettings
+    from .runtime import cmd_wf_grade
+
+    async def _run() -> int:
+        async with OKXRestClient(OKXSettings()) as client:
+            grades = await cmd_wf_grade(
+                rest_client=client,
+                factor_id=args.factor,
+                start=args.start, end=args.end,
+                universe=args.universe, bar=args.bar,
+                horizon=args.horizon,
+                train_days=args.train_days, test_days=args.test_days,
+                panel_cache=Path(args.panel_cache),
+            )
+        return 0 if grades else 1
+
+    return asyncio.run(_run())
+
+
+def _cmd_corr_matrix_online(args: argparse.Namespace) -> int:
+    import asyncio
+
+    from .. import OKXRestClient, OKXSettings
+    from .runtime import cmd_corr_matrix
+
+    factor_ids = [s.strip() for s in args.factors.split(",") if s.strip()]
+    if not factor_ids:
+        print("[error] --factors must list at least one id", file=sys.stderr)
+        return 1
+
+    async def _run() -> int:
+        async with OKXRestClient(OKXSettings()) as client:
+            await cmd_corr_matrix(
+                rest_client=client,
+                factor_ids=factor_ids,
+                start=args.start, end=args.end,
+                universe=args.universe, bar=args.bar,
+                tail_days=args.tail_days,
+                panel_cache=Path(args.panel_cache),
+            )
         return 0
 
     return asyncio.run(_run())
