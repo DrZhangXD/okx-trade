@@ -16,7 +16,9 @@ top_k_short: 5
 risk_pct: 0.002
 account_equity_usdt: 10000.0
 factor_weights:
-- - momentum_1d_reversal
-  - 0.5
-- - momentum_7d_reversal
+- - basis_apr
   - 0.3
+- - basis_z_30d
+  - 0.4
+- - momentum_1d_reversal
+  - 0.2

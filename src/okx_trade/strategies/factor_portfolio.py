@@ -111,6 +111,22 @@ except ImportError:  # pragma: no cover
     Strategy = object        # type: ignore[assignment,misc]
 
 
+def _derive_spot_inst_id(perp_inst_id: str) -> str | None:
+    """Derive the SPOT inst id from a SWAP one, preserving any venue suffix.
+
+    Examples:
+        "BTC-USDT-SWAP.OKX" -> "BTC-USDT.OKX"
+        "ETH-USDT-SWAP"     -> "ETH-USDT"
+        "BTC-USDT"          -> None   (already spot)
+        "BTC-USD-260925"    -> None   (delivery future, no spot equivalent)
+    """
+    head, _, venue = perp_inst_id.partition(".")
+    if not head.endswith("-SWAP"):
+        return None
+    spot_head = head[: -len("-SWAP")]
+    return f"{spot_head}.{venue}" if venue else spot_head
+
+
 if _NT_AVAILABLE:
 
     from collections import deque
@@ -127,6 +143,12 @@ if _NT_AVAILABLE:
         ``factor_weights`` is a list of (id, weight) tuples (StrategyConfig requires
         hashable/frozen types — list-of-tuples avoids dict mutation while staying
         round-trippable to/from yaml).
+
+        ``subscribe_spot_for_basis`` (default True) makes the strategy also subscribe
+        to the SPOT pair of each perp (BTC-USDT for BTC-USDT-SWAP) so the
+        ``basis_apr`` panel field can be populated from (perp_close - spot_close).
+        Required by ``basis_apr`` / ``basis_z_30d`` factors. Disable to fall back
+        to close-only factors (e.g. momentum_*_reversal).
         """
         instrument_ids: list[str]
         bar_type_template: str
@@ -136,6 +158,7 @@ if _NT_AVAILABLE:
         risk_pct: float = 0.002
         account_equity_usdt: float = 10_000.0
         factor_weights: list[tuple[str, float]] = []
+        subscribe_spot_for_basis: bool = True
         risk_config: RiskConfig | None = None
 
 
@@ -153,13 +176,31 @@ if _NT_AVAILABLE:
                 iid: BarType.from_str(config.bar_type_template.format(inst=iid.value))
                 for iid in self._inst_ids
             }
-            # Buffer enough bars for the slowest factor (vol_of_vol_30d = 60d * 24 + slack)
-            self._closes: dict[str, deque[float]] = {
-                iid.value: deque(maxlen=60 * 24 + 50) for iid in self._inst_ids
+            # Buffer enough bars for the slowest factor (vol_of_vol_30d = 60d * 24 + slack).
+            # Switched from deque[float] to deque[tuple[ts_ms, value]] so we can align
+            # perp and spot bars by timestamp when computing basis_apr.
+            _buf_len = 60 * 24 + 50
+            self._closes: dict[str, deque[tuple[int, float]]] = {
+                iid.value: deque(maxlen=_buf_len) for iid in self._inst_ids
             }
-            self._volumes: dict[str, deque[float]] = {
-                iid.value: deque(maxlen=60 * 24 + 50) for iid in self._inst_ids
+            self._volumes: dict[str, deque[tuple[int, float]]] = {
+                iid.value: deque(maxlen=_buf_len) for iid in self._inst_ids
             }
+            # Spot pair tracking for basis_apr. _spot_to_perp lets us route an
+            # incoming spot bar back to its perp inst's buffer.
+            self._spot_closes: dict[str, deque[tuple[int, float]]] = {
+                iid.value: deque(maxlen=_buf_len) for iid in self._inst_ids
+            }
+            self._spot_to_perp: dict[str, str] = {}
+            self._spot_bar_types: dict[str, BarType] = {}
+            if config.subscribe_spot_for_basis:
+                for iid in self._inst_ids:
+                    perp_value = iid.value  # e.g. "BTC-USDT-SWAP.OKX"
+                    spot_value = _derive_spot_inst_id(perp_value)
+                    if spot_value is not None:
+                        self._spot_to_perp[spot_value] = perp_value
+                        spot_bar_str = config.bar_type_template.format(inst=spot_value)
+                        self._spot_bar_types[spot_value] = BarType.from_str(spot_bar_str)
             self._last_rebalance_ms: int = 0
             self._positions: dict[str, tuple[str, float, int]] = {}
             self._allocated_equity_usdt: float | None = None
@@ -171,9 +212,21 @@ if _NT_AVAILABLE:
         def on_start(self) -> None:
             for bar_type in self._bar_types.values():
                 self.subscribe_bars(bar_type)
+            for spot_bar_type in self._spot_bar_types.values():
+                try:
+                    self.subscribe_bars(spot_bar_type)
+                except Exception as exc:  # noqa: BLE001
+                    # Spot instrument may not be loaded in the cache (e.g. live
+                    # mode where instrument_provider only loaded SWAP). Log + skip:
+                    # the perp's spot_closes buffer stays empty → basis_apr factors
+                    # produce NaN → synthesize_score skips them gracefully.
+                    self.log.warning(
+                        f"factor_portfolio: spot subscribe failed for {spot_bar_type}: {exc}"
+                    )
             self.log.info(
                 f"factor_portfolio start: factors={[w.id for w in self._weights]} "
-                f"top_k={self.config.top_k_long}/{self.config.top_k_short}"
+                f"top_k={self.config.top_k_long}/{self.config.top_k_short} "
+                f"spot_pairs={len(self._spot_to_perp)}"
             )
             if not self._weights:
                 self.log.warning("factor_portfolio: no factor_weights configured; idle")
@@ -183,17 +236,24 @@ if _NT_AVAILABLE:
 
         def on_bar(self, bar: "Bar") -> None:
             inst_value = bar.bar_type.instrument_id.value
-            if inst_value not in self._closes:
+            ts_ms = int(bar.ts_event // 1_000_000)
+            if inst_value in self._closes:
+                # Perp bar
+                self._closes[inst_value].append((ts_ms, bar.close.as_double()))
+                self._volumes[inst_value].append(
+                    (ts_ms, bar.volume.as_double() * bar.close.as_double()),
+                )
+                if (self._weights
+                        and ts_ms - self._last_rebalance_ms
+                        >= self.config.rebalance_hours * 3_600_000):
+                    self._rebalance(ts_ms)
+                    self._last_rebalance_ms = ts_ms
                 return
-            self._closes[inst_value].append(bar.close.as_double())
-            self._volumes[inst_value].append(bar.volume.as_double() * bar.close.as_double())
-
-            now_ms = int(bar.ts_event // 1_000_000)
-            if (self._weights
-                    and now_ms - self._last_rebalance_ms
-                    >= self.config.rebalance_hours * 3_600_000):
-                self._rebalance(now_ms)
-                self._last_rebalance_ms = now_ms
+            if inst_value in self._spot_to_perp:
+                # Spot bar — buffer for the corresponding perp's basis computation.
+                # Does NOT trigger rebalance (perp bar drives rebalance cadence).
+                perp_inst = self._spot_to_perp[inst_value]
+                self._spot_closes[perp_inst].append((ts_ms, bar.close.as_double()))
 
         def _build_panel(self) -> FactorPanel | None:
             inst_ids = tuple(iid.value for iid in self._inst_ids)
@@ -201,17 +261,46 @@ if _NT_AVAILABLE:
             if T_min < 24:
                 return None
             T = T_min
+            # Real bar timestamps (last T per inst), aligned across inst via tail-take.
+            # We use perp inst[0]'s timestamps as the canonical axis since rebalance is
+            # driven by perp bars; spot ts intersection happens per-cell during basis fill.
+            canonical_inst = inst_ids[0]
+            ts_axis = tuple(t for t, _ in list(self._closes[canonical_inst])[-T:])
+
             close = np.column_stack([
-                np.asarray(list(self._closes[i])[-T:], dtype=float) for i in inst_ids
+                np.asarray([v for _, v in list(self._closes[i])[-T:]], dtype=float)
+                for i in inst_ids
             ])
             volume = np.column_stack([
-                np.asarray(list(self._volumes[i])[-T:], dtype=float) for i in inst_ids
+                np.asarray([v for _, v in list(self._volumes[i])[-T:]], dtype=float)
+                for i in inst_ids
             ])
-            ts = tuple(range(T))  # synthetic ts; factor functions don't use ts
+
+            # basis_apr: (perp_close - spot_close) / spot_close, aligned by ts.
+            # Each perp has its own (ts, spot_close) deque; we look up each canonical
+            # ts in that deque and fill NaN if no spot bar at that ts.
+            basis_arr = np.full((T, len(inst_ids)), np.nan, dtype=float)
+            any_basis = False
+            perp_close_by_ts = {
+                i: {t: v for t, v in list(self._closes[i])[-T:]}
+                for i in inst_ids
+            }
+            for col, perp_inst in enumerate(inst_ids):
+                spot_close_by_ts = {t: v for t, v in self._spot_closes[perp_inst]}
+                if not spot_close_by_ts:
+                    continue
+                for row, ts in enumerate(ts_axis):
+                    spot_v = spot_close_by_ts.get(ts)
+                    perp_v = perp_close_by_ts[perp_inst].get(ts)
+                    if spot_v is not None and spot_v > 0 and perp_v is not None:
+                        basis_arr[row, col] = (perp_v - spot_v) / spot_v
+                        any_basis = True
+
             return FactorPanel(
-                inst_ids=inst_ids, timestamps_ms=ts,
+                inst_ids=inst_ids, timestamps_ms=ts_axis,
                 close=close, volume_usdt=volume,
-                funding_rate=None, open_interest=None, basis_apr=None,
+                funding_rate=None, open_interest=None,
+                basis_apr=basis_arr if any_basis else None,
             )
 
         def _rebalance(self, ts_ms: int) -> None:
@@ -255,7 +344,7 @@ if _NT_AVAILABLE:
             closes = list(self._closes[inst_value])
             if not closes:
                 return
-            entry_px = closes[-1]
+            entry_px = closes[-1][1]  # _closes now stores (ts_ms, close); take value
             ct_val = float(inst.multiplier) if float(inst.multiplier) > 0 else 1.0
             lot = float(inst.size_increment) if float(inst.size_increment) > 0 else 1.0
             sl_distance = entry_px * 0.01  # conservative 1% SL fallback

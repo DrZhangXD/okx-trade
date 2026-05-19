@@ -247,8 +247,19 @@ async def cmd_backtest_portfolio(
     # Strip ".OKX" suffix to get bare OKX inst id for REST calls
     bare_ids = [s.split(".")[0] for s in inst_ids_with_venue]
 
-    print(f"[1/3] downloading {total_bars} × {bar} bars for {len(bare_ids)} instruments")
-    for inst_id in bare_ids:
+    # Derive spot pairs (e.g., BTC-USDT for BTC-USDT-SWAP) so the strategy can
+    # compute basis_apr at backtest time. Mirrors _derive_spot_inst_id but on
+    # bare ids (no .OKX suffix here).
+    spot_ids: list[str] = []
+    for bid in bare_ids:
+        if bid.endswith("-SWAP"):
+            spot_ids.append(bid[: -len("-SWAP")])
+
+    print(
+        f"[1/3] downloading {total_bars} × {bar} bars for "
+        f"{len(bare_ids)} perps + {len(spot_ids)} spot pairs"
+    )
+    for inst_id in bare_ids + spot_ids:
         try:
             _, bars = await prepare_backtest_catalog(
                 rest_client, inst_id, bar,  # type: ignore[arg-type]
@@ -257,6 +268,11 @@ async def cmd_backtest_portfolio(
             )
             print(f"        {inst_id}: {len(bars)} bars")
         except Exception as exc:  # noqa: BLE001
+            # Spot pair may not exist for some perps — log + continue (strategy
+            # will get None basis_apr for that inst, which it tolerates).
+            if inst_id in spot_ids:
+                print(f"        {inst_id}: SKIP ({exc})")
+                continue
             print(f"        {inst_id}: FAILED ({exc})")
             raise
 
@@ -265,7 +281,13 @@ async def cmd_backtest_portfolio(
     from nautilus_trader.config import ImportableStrategyConfig
     from nautilus_trader.model.data import Bar
 
-    bar_types = [make_bar_type(s, bar) for s in bare_ids]
+    # Build BacktestDataConfig for perp bars (drive rebalance) and spot bars
+    # (drive basis_apr). Both go into the same catalog.
+    all_inst_ids = inst_ids_with_venue + [
+        f"{sid}.{OKX_VENUE}" for sid in spot_ids
+    ]
+    all_bare_ids = bare_ids + spot_ids
+    bar_types = [make_bar_type(s, bar) for s in all_bare_ids]
     data_configs = [
         BacktestDataConfig(
             catalog_path=str(catalog_path.resolve()),
@@ -273,7 +295,7 @@ async def cmd_backtest_portfolio(
             instrument_id=instrument_id,
             bar_types=[str(bar_type)],
         )
-        for instrument_id, bar_type in zip(inst_ids_with_venue, bar_types)
+        for instrument_id, bar_type in zip(all_inst_ids, bar_types)
     ]
 
     venue = build_okx_venue_config(
@@ -298,6 +320,9 @@ async def cmd_backtest_portfolio(
             "factor_weights": [
                 tuple(pair) for pair in yaml_cfg.get("factor_weights", [])
             ],
+            "subscribe_spot_for_basis": bool(
+                yaml_cfg.get("subscribe_spot_for_basis", True)
+            ),
         },
     )
 
