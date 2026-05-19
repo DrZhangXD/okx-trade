@@ -46,10 +46,17 @@ strategies:
     enabled: true
     config: configs/strategies/ob_imbalance.yaml
   factor_portfolio:
-    # P1 strategy (factor research lab output). Default disabled —
-    # only enable after `python -m okx_trade.research approve ...` populates
-    # configs/factor_portfolio.yaml with ≥ 3 factors that passed grade.
-    enabled: false
+    # 2026-05-19 paper-trading enable. 5 approved factors (configs/factor_portfolio.yaml):
+    #   basis_z_30d (0.40), basis_apr (0.30), momentum_1d_reversal (0.20),
+    #   funding_z_30d (0.10), funding_current (0.05).
+    # Cold-start warmup timeline (all from-scratch on VPS restart):
+    #   t=+1h      basis_apr active (needs 1 perp+spot bar)
+    #   t=+5min    funding_current active (needs 1 REST poll)
+    #   t=+24h     momentum_1d_reversal active (needs 24 bars)
+    #   t=+30 days basis_z_30d / funding_z_30d fully active (rolling z-score window)
+    # → first 30 days the strategy runs at ~50% effective weight.
+    # See docs/superpowers/specs/2026-05-19-factor-research-lab-design.md
+    enabled: true
     config: configs/factor_portfolio.yaml
   # M6+ 新策略（默认 enabled: false，逐个 paper 验证后启用）：
   # - funding_cross_section：多空 funding 横截面，需 universe + β 历史 ≥ 30 天
