@@ -137,6 +137,26 @@ async def fetch_panel(
                          if start_ms <= p.ts <= end_ms]
             fields["open_interest"] = oi_series
 
+        if "basis_apr" in include:
+            spot_id = _spot_pair_for(inst)
+            if spot_id is not None:
+                spot_candles = await rest_client.market.get_candles_extended(
+                    spot_id, bar, total=n_bars,
+                )
+                spot_close_by_ts: dict[int, float] = {
+                    c.ts: float(c.close) for c in spot_candles
+                    if start_ms <= c.ts <= end_ms
+                }
+                # basis = (perp_close - spot_close) / spot_close, raw premium fraction.
+                # For perpetuals this isn't a true APR (no expiry) — it's the carry
+                # premium which factor strategies typically normalize via z-score anyway.
+                basis_series: list[tuple[int, float]] = []
+                for ts, perp_px in ts_close:
+                    spot_px = spot_close_by_ts.get(ts)
+                    if spot_px is not None and spot_px > 0:
+                        basis_series.append((ts, (perp_px - spot_px) / spot_px))
+                fields["basis_apr"] = basis_series
+
         return inst, fields
 
     results = await asyncio.gather(*(_fetch_one(i) for i in inst_ids))
@@ -148,6 +168,17 @@ async def fetch_panel(
         _save_cache(panel, cache_path)
 
     return panel
+
+
+def _spot_pair_for(perp_inst_id: str) -> str | None:
+    """Derive the SPOT instrument id from a SWAP id.
+
+    ``BTC-USDT-SWAP`` → ``BTC-USDT``; ``ETH-USDC-SWAP`` → ``ETH-USDC``.
+    Returns None for non-SWAP ids (no spot equivalent).
+    """
+    if not perp_inst_id.endswith("-SWAP"):
+        return None
+    return perp_inst_id[: -len("-SWAP")]
 
 
 def _bar_ms(bar: str) -> int:
