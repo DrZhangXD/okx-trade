@@ -31,10 +31,17 @@ strategies:
   # - ob_imbalance：订阅 books5 WS，秒级聚合，30s 滚动 imbalance；信号触发后
   #   target 30s–5min 持仓，单笔 risk_pct=0.3%。
   basis_arb:
-    enabled: true
+    # 2026-05-19 hotfix-disable: paper 账户 sCode=51000 posSide error，单笔
+    # 入场被 OKX 拒。需先排查 pos_side_mode 配置 / OKX paper posMode 是否一致。
+    enabled: false
     config: configs/strategies/basis_arb.yaml
   ob_imbalance:
-    enabled: true
+    # 2026-05-19 hotfix-disable: 过度交易（每秒 1 笔）+ trades.pnl_usdt 不扣
+    # 手续费 → 账面 +6413 USDT 但实际亏 ~8500 USDT (5/18 22:51 启动后)。
+    # 根因：8bp SL / 12bp TP 对 BTC tick 太紧，几秒内必触发；fee 5bp × 2 腿
+    # × 496 笔 = ~7200 USDT 被吃掉。下一轮：调宽 SL/TP 或 cooldown，PnL hook
+    # 加 fee 计算。
+    enabled: false
     config: configs/strategies/ob_imbalance.yaml
   # M6+ 新策略（默认 enabled: false，逐个 paper 验证后启用）：
   # - funding_cross_section：多空 funding 横截面，需 universe + β 历史 ≥ 30 天
