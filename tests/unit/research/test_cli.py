@@ -53,7 +53,9 @@ def test_approve_writes_yaml_and_sqlite(tmp_path) -> None:
     approved = store.list_approved()
     assert len(approved) == 1 and approved[0]["id"] == "momentum_7d"
     cfg = yaml.safe_load(yml.read_text())
-    assert any(f["id"] == "momentum_7d" and f["weight"] == 0.25 for f in cfg["factors"])
+    assert any(
+        pair[0] == "momentum_7d" and pair[1] == 0.25 for pair in cfg["factor_weights"]
+    )
 
 
 def test_reject_removes_factor_from_yaml(tmp_path) -> None:
@@ -64,4 +66,4 @@ def test_reject_removes_factor_from_yaml(tmp_path) -> None:
               "--db", str(db), "--yaml", str(yml)])
     assert rc == 0
     cfg = yaml.safe_load(yml.read_text())
-    assert all(f["id"] != "momentum_7d" for f in cfg.get("factors", []))
+    assert all(pair[0] != "momentum_7d" for pair in cfg.get("factor_weights", []))

@@ -1,17 +1,31 @@
 # Factor Portfolio Strategy config (managed by `okx_trade.research.cli`)
-# `factors` is populated by `python -m okx_trade.research approve --factor ... --weight ...`
-# (DO NOT hand-edit — use the CLI to keep sqlite + yaml in sync.)
+# `factor_weights` is populated by `python -m okx_trade.research approve --factor ... --weight ...`
+# (DO NOT hand-edit `factor_weights` — use the CLI to keep sqlite + yaml in sync.)
+#
+# instrument_ids is a placeholder universe (mirrors xs_momentum.yaml style).
+# Production deployments may want to replace with a universe-resolver in scripts/live.py.
 
-bar: "1H"
+instrument_ids:
+  - BTC-USDT-SWAP.OKX
+  - ETH-USDT-SWAP.OKX
+  - SOL-USDT-SWAP.OKX
+  - XRP-USDT-SWAP.OKX
+  - DOGE-USDT-SWAP.OKX
+  - AVAX-USDT-SWAP.OKX
+  - LTC-USDT-SWAP.OKX
+  - LINK-USDT-SWAP.OKX
+  - DOT-USDT-SWAP.OKX
+  - BNB-USDT-SWAP.OKX
+
+bar_type_template: "{inst}-1-HOUR-LAST-EXTERNAL"
 rebalance_hours: 4
 top_k_long: 5
 top_k_short: 5
-risk_pct_per_leg: 0.002
+risk_pct: 0.002
 account_equity_usdt: 10000.0
 
-universe:
-  size: 30
-  settle_ccy: USDT
-  sort_by: vol24h
-
-factors: []   # populated by CLI
+# Populated by CLI as a list of [id, weight] pairs:
+#   factor_weights:
+#     - [momentum_7d, 0.30]
+#     - [funding_z_30d, 0.25]
+factor_weights: []

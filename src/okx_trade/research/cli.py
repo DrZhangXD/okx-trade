@@ -145,10 +145,10 @@ def _cmd_approve(store: FactorStore, yaml_path: Path, factor: str, weight: float
         return 1
 
     cfg = _load_yaml(yaml_path)
-    factors_list = [f for f in cfg.get("factors", []) if f["id"] != factor]
-    factors_list.append({"id": factor, "weight": weight})
-    factors_list.sort(key=lambda f: f["id"])
-    cfg["factors"] = factors_list
+    weights_list = [pair for pair in cfg.get("factor_weights", []) if pair[0] != factor]
+    weights_list.append([factor, weight])
+    weights_list.sort(key=lambda pair: pair[0])
+    cfg["factor_weights"] = weights_list
     _write_yaml(yaml_path, cfg)
     # sqlite update happens AFTER yaml write to avoid divergence (spec §15.4)
     store.approve(factor, weight=weight, ts_ms=int(time.time() * 1000))
@@ -158,7 +158,9 @@ def _cmd_approve(store: FactorStore, yaml_path: Path, factor: str, weight: float
 
 def _cmd_reject(store: FactorStore, yaml_path: Path, factor: str) -> int:
     cfg = _load_yaml(yaml_path)
-    cfg["factors"] = [f for f in cfg.get("factors", []) if f["id"] != factor]
+    cfg["factor_weights"] = [
+        pair for pair in cfg.get("factor_weights", []) if pair[0] != factor
+    ]
     _write_yaml(yaml_path, cfg)
     store.reject(factor)
     print(f"rejected {factor}")
@@ -195,8 +197,8 @@ def _cmd_report(store: FactorStore, report_dir: Path, factor: str) -> int:
 
 def _load_yaml(path: Path) -> dict:
     if not path.exists():
-        return {"factors": []}
-    return yaml.safe_load(path.read_text()) or {"factors": []}
+        return {"factor_weights": []}
+    return yaml.safe_load(path.read_text()) or {"factor_weights": []}
 
 
 def _write_yaml(path: Path, cfg: dict) -> None:

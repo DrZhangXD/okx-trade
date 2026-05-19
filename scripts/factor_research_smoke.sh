@@ -27,7 +27,7 @@ echo "[4/4] reject momentum_7d"
 python -m okx_trade.research reject --factor momentum_7d --db "$DB" --yaml "$YML"
 # After reject the yaml should still parse and not contain momentum_7d
 python -c "import yaml; cfg = yaml.safe_load(open('$YML')); \
-    assert all(f['id'] != 'momentum_7d' for f in cfg.get('factors', []))"
+    assert all(pair[0] != 'momentum_7d' for pair in cfg.get('factor_weights', []))"
 
 rm -rf "$TMPDIR"
 echo "factor_research_smoke OK"
