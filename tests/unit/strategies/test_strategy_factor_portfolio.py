@@ -85,3 +85,38 @@ def test_select_top_bot_skips_nan_scores() -> None:
     score = np.array([0.5, np.nan, 0.8, -0.3, 1.5])
     longs, shorts = select_top_bot(score, top_k_long=3, top_k_short=3)
     assert 1 not in longs and 1 not in shorts
+
+
+nt = pytest.importorskip("nautilus_trader")
+
+
+def test_factor_portfolio_config_loads_from_yaml() -> None:
+    """Verify the dataclass-mode StrategyConfig accepts our yaml shape."""
+    from okx_trade.strategies.factor_portfolio import FactorPortfolioConfig
+    cfg = FactorPortfolioConfig(
+        instrument_ids=["BTC-USDT-SWAP.OKX", "ETH-USDT-SWAP.OKX"],
+        bar_type_template="{inst}-1-HOUR-LAST-EXTERNAL",
+        rebalance_hours=4,
+        top_k_long=2, top_k_short=2,
+        risk_pct=0.002,
+        account_equity_usdt=10_000.0,
+        factor_weights=[("momentum_7d", 0.5), ("funding_z_30d", 0.5)],
+    )
+    assert cfg.rebalance_hours == 4
+    assert len(cfg.factor_weights) == 2
+
+
+def test_factor_portfolio_strategy_initializes_without_error() -> None:
+    from okx_trade.strategies.factor_portfolio import (
+        FactorPortfolioConfig, FactorPortfolioStrategy,
+    )
+    cfg = FactorPortfolioConfig(
+        instrument_ids=["BTC-USDT-SWAP.OKX"],
+        bar_type_template="{inst}-1-HOUR-LAST-EXTERNAL",
+        rebalance_hours=4,
+        top_k_long=1, top_k_short=1,
+        risk_pct=0.002, account_equity_usdt=10_000.0,
+        factor_weights=[("momentum_7d", 1.0)],
+    )
+    strategy = FactorPortfolioStrategy(cfg)
+    assert strategy.config.rebalance_hours == 4
