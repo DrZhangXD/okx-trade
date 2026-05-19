@@ -20,7 +20,7 @@ class GradeThresholds:
     ir: float = 0.3
     ic_positive_rate: float = 0.55
     net_after_fees: float = 0.0  # gross > 0 after fee deduction
-    autocorr_1: float = 0.0
+    autocorr_1: float = 0.3
 
 
 @dataclass(frozen=True, slots=True)

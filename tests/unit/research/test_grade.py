@@ -47,7 +47,10 @@ def test_perfect_predictor_yields_ic_near_one() -> None:
     def f(p): return p.volume_usdt.copy()
 
     panel = _make_panel(T=200, N=10, perfect_predictor=True)
-    g = grade_factor("oracle", panel, horizon_bars=1)
+    g = grade_factor(
+        "oracle", panel, horizon_bars=1,
+        thresholds=GradeThresholds(autocorr_1=0.0),  # iid signal has near-zero autocorr
+    )
     assert g.ic_mean > 0.9
     assert g.verdict == "pass"
 
