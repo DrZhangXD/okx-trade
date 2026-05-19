@@ -113,6 +113,8 @@ DEFAULT_OKX_LIMITS: dict[str, tuple[int, float]] = {
     "market.books": (40, 2.0),
     "market.trades": (100, 2.0),
     "public.instruments": (20, 2.0),
+    "public.open_interest": (20, 2.0),
+    "public.open_interest_history": (5, 2.0),   # rubik: 5 req/2s
     # 账户（需鉴权，UID 维度）
     "account.balance": (10, 2.0),
     "account.positions": (10, 2.0),

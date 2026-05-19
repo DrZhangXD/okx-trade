@@ -90,3 +90,19 @@ async def test_get_open_interest_history_extended_pages_until_total() -> None:
     rows = await pub.get_open_interest_history_extended("BTC-USDT", period="1H", total=3)
     assert len(rows) == 3
     assert rows[0].ts < rows[1].ts < rows[2].ts  # ascending
+    # Verify cursor (min ts of page1) was propagated to page2 as `end` param
+    _, _, params2 = fake.calls[1]
+    assert params2["end"] == "1700000000000"
+
+
+@pytest.mark.asyncio
+async def test_get_open_interest_history_extended_breaks_on_empty_page() -> None:
+    """If a page returns no rows, the loop terminates early even if total not reached."""
+    page1 = [["1700000000000", "1", "1"]]
+    page2: list = []  # empty → break
+    fake = _FakeTransport(responses=[page1, page2])
+    from okx_trade.rest.public import PublicEndpoints
+    pub = PublicEndpoints(fake)  # type: ignore[arg-type]
+    rows = await pub.get_open_interest_history_extended("BTC-USDT", period="1H", total=999)
+    assert len(rows) == 1
+    assert len(fake.calls) == 2  # tried 2 pages then broke
