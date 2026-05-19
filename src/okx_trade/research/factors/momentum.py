@@ -83,4 +83,27 @@ def momentum_risk_adj_7d(panel: FactorPanel) -> np.ndarray:
     return out
 
 
-__all__ = ["momentum_1d", "momentum_3d", "momentum_7d", "momentum_risk_adj_7d"]
+@register_factor(
+    id="momentum_1d_reversal", category="momentum",
+    description="24h momentum but direction=long_low → short high-momentum / long low-momentum (mean reversion)",
+    direction="long_low", required_data=("close",),
+    min_history_bars=24, rebalance_minutes=240,
+)
+def momentum_1d_reversal(panel: FactorPanel) -> np.ndarray:
+    return _trailing_return(panel.close, 24)
+
+
+@register_factor(
+    id="momentum_7d_reversal", category="momentum",
+    description="7d momentum reversal (long_low) — exploit short-term overextension",
+    direction="long_low", required_data=("close",),
+    min_history_bars=168, rebalance_minutes=240,
+)
+def momentum_7d_reversal(panel: FactorPanel) -> np.ndarray:
+    return _trailing_return(panel.close, 168)
+
+
+__all__ = [
+    "momentum_1d", "momentum_3d", "momentum_7d", "momentum_risk_adj_7d",
+    "momentum_1d_reversal", "momentum_7d_reversal",
+]

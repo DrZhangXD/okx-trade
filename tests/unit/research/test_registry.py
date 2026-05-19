@@ -99,6 +99,7 @@ def test_all_builtin_factors_register_on_package_import(
     ids = {s.id for s in list_factors()}
     expected = {
         "momentum_1d", "momentum_3d", "momentum_7d", "momentum_risk_adj_7d",
+        "momentum_1d_reversal", "momentum_7d_reversal",
         "funding_current", "funding_z_30d", "oi_change_1d", "oi_to_volume_ratio",
         "basis_apr", "basis_z_30d",
         "rv_pct_365d", "rv_skew_up_down", "vol_of_vol_30d",

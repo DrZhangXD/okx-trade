@@ -206,9 +206,17 @@ class PublicEndpoints:
         cursor: int | None = None
         while len(all_pts) < total:
             page_size = min(100, total - len(all_pts))
-            batch = await self.get_open_interest_history(
-                inst_id, period=period, limit=page_size, after=cursor,
-            )
+            try:
+                batch = await self.get_open_interest_history(
+                    inst_id, period=period, limit=page_size, after=cursor,
+                )
+            except OKXAPIError as exc:
+                # Rubik OI history only covers a recent window (~30-90 days). Going
+                # further back returns code=50030 "Illegal time range" — graceful
+                # break with whatever we've already gathered.
+                if exc.code == "50030":
+                    break
+                raise
             new_rows = [p for p in batch if p.ts not in seen]
             if not new_rows:
                 break
