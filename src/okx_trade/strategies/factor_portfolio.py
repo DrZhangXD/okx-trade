@@ -6,7 +6,7 @@ The NT Strategy class is implemented in a follow-up section that imports NT lazi
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
@@ -111,6 +111,34 @@ except ImportError:  # pragma: no cover
     Strategy = object        # type: ignore[assignment,misc]
 
 
+def _ffill_to_axis(
+    by_inst,  # dict[str, deque[tuple[int, float]]]
+    ts_axis,  # tuple[int, ...]
+    inst_ids,  # tuple[str, ...]
+):
+    """Forward-fill per-inst (ts, val) deques onto a shared ts axis.
+
+    Returns shape ``(T, N)`` np.ndarray with NaN where no value was observed
+    at-or-before the corresponding ts for that inst. Used to align REST-polled
+    funding / OI data (irregular cadence) onto the regular bar timestamp axis.
+    """
+    T, N = len(ts_axis), len(inst_ids)
+    arr = np.full((T, N), np.nan, dtype=float)
+    for col, inst in enumerate(inst_ids):
+        sparse = sorted(by_inst.get(inst, []))
+        if not sparse:
+            continue
+        j = 0
+        last_val: float | None = None
+        for row, ts in enumerate(ts_axis):
+            while j < len(sparse) and sparse[j][0] <= ts:
+                last_val = sparse[j][1]
+                j += 1
+            if last_val is not None:
+                arr[row, col] = last_val
+    return arr
+
+
 def _derive_spot_inst_id(perp_inst_id: str) -> str | None:
     """Derive the SPOT inst id from a SWAP one, preserving any venue suffix.
 
@@ -149,6 +177,15 @@ if _NT_AVAILABLE:
         ``basis_apr`` panel field can be populated from (perp_close - spot_close).
         Required by ``basis_apr`` / ``basis_z_30d`` factors. Disable to fall back
         to close-only factors (e.g. momentum_*_reversal).
+
+        ``enable_rest_polling`` (default True in live) spawns an asyncio background
+        task that polls ``GET /api/v5/public/funding-rate`` and
+        ``/api/v5/public/open-interest`` for each perp every
+        ``rest_poll_interval_sec`` (default 300). The values are buffered and
+        forward-filled into the ``funding_rate`` and ``open_interest`` panel
+        columns at rebalance time. Required by ``funding_*`` / ``oi_*`` factors.
+        Backtest CLI sets this False because the BacktestEngine's simulated clock
+        doesn't match real OKX time.
         """
         instrument_ids: list[str]
         bar_type_template: str
@@ -159,6 +196,8 @@ if _NT_AVAILABLE:
         account_equity_usdt: float = 10_000.0
         factor_weights: list[tuple[str, float]] = []
         subscribe_spot_for_basis: bool = True
+        enable_rest_polling: bool = True
+        rest_poll_interval_sec: int = 300
         risk_config: RiskConfig | None = None
 
 
@@ -201,6 +240,15 @@ if _NT_AVAILABLE:
                         self._spot_to_perp[spot_value] = perp_value
                         spot_bar_str = config.bar_type_template.format(inst=spot_value)
                         self._spot_bar_types[spot_value] = BarType.from_str(spot_bar_str)
+            # Funding / OI buffers — populated by a background REST polling task
+            # in live mode (enable_rest_polling=True). Stay empty in backtest.
+            self._funding_rates: dict[str, deque[tuple[int, float]]] = {
+                iid.value: deque(maxlen=_buf_len) for iid in self._inst_ids
+            }
+            self._open_interests: dict[str, deque[tuple[int, float]]] = {
+                iid.value: deque(maxlen=_buf_len) for iid in self._inst_ids
+            }
+            self._rest_poll_task: Any = None
             self._last_rebalance_ms: int = 0
             self._positions: dict[str, tuple[str, float, int]] = {}
             self._allocated_equity_usdt: float | None = None
@@ -223,16 +271,74 @@ if _NT_AVAILABLE:
                     self.log.warning(
                         f"factor_portfolio: spot subscribe failed for {spot_bar_type}: {exc}"
                     )
+            # Spawn REST polling task for funding + OI. Asyncio task lives on the
+            # NT engine loop; cancelled in on_stop. Backtest sets enable_rest_polling
+            # False because simulated clock != real OKX time.
+            if self.config.enable_rest_polling:
+                import asyncio
+                try:
+                    loop = asyncio.get_event_loop()
+                    self._rest_poll_task = loop.create_task(self._poll_rest_loop())
+                except RuntimeError as exc:
+                    self.log.warning(
+                        f"factor_portfolio: cannot spawn rest_poll_task "
+                        f"(no event loop): {exc}"
+                    )
             self.log.info(
                 f"factor_portfolio start: factors={[w.id for w in self._weights]} "
                 f"top_k={self.config.top_k_long}/{self.config.top_k_short} "
-                f"spot_pairs={len(self._spot_to_perp)}"
+                f"spot_pairs={len(self._spot_to_perp)} "
+                f"rest_poll={'on' if self._rest_poll_task else 'off'}"
             )
             if not self._weights:
                 self.log.warning("factor_portfolio: no factor_weights configured; idle")
 
         def on_stop(self) -> None:
+            if self._rest_poll_task is not None and not self._rest_poll_task.done():
+                self._rest_poll_task.cancel()
+                self._rest_poll_task = None
             self.log.info(f"factor_portfolio stop; open_legs={len(self._positions)}")
+
+        async def _poll_rest_loop(self) -> None:
+            """Background task: poll funding + OI for each perp every N seconds.
+
+            Per-inst errors are caught + logged so one bad inst doesn't kill the loop.
+            Outer ``CancelledError`` propagates so on_stop can clean up.
+            """
+            import asyncio
+
+            from .. import OKXRestClient, OKXSettings
+
+            interval = max(60, int(self.config.rest_poll_interval_sec))
+            try:
+                async with OKXRestClient(OKXSettings()) as client:
+                    while True:
+                        for iid in self._inst_ids:
+                            bare = iid.value.split(".")[0]  # strip ".OKX" venue suffix
+                            try:
+                                fr = await client.public.get_funding_rate(bare)
+                                self._funding_rates[iid.value].append(
+                                    (int(fr.funding_time), float(fr.funding_rate)),
+                                )
+                            except Exception as exc:  # noqa: BLE001
+                                self.log.warning(
+                                    f"factor_portfolio: funding poll {bare}: {exc}"
+                                )
+                            try:
+                                oi = await client.public.get_open_interest(bare)
+                                self._open_interests[iid.value].append(
+                                    (int(oi.ts), float(oi.oi_ccy)),
+                                )
+                            except Exception as exc:  # noqa: BLE001
+                                self.log.warning(
+                                    f"factor_portfolio: oi poll {bare}: {exc}"
+                                )
+                        await asyncio.sleep(interval)
+            except asyncio.CancelledError:
+                self.log.info("factor_portfolio: rest_poll_task cancelled")
+                raise
+            except Exception as exc:  # noqa: BLE001
+                self.log.error(f"factor_portfolio: rest_poll_task crashed: {exc}")
 
         def on_bar(self, bar: "Bar") -> None:
             inst_value = bar.bar_type.instrument_id.value
@@ -296,10 +402,17 @@ if _NT_AVAILABLE:
                         basis_arr[row, col] = (perp_v - spot_v) / spot_v
                         any_basis = True
 
+            # funding_rate / open_interest: forward-fill from polled (ts, val) deques
+            # to the canonical perp ts axis. Empty buffers → array stays NaN → factor
+            # returns NaN → synthesize_score skips it (no false trades from stale data).
+            funding_arr = _ffill_to_axis(self._funding_rates, ts_axis, inst_ids)
+            oi_arr = _ffill_to_axis(self._open_interests, ts_axis, inst_ids)
+
             return FactorPanel(
                 inst_ids=inst_ids, timestamps_ms=ts_axis,
                 close=close, volume_usdt=volume,
-                funding_rate=None, open_interest=None,
+                funding_rate=funding_arr if np.any(np.isfinite(funding_arr)) else None,
+                open_interest=oi_arr if np.any(np.isfinite(oi_arr)) else None,
                 basis_apr=basis_arr if any_basis else None,
             )
 

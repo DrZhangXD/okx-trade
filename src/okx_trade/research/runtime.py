@@ -323,6 +323,11 @@ async def cmd_backtest_portfolio(
             "subscribe_spot_for_basis": bool(
                 yaml_cfg.get("subscribe_spot_for_basis", True)
             ),
+            # Backtest's simulated clock doesn't match real OKX time, so REST
+            # polling for funding/OI would buffer "now" values that don't align
+            # with the simulated bar timestamps. Force off; factors that need
+            # funding/OI will return NaN in backtest and be skipped.
+            "enable_rest_polling": False,
         },
     )
 

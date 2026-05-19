@@ -169,3 +169,73 @@ def test_factor_portfolio_strategy_disable_spot_subscription() -> None:
     s = FactorPortfolioStrategy(cfg)
     assert s._spot_to_perp == {}
     assert s._spot_bar_types == {}
+
+
+def test_ffill_to_axis_basic() -> None:
+    """_ffill_to_axis aligns sparse (ts, val) deques onto a regular ts axis."""
+    from collections import deque
+
+    from okx_trade.strategies.factor_portfolio import _ffill_to_axis
+
+    by_inst = {
+        "A": deque([(100, 1.0), (300, 2.0)]),
+        "B": deque(),  # empty → all-NaN column
+    }
+    ts_axis = (100, 200, 300, 400)
+    inst_ids = ("A", "B")
+    out = _ffill_to_axis(by_inst, ts_axis, inst_ids)
+    assert out.shape == (4, 2)
+    # A: 1.0 at ts=100, ffill to ts=200, then 2.0 at ts=300, ffill to ts=400
+    assert out[0, 0] == 1.0
+    assert out[1, 0] == 1.0  # ffilled
+    assert out[2, 0] == 2.0
+    assert out[3, 0] == 2.0  # ffilled
+    # B: empty → all NaN
+    import numpy as np
+    assert np.all(np.isnan(out[:, 1]))
+
+
+def test_ffill_to_axis_before_first_obs_is_nan() -> None:
+    from collections import deque
+    import numpy as np
+
+    from okx_trade.strategies.factor_portfolio import _ffill_to_axis
+    by_inst = {"A": deque([(500, 9.0)])}
+    out = _ffill_to_axis(by_inst, (100, 300, 500, 700), ("A",))
+    assert np.isnan(out[0, 0])
+    assert np.isnan(out[1, 0])
+    assert out[2, 0] == 9.0
+    assert out[3, 0] == 9.0  # ffilled
+
+
+def test_factor_portfolio_polling_disabled_by_default_in_backtest_config() -> None:
+    """Constructing a strategy with enable_rest_polling=False must not spawn task."""
+    from okx_trade.strategies.factor_portfolio import (
+        FactorPortfolioConfig, FactorPortfolioStrategy,
+    )
+    cfg = FactorPortfolioConfig(
+        instrument_ids=["BTC-USDT-SWAP.OKX"],
+        bar_type_template="{inst}-1-HOUR-LAST-EXTERNAL",
+        rebalance_hours=4, top_k_long=1, top_k_short=1,
+        risk_pct=0.002, account_equity_usdt=10_000.0,
+        factor_weights=[("momentum_1d_reversal", 1.0)],
+        subscribe_spot_for_basis=False,
+        enable_rest_polling=False,
+    )
+    s = FactorPortfolioStrategy(cfg)
+    # Polling task is created by on_start, not __init__; verify init state.
+    assert s._rest_poll_task is None
+    assert s._funding_rates == {"BTC-USDT-SWAP.OKX": s._funding_rates["BTC-USDT-SWAP.OKX"]}
+    assert len(s._funding_rates["BTC-USDT-SWAP.OKX"]) == 0
+    assert len(s._open_interests["BTC-USDT-SWAP.OKX"]) == 0
+
+
+def test_factor_portfolio_polling_config_has_safe_defaults() -> None:
+    """Defaults: enable_rest_polling=True, rest_poll_interval_sec=300."""
+    from okx_trade.strategies.factor_portfolio import FactorPortfolioConfig
+    cfg = FactorPortfolioConfig(
+        instrument_ids=["BTC-USDT-SWAP.OKX"],
+        bar_type_template="{inst}-1-HOUR-LAST-EXTERNAL",
+    )
+    assert cfg.enable_rest_polling is True
+    assert cfg.rest_poll_interval_sec == 300
