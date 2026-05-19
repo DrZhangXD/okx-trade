@@ -65,7 +65,7 @@ from nautilus_trader.model.objects import (
 )
 
 from ..config import OKXSettings
-from ..enums import InstType, PosSide, Side, TdMode
+from ..enums import InstType, OrdType, PosSide, Side, TdMode
 from ..models.account import Balance
 from ..models.trade import OrderRequest
 from ..rest.client import OKXRestClient
