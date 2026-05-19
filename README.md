@@ -100,6 +100,10 @@ M6+ 策略默认 `enabled: false`，需逐个 paper 验证后开启。详见 [do
 
 已下线：`RangeBreakoutStrategy`（M5.X，alpha 弱 + 实现不稳）。
 
+**新增 (2026-05-19)**: **因子研究 lab** — `okx_trade.research` 模块 + `FactorPortfolioStrategy`。
+CLI 评估任意因子的 IC/IR/decay/turnover，通过 grade 的因子直接喂 yaml 上线。
+详见 [strategy_roadmap.md](docs/strategy_roadmap.md#factor-research-lab-p1-2026-05-19)。
+
 ## 风控管道
 
 `src/okx_trade/risk/` 提供 4 个独立 check，由 `RiskManager` 串联，下单前调一次：
