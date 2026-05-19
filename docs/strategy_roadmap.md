@@ -73,11 +73,28 @@
 启用步骤：
 
 1. `python -m okx_trade.research fetch --start 2025-11-01 --end 2026-05-15 --universe top30`
-2. `python -m okx_trade.research grade-all --horizon 1d`
+2. `python -m okx_trade.research grade-all --start 2025-11-01 --end 2026-05-15 --universe top30 --horizon 1d`
 3. 看 `var/factor_research/reports/*.md` 选 3-5 个 verdict=pass 的因子
 4. `python -m okx_trade.research approve --factor <id> --weight <0.1-0.4>` 逐个加
-5. 改 `configs/live.yaml`: `factor_portfolio.enabled: true`
-6. paper 跑 7 天看与 xs_momentum 相关系数（< 0.7 OK，否则砍权重）
+5. `python -m okx_trade.research backtest-portfolio --total-bars 2000` 离线回测合成组合
+6. 改 `configs/live.yaml`: `factor_portfolio.enabled: true`，三端同步
+7. paper 跑 7 天看与 xs_momentum 相关系数（< 0.7 OK，否则砍权重）
+
+### CLI subcommand cheat sheet
+
+| Cmd | Online? | Args | Notes |
+|---|---|---|---|
+| `list` | offline | — | 列所有注册的因子 + 最新 grade |
+| `fetch` | **online** | `--start --end --universe --bar` | 拉数据落 parquet 缓存 |
+| `eval` | **online** | `--factor --start --end --universe --bar --horizon` | 单因子 IC/IR/decay |
+| `grade-all` | **online** | `--start --end --universe --bar --horizon` | 跑所有 15 因子 |
+| `approve` | offline | `--factor --weight [--force]` | 写 yaml + sqlite |
+| `reject` | offline | `--factor` | 从 yaml 移除 |
+| `report` | offline | `--factor` | 回放最新 grade 为 markdown |
+| `backtest-portfolio` | **online** | `--bar --total-bars --catalog` | NT 回测整个合成组合 |
+
+"online" = 构造 `OKXRestClient(OKXSettings())`，需要 `.env` 里 OKX 凭证（即使是 demo）。
+所有 online 子命令首次跑会缓存到 `var/factor_research/panel/*.parquet`，再次跑同参数零网络。
 
 ---
 
