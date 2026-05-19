@@ -10,6 +10,21 @@ from okx_trade.research.cli import build_parser, run
 from okx_trade.research.store import FactorStore
 
 
+@pytest.fixture(autouse=True)
+def _ensure_factors_registered():
+    """Reload factor submodules so @register_factor side effects fire even after
+    test_registry.py's clear_registry() teardown wiped the global registry."""
+    import importlib
+
+    from okx_trade.research.registry import clear_registry
+
+    clear_registry()
+    for sub in ("momentum", "funding_oi", "basis", "volatility", "flow"):
+        mod = importlib.import_module(f"okx_trade.research.factors.{sub}")
+        importlib.reload(mod)
+    yield
+
+
 def test_parser_recognizes_all_subcommands() -> None:
     p = build_parser()
     for cmd in ("list", "fetch", "eval", "grade-all", "approve", "reject",
