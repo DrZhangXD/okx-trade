@@ -4,6 +4,7 @@ from __future__ import annotations
 from ..enums import InstType
 from ..exceptions import OKXAPIError
 from ..models.common import FundingRate, Instrument, OptionSummary
+from ..models.market import OpenInterest, OpenInterestPoint
 from .transport import Transport
 
 
@@ -133,6 +134,89 @@ class PublicEndpoints:
             params=params, group="public.opt_summary",
         )
         return [OptionSummary.model_validate(d) for d in data]
+
+    async def get_open_interest(
+        self,
+        inst_id: str,
+        inst_type: str = "SWAP",
+    ) -> OpenInterest:
+        """``GET /api/v5/public/open-interest`` —— 即时持仓量。
+
+        ``inst_type`` 默认 ``SWAP``（永续）；交割合约传 ``FUTURES``。
+        """
+        params = {"instType": inst_type, "instId": inst_id}
+        data = await self._t.request(
+            "GET", "/api/v5/public/open-interest",
+            params=params, group="public.open_interest",
+        )
+        if not data:
+            raise OKXAPIError(
+                code="not_found",
+                message=f"no open interest for {inst_id}",
+                endpoint="/api/v5/public/open-interest",
+            )
+        return OpenInterest.model_validate(data[0])
+
+    async def get_open_interest_history(
+        self,
+        inst_id: str,
+        *,
+        period: str = "1H",
+        limit: int = 100,
+        before: int | None = None,
+        after: int | None = None,
+    ) -> list[OpenInterestPoint]:
+        """``GET /api/v5/rubik/stat/contracts/open-interest-volume`` —— 历史 OI + volume。
+
+        参数说明：
+        - ``inst_id``: rubik 端点用 ``ccy``（base 币种），这里接受 ``BTC-USDT`` 形式，
+          内部取首段当 ccy；也接受裸 ``BTC``。
+        - ``period``: ``5m / 1H / 1D``（rubik 限定枚举）。
+        - 翻页：``after``=毫秒时间戳，向更早翻页。
+
+        返回按 ``ts`` 升序。
+        """
+        ccy = inst_id.split("-", 1)[0] if "-" in inst_id else inst_id
+        params: dict[str, str] = {"ccy": ccy, "period": period, "limit": str(limit)}
+        if before is not None:
+            params["begin"] = str(before)
+        if after is not None:
+            params["end"] = str(after)
+        data = await self._t.request(
+            "GET", "/api/v5/rubik/stat/contracts/open-interest-volume",
+            params=params, group="public.open_interest_history",
+        )
+        points = [OpenInterestPoint.from_array(row) for row in data]
+        points.sort(key=lambda p: p.ts)
+        return points
+
+    async def get_open_interest_history_extended(
+        self,
+        inst_id: str,
+        *,
+        period: str = "1H",
+        total: int = 720,
+    ) -> list[OpenInterestPoint]:
+        """分页拉历史 OI（每页 100 条），按时间升序返回。
+
+        与 ``get_funding_rate_history_extended`` 同样的去重 + 游标逻辑。
+        """
+        all_pts: list[OpenInterestPoint] = []
+        seen: set[int] = set()
+        cursor: int | None = None
+        while len(all_pts) < total:
+            page_size = min(100, total - len(all_pts))
+            batch = await self.get_open_interest_history(
+                inst_id, period=period, limit=page_size, after=cursor,
+            )
+            new_rows = [p for p in batch if p.ts not in seen]
+            if not new_rows:
+                break
+            all_pts.extend(new_rows)
+            seen.update(p.ts for p in new_rows)
+            cursor = min(p.ts for p in new_rows)
+        all_pts.sort(key=lambda p: p.ts)
+        return all_pts
 
 
 __all__ = ["PublicEndpoints"]
