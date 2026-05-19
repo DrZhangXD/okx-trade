@@ -81,3 +81,27 @@ def test_list_factors_returns_sorted_by_id() -> None:
         def f(p): return p.close
     ids = [s.id for s in list_factors()]
     assert ids == ["alpha", "mu", "zeta"]
+
+
+def test_all_builtin_factors_register_on_package_import(
+    _isolate_registry: None,  # Use autouse fixture to clear first
+) -> None:
+    import sys
+    # Test that importing okx_trade.research triggers all 15 factor registrations.
+    # The autouse fixture has already cleared the registry.
+    # Delete factor modules to force re-import (but preserve registry module itself).
+    for mod in list(sys.modules.keys()):
+        if ("okx_trade.research" in mod and
+            mod != "okx_trade.research.registry"):
+            del sys.modules[mod]
+    # Fresh import will trigger all factor registrations via __init__.py chain
+    import okx_trade.research  # noqa: F401
+    ids = {s.id for s in list_factors()}
+    expected = {
+        "momentum_1d", "momentum_3d", "momentum_7d", "momentum_risk_adj_7d",
+        "funding_current", "funding_z_30d", "oi_change_1d", "oi_to_volume_ratio",
+        "basis_apr", "basis_z_30d",
+        "rv_pct_365d", "rv_skew_up_down", "vol_of_vol_30d",
+        "spread_avg_1d", "taker_buy_ratio_1d",
+    }
+    assert ids == expected
