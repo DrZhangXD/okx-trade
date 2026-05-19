@@ -59,7 +59,9 @@ strategies:
     enabled: true
     config: configs/strategies/funding_skew_momentum.yaml
   stat_arb_pairs:
-    enabled: false
+    # 2026-05-19 启用：statsmodels 0.14.6 已装，走精确 ADF 路径
+    # （cointegration p<0.05 才入场，spread z=±2σ 进/-0.5σ 出/±3.5σ 止损）
+    enabled: true
     config: configs/strategies/stat_arb_pairs.yaml
   option_vol_selling:
     enabled: false
