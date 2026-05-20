@@ -91,17 +91,21 @@ def map_strategy_id(idx: int | None, registered: list[str]) -> str | None:
 
 
 def get_registered_strategies(live_yaml_path: Path) -> list[str]:
-    """从 live.yaml 拉 enabled strategy 顺序作为 NT 注册顺序的近似。
+    """从 live.yaml 拉 strategy 顺序作为 NT 注册顺序的近似。
 
-    精确做法是 import runtime.live_node._resolve_strategy_specs，但为了脚本可独立
-    跑（不依赖 strategy 模块），这里直接读 yaml。
+    返回 **yaml 出现顺序的全部 strategy（含 disabled）**，不仅 enabled，因为
+    historical OKX bills 的 clOrdId stratidx 是基于当时 yaml 顺序，若按"当前
+    enabled 列表"算会因为 disable/enable 移位导致历史归因错乱。
+
+    例：basis_arb 5/20 disable 后，若只取 enabled，索引 3 从 basis_arb 移到
+    ob_imbalance，5/19 的 basis_arb fills 会被错误归到 ob_imbalance。
     """
     try:
         import yaml
         with live_yaml_path.open() as f:
             cfg = yaml.safe_load(f)
         strategies = cfg.get("strategies", {}) or {}
-        return [name for name, spec in strategies.items() if (spec or {}).get("enabled", False)]
+        return list(strategies.keys())  # yaml 出现顺序，含 disabled
     except Exception:
         return []
 
@@ -136,8 +140,17 @@ async def fetch_bills(begin_ms: int, end_ms: int) -> list[dict]:
 
 def upsert_bills(
     db_path: Path, bills: list[dict], registered: list[str],
-) -> tuple[int, int]:
-    """Insert OR IGNORE bills into trades_okx. Returns (inserted, total)."""
+) -> tuple[int, int, int]:
+    """Insert OR IGNORE bills into trades_okx; then UPDATE all rows' strategy_id
+    using the current registered mapping (idempotent re-mapping).
+
+    Returns (inserted_new, rows_remapped, total_bills_seen).
+
+    Why the UPDATE pass: clOrdId stratidx is stable per bill (encoded at order
+    creation time per the then-current yaml), but historical inserts might have
+    been done with a stale registered list (e.g. before basis_arb was disabled).
+    Re-running this script with up-to-date registered list will correct them.
+    """
     conn = sqlite3.connect(str(db_path))
     try:
         conn.execute(SCHEMA)
@@ -170,9 +183,27 @@ def upsert_bills(
             )
             inserted += cur.rowcount
         conn.commit()
+
+        # Re-map strategy_id for ALL rows using current registered list.
+        # This corrects any prior runs where the list was different (e.g.
+        # before a disable / re-order).
+        remapped = 0
+        cur = conn.execute("SELECT bill_id, cl_ord_id FROM trades_okx WHERE cl_ord_id IS NOT NULL")
+        rows = cur.fetchall()
+        for bid, coid in rows:
+            idx = parse_strategy_index(coid)
+            sid = map_strategy_id(idx, registered)
+            r = conn.execute(
+                "UPDATE trades_okx SET strategy_id = ? WHERE bill_id = ? AND "
+                "(strategy_id IS NULL OR strategy_id != ?)",
+                (sid, bid, sid),
+            )
+            if r.rowcount > 0:
+                remapped += 1
+        conn.commit()
     finally:
         conn.close()
-    return inserted, len(bills)
+    return inserted, remapped, len(bills)
 
 
 def discrepancy_report(
@@ -269,8 +300,8 @@ def main() -> int:
     bills = asyncio.run(fetch_bills(begin_ms, end_ms))
     print(f"fetched {len(bills)} bills from OKX")
 
-    inserted, total = upsert_bills(args.db, bills, registered)
-    print(f"inserted {inserted}/{total} new rows into trades_okx")
+    inserted, remapped, total = upsert_bills(args.db, bills, registered)
+    print(f"inserted {inserted}/{total} new rows; re-mapped strategy_id for {remapped} pre-existing rows")
 
     if args.no_report:
         return 0
