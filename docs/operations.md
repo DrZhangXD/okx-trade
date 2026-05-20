@@ -146,7 +146,53 @@ sudo systemctl restart okx-trade
 
 > 重启前请确认：触发 weekly_breach 是真亏损还是 bug。如果真亏了 8%，应该先停下来人工 review。
 
-### 2.6 PnL 数据可信度（trades 表 vs trades_okx 表）
+### 2.6 Strategy Truth Dashboard（每日真损益）
+
+**核心工具**: `scripts/strategy_truth_dashboard.py`
+
+读 `trades_okx`（OKX bills 权威源）按策略汇总：fills / net balChg / realized / fee / max DD / winning days，输出 markdown 到 `var/audits/strategy_truth_<YYYYMMDD>.md`。
+
+```bash
+# 全期（自启动）
+.venv/bin/python scripts/strategy_truth_dashboard.py
+
+# 最近 7 天
+.venv/bin/python scripts/strategy_truth_dashboard.py --days 7
+
+# 指定日期
+.venv/bin/python scripts/strategy_truth_dashboard.py --since 2026-05-18 --until 2026-05-20
+
+# stdout 输出
+.venv/bin/python scripts/strategy_truth_dashboard.py --output -
+```
+
+每日 cron 自动跑（08:10 CST = 00:10 UTC，在 reconcile_pnl 后 5 分钟）：
+```cron
+10 0 * * * cd /home/okxtrade/okx-trade && sudo -u okxtrade ./.venv/bin/python scripts/strategy_truth_dashboard.py --since 2026-05-08 >> /var/log/okx_truth.log 2>&1
+```
+
+输出的 verdict 表会直接给"这个策略真的赚还是亏"判定：
+- 🔴 大额亏损 (>-$1k) → 立即评估 disable / 改阈值
+- 🟡 持续亏损 (>-$100) → 查参数 / fee 占 alpha 比例
+- 🟠 小额亏损 → 继续观察
+- 🟢 持平/盈利 → 保持
+
+### 2.7 决策协议（修改策略参数 / 启用-禁用前必做）
+
+历史教训：5/18-5/19 大量调参和 enable 决定基于 `trades` 表（phantom 数据），导致：
+- 4 个 M6+ 策略一日内同时 enable（违反"每策略 1 周 paper"规则）
+- funding_carry 8% APR 阈值已知偏低但从未调（roadmap 早就写了），最后 5/19+5/20 真实亏 -$9k
+- basis_arb 12% APR 阈值未察觉 hedge 破裂风险，5/19 单日 -$7.3k
+
+**今后任何 yaml/risk 改动 + enable/disable 操作前都必须**：
+1. 跑 `scripts/strategy_truth_dashboard.py --days 14` 看该策略真实表现
+2. 跑 `scripts/reconcile_pnl_from_okx.py --days 14` 确认 trades_okx 是新鲜的
+3. 决策依据写进 commit message + roadmap todo 编号
+4. 一次只 enable / 改一个策略，至少 7 天观察后才动下一个
+
+违反此协议的代价示例：5/19 一晚账户掉 -$12,205 没触发任何 alert（被 phantom 数据 + equity_provider bug 双重掩盖），等 5/20 reconcile script 才发现。
+
+### 2.8 PnL 数据可信度（trades 表 vs trades_okx 表）
 
 **核心事实**：`pnl.sqlite.trades` 是策略侧估算（不等 OrderFilled 就写，用 bar.close 估算），不可信。`pnl.sqlite.trades_okx` 是从 OKX bills 同步的权威账本，可信。
 
@@ -159,7 +205,7 @@ sudo systemctl restart okx-trade
 
 **已经在 `trades` 表里的 phantom 行不删除**——保留作为 incident 历史 + 对比基准。reconciliation cron 跑过后，权威数据出现在 `trades_okx`，Kelly handoff / Sharpe / 报告会自动用权威数据，phantom 行被静默 shadow。
 
-### 2.7 数据流断（WS disconnect）
+### 2.9 数据流断（WS disconnect）
 
 ```
 ws_disconnected attempt=2 backoff_sec=2.0 error=ConnectionClosedError

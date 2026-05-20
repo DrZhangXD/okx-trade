@@ -103,7 +103,8 @@ if _NT_AVAILABLE:
         hold_max_sec: int = 300
         # M6+.X 修：原 8bp SL 太紧（BTC tick 0.5 USDT，几秒必触发），SL 不
         # 够覆盖 round-trip fee（5bps × 2 legs = 10bps），等于每笔都净亏。
-        # 改 30bp 让单笔 alpha 有空间覆盖 fee。
+        # 5/18 实测一天 15,944 fills 真实账户亏 -$8,429。改 30bp 让单笔 alpha
+        # 有空间覆盖 fee。
         stop_distance_bps: float = 30.0
         tp_rr_ratio: float = 1.5
         # M6+.X 修：reentry cooldown，平仓后 60s 内不能再入场
@@ -246,7 +247,7 @@ if _NT_AVAILABLE:
             avg_micro = sum(v for _, v in self._micro_history) / max(1, len(self._micro_history))
 
             # M6+.X reentry gate：平仓后 cooldown + 要求 imbalance 反转
-            # 才能再入场，避免同方向高频连扫（每次都吃 spread + fee）
+            # 才能再入场，避免 5/18 那种同方向连扫（15k fills/日 → $-8.4k 真实亏）
             if self._last_exit_ts_ms > 0:
                 cooldown_ms = self.config.reentry_cooldown_sec * 1000
                 if now_ms - self._last_exit_ts_ms < cooldown_ms:

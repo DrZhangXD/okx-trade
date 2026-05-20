@@ -11,10 +11,10 @@
 
 | 策略 | 类型 | 频率 | 上线批次 | 默认 enabled | 备注 |
 |---|---|---|---|---|---|
-| [`FundingCarryStrategy`](../src/okx_trade/strategies/funding_carry.py) | neutral | 8h cycle | M2 | ✅ true | 入场阈值 8% APR 偏低，建议提升到 15% |
+| [`FundingCarryStrategy`](../src/okx_trade/strategies/funding_carry.py) | neutral | 8h cycle | M2 | ✅ true | 2026-05-20 entry 8%→15%（5/19+5/20 实测亏 $-8,953，8% 不够覆盖 4-leg 摩擦） |
 | [`XSMomentumStrategy`](../src/okx_trade/strategies/xs_momentum.py) | momentum | 每日 UTC 0 | M4 | ✅ true | regime gate 已接入 |
 | [`LiqReversalStrategy`](../src/okx_trade/strategies/liq_reversal.py) | reversal | event-driven | M4 | ✅ true | regime gate 已接入 |
-| [`BasisArbStrategy`](../src/okx_trade/strategies/basis_arb.py) | neutral | 1h check | M5.X | ✅ true | 季度合约滚动需手动改 yaml |
+| [`BasisArbStrategy`](../src/okx_trade/strategies/basis_arb.py) | neutral | 1h check | M5.X | ❌ false | 5/19 -$7,297 单日真亏（futures 短腿被强平 hedge 破裂），需修 margin 隔离才能重启（todo #8） |
 | [`OBImbalanceStrategy`](../src/okx_trade/strategies/ob_imbalance.py) | reversal | 中频 30s–5min | M5.X | ✅ true | books5 WS 订阅 |
 | [`FundingXSStrategy`](../src/okx_trade/strategies/funding_cross_section.py) | neutral β-hedged | 8h cycle | **M6+** | ✅ true | 多空 funding 横截面 + β hedge (2026-05-19 启用) |
 | [`FundingSkewStrategy`](../src/okx_trade/strategies/funding_skew_momentum.py) | reversal | ~30min poll | **M6+** | ✅ true | funding ±2σ 反向 (2026-05-19 启用) |
@@ -137,3 +137,14 @@
    - `risk_pct 0.3%→0.2%`：fees 是绝对值不是比例，缩仓不直接帮助；若 alpha 验证为正可回 0.3%
    - SL 30bp / cooldown 60s / reversal-required / fee 扣减：保留，是基础不变式
    触发条件：完成 todo #2 walk-forward CLI 后跑一遍 OOS 对比看 sharpe / hit rate / 净 PnL。
+8. **basis_arb margin 隔离修复**（2026-05-20 disable 后阻塞）：
+   5/19 流水显示 futures 短腿出现 `sub_type=6`（强制平仓）→ hedge 破裂 → spot 单边裸 long
+   → 后续价格反向再亏。根因是 spot 用现金账户 vs futures 用 cross margin，margin 池不
+   共享，futures 端 margin 抽干后被独立强平。修复方向：(a) 让两腿都用统一 margin（OKX
+   portfolio margin mode）；或 (b) 在策略层独立监控 futures margin level，临界时主动
+   reduce 而非等强平；或 (c) 把 spot+futures 改成 perp+futures 双 perp 套利（避免现金/
+   保证金跨账户）。
+9. **strategy enable 流程纪律恢复**：5/19 一日内同时 enable 4 策略
+   (funding_xs/skew/stat_arb/factor_portfolio) 违反了 roadmap 自己定的"每策略 ≥ 1 天
+   paper 验证"规则。修复方向：写 `scripts/enable_strategy_with_audit.sh` 强制每次只能
+   enable 一个，且要求前一个 enable 至少 7 天且 truth dashboard 显示净 PnL > -1% 账户。

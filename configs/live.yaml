@@ -31,23 +31,27 @@ strategies:
   # - ob_imbalance：订阅 books5 WS，秒级聚合，30s 滚动 imbalance；信号触发后
   #   target 30s–5min 持仓，单笔 risk_pct=0.3%。
   basis_arb:
-    # 2026-05-19 修复后重启：execution.resolve_td_mode 加 FUTURES 分支
-    # （3 段 + 末段全 6 位数字识别为 FUTURES，td_mode=cross，发 posSide）。
-    # OKX paper posMode 已确认为 long_short_mode，跟 yaml 对齐。
-    enabled: true
+    # 2026-05-20 DISABLE：5/19 单日真实账户 -$7,297 USDT (41 OKX fills)。
+    # 流水分析（scripts/strategy_truth_dashboard.py / pnl_reconciliation_*.jsonl）：
+    # 出现 sub_type=6 (futures 短仓强平) + 大量 spot 端子单。说明 futures 短腿
+    # margin 不够被独立强平 → hedge 破裂 → spot 单边裸 long → 价格反向时再亏。
+    # 这是 margin 配置问题（spot 现金账户 vs futures cross margin 隔离不当），
+    # 不是阈值或 alpha 问题。立即 disable，等修复 margin 隔离方案再重启。
+    enabled: false
     config: configs/strategies/basis_arb.yaml
   ob_imbalance:
-    # 2026-05-19 修复后重启：
+    # 2026-05-19 修复后重启（5/18 死亡螺旋后第一天）：
     # - SL 8bp → 30bp（让 alpha 覆盖 10bp round-trip fee）
     # - 加 reentry_cooldown_sec=60 + reentry_requires_reversal=true
     # - risk_pct 0.3% → 0.2%
     # - pnl_hook.realized_pnl_and_r 现扣 round-trip fee (default 5bps×2 legs)
-    # 修复动机原写"5/18 死亡螺旋（496 笔/天，账面 +6413 实际 ~-2800）"——
-    # 后经 OKX bills 复核（scripts/reconcile_pnl_from_okx.py）：5/18 真实
-    # balChg = -754 USDT（fees+slippage），不是 -2800；账面 +6413 是 phantom
-    # record（策略侧 record_strategy_trade 不等 OrderFilled 就写）。修复方向
-    # 没错（减仓 + 加 cooldown + 扣 fee），但根因主要是 fee 没扣 + 高频反复
-    # 撞 spread，不是策略逻辑爆炸。Phase 1 plan：让 record 走 on_order_filled。
+    # 5/18 真实事件（OKX bills, scripts/strategy_truth_dashboard.py 实证）：
+    # - **15,944 笔 BTC-USDT-SWAP fills 一天内**
+    # - 真实 balChg -$8,429 USDT（其中 fees -$6,682，realized -$1,748）
+    # - 账户从 80,878 跌到 72,356（-10.5%）；avail_eq 一度跌到 63,799
+    # - 修复后 5/19 → 389 fills -$106, 5/20 → 45 fills -$1.00（生效）
+    # 警示：原叙事曾经反复（"21% 跌"→"3099 假"→"-754 实"→实际 -$8,429）—
+    # phantom trades + pagination cap + equity_provider 三层失真叠加。
     enabled: true
     config: configs/strategies/ob_imbalance.yaml
   factor_portfolio:

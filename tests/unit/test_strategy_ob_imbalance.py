@@ -97,8 +97,9 @@ def test_config_default_values_sane() -> None:
     assert 30 <= cfg.hold_max_sec <= 3600
     # 单笔风险不超 1%
     assert cfg.risk_pct <= 0.01
-    # M6+.X fee-coverage 不变式：SL 必须覆盖 round-trip fee + slippage
+    # M6+.X 死亡螺旋防御：SL 不能太紧，必须覆盖 round-trip fee + slippage
     # round-trip fee = 2 × taker(5bp) = 10bp；SL 至少要 2x 它才有正期望
+    # 5/18 实测：8bp SL → 15,944 fills/日 → 真实亏 -$8,429
     assert cfg.stop_distance_bps >= 20.0, "stop too tight, will be eaten by fees"
     # reentry cooldown 至少 30s（防 1-second churning）
     assert cfg.reentry_cooldown_sec >= 30
@@ -106,8 +107,8 @@ def test_config_default_values_sane() -> None:
 
 
 def test_reentry_cooldown_blocks_immediate_retrigger() -> None:
-    """高频反复入场（每秒 +5bp 假信号 × 24h 吃光手续费）→ reentry_cooldown
-    必须拒绝平仓后 N 秒内的同方向再入场。"""
+    """5/18 死亡螺旋（实测 15,944 fills/日 -$8,429）：平仓 1 秒内重新入场 →
+    reentry_cooldown 必须拒绝平仓后 N 秒内的同方向再入场。"""
     from okx_trade.strategies.ob_imbalance import OBImbalanceConfig
     cfg = OBImbalanceConfig(
         instrument_id="BTC-USDT-SWAP.OKX",

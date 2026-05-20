@@ -107,12 +107,13 @@ def get_registered_strategies(live_yaml_path: Path) -> list[str]:
 
 
 async def fetch_bills(begin_ms: int, end_ms: int) -> list[dict]:
-    """分页拉 [begin, end] 窗口 bills。OKX 单页 100，限 30 页（3000 笔）。"""
+    """分页拉 [begin, end] 窗口 bills。OKX 单页 100，限 200 页（20000 笔）。
+    单日活跃可达 1k-2k 笔（高频策略），原 30 页 cap 在 3+ 天窗口里会被打爆。"""
     out: list[dict] = []
     after: str | None = None
     settings = OKXSettings()
     async with OKXRestClient(settings) as client:
-        for _ in range(30):
+        for _ in range(200):
             params: dict[str, str] = {
                 "begin": str(begin_ms),
                 "end":   str(end_ms),
