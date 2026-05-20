@@ -100,6 +100,13 @@ def _strategy_registry() -> dict[str, tuple[Any, Any]]:
     except ImportError:
         pass
     try:
+        from ..strategies.range_breakout import (
+            RangeBreakoutConfig, RangeBreakoutStrategy,
+        )
+        registry["range_breakout"] = (RangeBreakoutConfig, RangeBreakoutStrategy)
+    except ImportError:
+        pass
+    try:
         from ..strategies.factor_portfolio import (
             FactorPortfolioConfig, FactorPortfolioStrategy,
         )

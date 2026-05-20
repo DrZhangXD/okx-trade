@@ -94,6 +94,18 @@ strategies:
   ml_fusion:
     enabled: false
     config: configs/strategies/ml_fusion.yaml
+  range_breakout:
+    # 2026-05-20 重建：5/18 下线时理由是"alpha 弱 + 同向 + 工程不稳"。
+    # 重审：(a) alpha 弱基于当时 phantom trades 数据，无 OKX 真实数据支撑；
+    # (b) 与 xs_momentum 同向是直觉判断，未实证相关系数；(c) 工程问题
+    # （margin leak / pending order）由 34666fc + a6a3c8b 已修，且今天的
+    # on_order_rejected phantom 清理 + AccountDrawdownCheck 单源 + trades_okx
+    # 权威账本进一步强化。默认 disabled，paper 7 天验证：
+    #   - 7 天真实损益（truth dashboard）> -$50/天 → 保持 enabled
+    #   - 与 xs_momentum 的 daily PnL 相关系数 < 0.7 → 互补，alpha 独立
+    # 否则按数据决定再次下线。
+    enabled: false
+    config: configs/strategies/range_breakout.yaml
 
 # 全局风控默认值（策略 yaml 的 risk: 字段会优先生效）
 # Kelly / Correlation 默认开：M5 PnL tracker 已接入，足量历史前自动样本不足放行
