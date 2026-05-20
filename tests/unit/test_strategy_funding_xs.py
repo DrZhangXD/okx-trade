@@ -17,6 +17,9 @@ class TestFundingXSConfig:
         assert tuple(cfg.rebalance_hours_utc) == (0, 8, 16)
         assert 0 < cfg.max_position_pct <= 1.0
         assert cfg.enable_beta_hedge is True
+        # Live REST warmup defaults on so β-hedge is accurate from the first
+        # rebalance instead of waiting ~30 days for live 1D bars to accumulate.
+        assert cfg.warmup_via_rest is True
 
 
 class TestReturnsHelper:

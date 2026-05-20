@@ -239,6 +239,51 @@ def test_factor_portfolio_polling_config_has_safe_defaults() -> None:
     )
     assert cfg.enable_rest_polling is True
     assert cfg.rest_poll_interval_sec == 300
+    # Live REST warmup defaults to 30 days so basis_z_30d / funding_z_30d are
+    # active at full weight from restart instead of waiting ~30 days.
+    assert cfg.warmup_via_rest_days == 30
+
+
+def test_apply_warmup_panel_works_with_in_memory_panel() -> None:
+    """REST warmup path: build a panel in memory (no parquet roundtrip) and
+    feed it through _apply_warmup_panel directly. This is the code path used
+    by _warmup_via_rest in live mode.
+    """
+    import numpy as np
+    from okx_trade.research.panel import FactorPanel
+    from okx_trade.strategies.factor_portfolio import (
+        FactorPortfolioConfig, FactorPortfolioStrategy,
+    )
+
+    T = 50
+    ts_axis = tuple(1_700_000_000_000 + i * 3_600_000 for i in range(T))
+    panel = FactorPanel(
+        inst_ids=("BTC-USDT-SWAP",),
+        timestamps_ms=ts_axis,
+        close=np.linspace(100.0, 110.0, T).reshape(T, 1),
+        volume_usdt=np.ones((T, 1)) * 2e6,
+        funding_rate=(np.ones((T, 1)) * 0.0002),
+        open_interest=None,
+        basis_apr=(np.ones((T, 1)) * 0.005),
+    )
+
+    cfg = FactorPortfolioConfig(
+        instrument_ids=["BTC-USDT-SWAP.OKX"],
+        bar_type_template="{inst}-1-HOUR-LAST-EXTERNAL",
+        rebalance_hours=4, top_k_long=1, top_k_short=1,
+        risk_pct=0.002, account_equity_usdt=10_000.0,
+        factor_weights=[("basis_apr", 1.0)],
+        subscribe_spot_for_basis=False,
+        enable_rest_polling=False,
+        warmup_via_rest_days=0,  # avoid spawning REST task in unit test
+    )
+    s = FactorPortfolioStrategy(cfg)
+    s._apply_warmup_panel(panel)
+
+    inst = "BTC-USDT-SWAP.OKX"
+    assert len(s._closes[inst]) == T
+    assert len(s._spot_closes[inst]) == T  # derived from basis_apr
+    assert len(s._funding_rates[inst]) == T
 
 
 def test_load_warmup_panel_populates_all_buffers(tmp_path) -> None:

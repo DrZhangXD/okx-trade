@@ -203,6 +203,12 @@ if _NT_AVAILABLE:
         # the rolling-window factors (basis_z_30d, funding_z_30d need 30d) so they're
         # active from bar 1 instead of bar 720. Used by backtest CLI --warmup-days N.
         warmup_panel_cache_path: str | None = None
+        # Live REST warmup: if > 0 and no warmup_panel_cache_path is set, on_start
+        # fetches this many days of 1H bars via fetch_panel and pre-populates all
+        # buffers (close / volume / funding / basis derived spot). Lets basis_z_30d
+        # / funding_z_30d run at full effective weight from restart instead of
+        # spending 30 days warming up. 0 disables (use for backtest).
+        warmup_via_rest_days: int = 30
         risk_config: RiskConfig | None = None
 
 
@@ -254,6 +260,7 @@ if _NT_AVAILABLE:
                 iid.value: deque(maxlen=_buf_len) for iid in self._inst_ids
             }
             self._rest_poll_task: Any = None
+            self._warmup_task: Any = None
             self._last_rebalance_ms: int = 0
             self._positions: dict[str, tuple[str, float, int]] = {}
             self._allocated_equity_usdt: float | None = None
@@ -268,6 +275,20 @@ if _NT_AVAILABLE:
             # already-warm history rather than starting from scratch.
             if self.config.warmup_panel_cache_path:
                 self._load_warmup_panel(self.config.warmup_panel_cache_path)
+            elif self.config.warmup_via_rest_days > 0:
+                # Live mode: kick off an async REST warmup (fetch_panel + apply).
+                # Backgrounded so subscribe_bars / NT startup don't block. First few
+                # live bars may arrive before warmup finishes; apply uses append,
+                # not clear+fill, so they merge cleanly (deque maxlen evicts old).
+                import asyncio
+                try:
+                    loop = asyncio.get_event_loop()
+                    self._warmup_task = loop.create_task(self._warmup_via_rest())
+                except RuntimeError as exc:
+                    self.log.warning(
+                        f"factor_portfolio: cannot spawn warmup task "
+                        f"(no event loop): {exc}"
+                    )
             for bar_type in self._bar_types.values():
                 self.subscribe_bars(bar_type)
             for spot_bar_type in self._spot_bar_types.values():
@@ -307,16 +328,13 @@ if _NT_AVAILABLE:
             if self._rest_poll_task is not None and not self._rest_poll_task.done():
                 self._rest_poll_task.cancel()
                 self._rest_poll_task = None
+            if self._warmup_task is not None and not self._warmup_task.done():
+                self._warmup_task.cancel()
+                self._warmup_task = None
             self.log.info(f"factor_portfolio stop; open_legs={len(self._positions)}")
 
         def _load_warmup_panel(self, path: str) -> None:
-            """Pre-populate buffers from a fetch_panel parquet cache.
-
-            Reconstructs spot_close from basis_apr algebraically:
-              basis = (perp - spot) / spot  →  spot = perp / (1 + basis)
-            so we don't need spot_close as a separate column in the cache file.
-            NaN values are skipped per (ts, inst) cell so partial coverage is OK.
-            """
+            """Pre-populate buffers from a fetch_panel parquet cache (offline path)."""
             from pathlib import Path as _Path
 
             from ..research.data import _load_cache
@@ -327,7 +345,16 @@ if _NT_AVAILABLE:
                     f"factor_portfolio: warmup panel not found / not loadable: {path}"
                 )
                 return
+            self._apply_warmup_panel(panel)
 
+        def _apply_warmup_panel(self, panel: FactorPanel) -> None:
+            """Pre-populate buffers from a ``FactorPanel`` (offline or REST).
+
+            Reconstructs spot_close from basis_apr algebraically:
+              basis = (perp - spot) / spot  →  spot = perp / (1 + basis)
+            so we don't need spot_close as a separate column in the cache file.
+            NaN values are skipped per (ts, inst) cell so partial coverage is OK.
+            """
             # Match strategy inst ids (may include .OKX venue suffix) against panel
             # ids (typically bare like BTC-USDT-SWAP). Try both forms.
             col_by_inst: dict[str, int] = {}
@@ -369,6 +396,41 @@ if _NT_AVAILABLE:
                 f"factor_portfolio: warmup loaded — close={counts['close']} "
                 f"spot={counts['spot']} funding={counts['funding']} oi={counts['oi']}"
             )
+
+        async def _warmup_via_rest(self) -> None:
+            """Live REST warmup: fetch ``warmup_via_rest_days`` of 1H bars +
+            funding rates + spot-derived basis, then apply to buffers.
+
+            Mirrors the offline ``--warmup-days`` path but with on-the-fly fetch.
+            Errors are caught and logged so a failed warmup doesn't kill the
+            strategy — it just falls back to organic on_bar accumulation.
+            """
+            import time as _time
+
+            from .. import OKXRestClient, OKXSettings
+            from ..research.data import fetch_panel
+
+            days = int(self.config.warmup_via_rest_days)
+            end_ms = int(_time.time() * 1000)
+            start_ms = end_ms - days * 86_400_000
+            bare_iids = [iid.value.split(".")[0] for iid in self._inst_ids]
+            try:
+                async with OKXRestClient(OKXSettings()) as client:
+                    panel = await fetch_panel(
+                        rest_client=client,
+                        inst_ids=bare_iids,
+                        start_ms=start_ms,
+                        end_ms=end_ms,
+                        bar="1H",
+                        include=("close", "volume_usdt", "funding_rate", "basis_apr"),
+                    )
+            except Exception as exc:  # noqa: BLE001
+                self.log.warning(f"factor_portfolio REST warmup aborted: {exc}")
+                return
+            try:
+                self._apply_warmup_panel(panel)
+            except Exception as exc:  # noqa: BLE001
+                self.log.warning(f"factor_portfolio apply warmup panel failed: {exc}")
 
         async def _poll_rest_loop(self) -> None:
             """Background task: poll funding + OI for each perp every N seconds.

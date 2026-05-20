@@ -94,6 +94,10 @@ if _NT_AVAILABLE:
         check_interval_sec: int = 1800  # 也支持 30min 节流的额外检查
         account_equity_usdt: float = 10000.0
         risk_config: RiskConfig | None = None
+        # Live REST warmup: on_start fetches `beta_window_days + 2` 个 1D close
+        # per instrument so β-hedge is accurate from the first rebalance instead
+        # of waiting ~30 days of live 1D bars. Disable for backtest.
+        warmup_via_rest: bool = True
 
 
     class FundingXSStrategy(Strategy):  # type: ignore[misc]
@@ -132,6 +136,7 @@ if _NT_AVAILABLE:
             self._pnl_tracker = None  # type: ignore[var-annotated]
             self._last_equity_day: str | None = None
             self._funding_task: asyncio.Task | None = None
+            self._warmup_task: asyncio.Task | None = None
             self._rest = None  # type: ignore[var-annotated]
             self._rest_settings = None  # type: ignore[var-annotated]
 
@@ -145,11 +150,65 @@ if _NT_AVAILABLE:
                 f"top_n={self.config.top_n} bot_n={self.config.bot_n} "
                 f"beta_hedge={self.config.enable_beta_hedge}"
             )
+            if self.config.warmup_via_rest:
+                try:
+                    loop = asyncio.get_event_loop()
+                    self._warmup_task = loop.create_task(self._warmup_closes_via_rest())
+                except RuntimeError as exc:
+                    self.log.warning(
+                        f"funding_xs: cannot spawn warmup task (no event loop): {exc}"
+                    )
 
         def on_stop(self) -> None:
             if self._funding_task is not None:
                 self._funding_task.cancel()
+            if self._warmup_task is not None and not self._warmup_task.done():
+                self._warmup_task.cancel()
+                self._warmup_task = None
             self.log.info(f"funding_xs stop; open_legs={len(self._positions)}")
+
+        async def _warmup_closes_via_rest(self) -> None:
+            """One-shot REST fetch of ``beta_window_days + 2`` 1D closes per
+            instrument so β-hedge is accurate from the first rebalance.
+
+            Without warmup, β computation needs ≥10 1D returns (per
+            ``_compute_target_positions``), which means ≥10 days of live bars
+            before any β scaling kicks in. With warmup, β is correct on day 0.
+            """
+            from ..rest.client import OKXRestClient
+
+            n_needed = self.config.beta_window_days + 2
+            all_iids = list(self._bar_types.keys())  # 包括 beta_ref
+            try:
+                async with OKXRestClient(self._rest_settings) as client:
+                    fetched: dict[str, list[float]] = {}
+                    for iid in all_iids:
+                        try:
+                            bare = iid.symbol.value  # e.g. "BTC-USDT-SWAP"
+                            candles = await client.market.get_candles_extended(
+                                bare, bar="1D", total=n_needed,
+                            )
+                            fetched[iid.value] = [
+                                float(c.close) for c in candles if float(c.close) > 0
+                            ]
+                        except Exception as exc:  # noqa: BLE001
+                            self.log.warning(
+                                f"funding_xs warmup: {iid.value} fetch failed: {exc}"
+                            )
+            except Exception as exc:  # noqa: BLE001
+                self.log.warning(f"funding_xs warmup aborted: {exc}")
+                return
+
+            # Clear + refill per inst; on_bar appends new live bars after.
+            filled = 0
+            for inst_value, closes in fetched.items():
+                if closes:
+                    self._closes_by_inst[inst_value] = closes[:]
+                    filled += 1
+            self.log.info(
+                f"funding_xs warmup loaded: {filled}/{len(all_iids)} instruments "
+                f"closes (~{n_needed} 1D bars each)"
+            )
 
         def on_bar(self, bar: Bar) -> None:
             # 缓存收盘价用于 β 回归
