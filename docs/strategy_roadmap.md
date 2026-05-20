@@ -125,4 +125,15 @@
 5. **DD 架构 Phase 1（per-strategy 真隔离）**：2026-05-20 已落 Phase 0（账户级 kill-switch
    `AccountDrawdownTracker` + `AccountDrawdownCheck`，单源单告警）。Phase 1 接 `PnLTracker`
    做按 strategy_id 的 daily realized PnL 喂 per-strategy `DrawdownTracker`，让单一策略爆掉
-   只停那一个，其他正常跑（5/18 ob_imbalance 死亡螺旋场景的最终防线）。
+   只停那一个，其他正常跑（防 high-frequency 策略持续亏损 fee 拖累其他策略）。
+6. **pnl_hook 重构走 OrderFilled 事件**：当前各策略 `record_strategy_trade` 在 `submit_order`
+   后立即写 record，不等 OrderFilled，用 bar.close 估算价。OBImbalance 5/18 写 485 条
+   trade 但 OKX 实际只 31 笔 fills，估算 PnL +6340 vs OKX 真实 balChg -754 USDT
+   （详见 [operations.md §4](operations.md) reconcile 步骤）。已临时方案：`scripts/reconcile_pnl_from_okx.py`
+   每日把 OKX bills 同步到 `trades_okx` 表，`PnLTracker.get_trades(authoritative=True)`
+   默认读权威表。Phase 1 应把策略的 record 路径改为 NT `on_order_filled` event。
+7. **ob_imbalance 5/19 修复参数 fine-tune**（需 walk-forward CLI 后做）：
+   - `imb_thr 0.35→0.45`：当前过滤掉大量信号（5/18 vs 5/19 笔数 -90%）；可能过严，尝试 0.40 中间值
+   - `risk_pct 0.3%→0.2%`：fees 是绝对值不是比例，缩仓不直接帮助；若 alpha 验证为正可回 0.3%
+   - SL 30bp / cooldown 60s / reversal-required / fee 扣减：保留，是基础不变式
+   触发条件：完成 todo #2 walk-forward CLI 后跑一遍 OOS 对比看 sharpe / hit rate / 净 PnL。

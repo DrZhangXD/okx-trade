@@ -42,7 +42,12 @@ strategies:
     # - 加 reentry_cooldown_sec=60 + reentry_requires_reversal=true
     # - risk_pct 0.3% → 0.2%
     # - pnl_hook.realized_pnl_and_r 现扣 round-trip fee (default 5bps×2 legs)
-    # 这些一起防止 5/18 死亡螺旋复发（496 笔/天，账面 +6413 实际 ~-2800）。
+    # 修复动机原写"5/18 死亡螺旋（496 笔/天，账面 +6413 实际 ~-2800）"——
+    # 后经 OKX bills 复核（scripts/reconcile_pnl_from_okx.py）：5/18 真实
+    # balChg = -754 USDT（fees+slippage），不是 -2800；账面 +6413 是 phantom
+    # record（策略侧 record_strategy_trade 不等 OrderFilled 就写）。修复方向
+    # 没错（减仓 + 加 cooldown + 扣 fee），但根因主要是 fee 没扣 + 高频反复
+    # 撞 spread，不是策略逻辑爆炸。Phase 1 plan：让 record 走 on_order_filled。
     enabled: true
     config: configs/strategies/ob_imbalance.yaml
   factor_portfolio:

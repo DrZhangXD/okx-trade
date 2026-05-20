@@ -140,6 +140,60 @@ def test_db_parent_dir_auto_created(tmp_path: Path) -> None:
     assert nested.exists()
 
 
+def test_get_trades_prefers_trades_okx_when_present(tmp_path: Path) -> None:
+    """Authoritative source (trades_okx from OKX bills) takes precedence over
+    the estimate ``trades`` table when both exist. Same strategy_id, but okx
+    table has +10 vs trades table has +100 (phantom). Reader should see +10.
+    """
+    db_path = tmp_path / "pnl.sqlite"
+    tracker = PnLTracker(db_path)
+
+    # Estimate (phantom) trade with inflated PnL
+    tracker.record_trade(_trade(sid="OBImbalanceStrategy-004",
+                                inst="BTC-USDT-SWAP", ts=1000, pnl="100.0"))
+
+    # Authoritative table — set up directly with sqlite
+    import sqlite3
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("""
+        CREATE TABLE trades_okx (
+            bill_id TEXT PRIMARY KEY, ts_ms INTEGER NOT NULL, inst_id TEXT,
+            bill_type TEXT, sub_type TEXT, cl_ord_id TEXT, strategy_id TEXT,
+            bal_chg REAL, pnl REAL, fee REAL
+        )
+    """)
+    conn.execute(
+        "INSERT INTO trades_okx VALUES (?,?,?,?,?,?,?,?,?,?)",
+        ("bill1", 1500, "BTC-USDT-SWAP", "2", "0",
+         "O202605181200000010044", "ob_imbalance", 10.0, 12.0, -2.0),
+    )
+    conn.commit()
+    conn.close()
+
+    # Reader should get the +10 from trades_okx, NOT the +100 from trades
+    out = tracker.get_trades("OBImbalanceStrategy-004")
+    assert len(out) == 1
+    assert float(out[0].pnl_usdt) == 10.0
+    assert out[0].closed_ts_ms == 1500
+
+    # Opt-out: authoritative=False → see legacy estimate
+    out_est = tracker.get_trades("OBImbalanceStrategy-004", authoritative=False)
+    assert len(out_est) == 1
+    assert float(out_est[0].pnl_usdt) == 100.0
+    tracker.close()
+
+
+def test_get_trades_falls_back_when_okx_table_missing(tmp_path: Path) -> None:
+    """Without trades_okx table → fallback to legacy trades (no behavior change
+    for users who haven't run reconciliation yet)."""
+    tracker = PnLTracker(":memory:")
+    tracker.record_trade(_trade(sid="s1", pnl="42.0"))
+    out = tracker.get_trades("s1")  # authoritative=True is default
+    assert len(out) == 1
+    assert float(out[0].pnl_usdt) == 42.0
+    tracker.close()
+
+
 def test_records_preserve_insertion_order_for_same_ts() -> None:
     tracker = PnLTracker(":memory:")
     for pnl in ["1", "2", "3"]:

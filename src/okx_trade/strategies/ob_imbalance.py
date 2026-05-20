@@ -101,8 +101,9 @@ if _NT_AVAILABLE:
         imbalance_threshold: float = 0.45
         microprice_premium_bps: float = 5.0
         hold_max_sec: int = 300
-        # M6+.X 修：原 8bp SL 太紧（BTC tick 0.5 USDT，几秒必触发）→ 死亡螺旋。
-        # 改 30bp 让单笔 alpha 有空间覆盖 round-trip fee（5bps × 2 legs = 10bps）。
+        # M6+.X 修：原 8bp SL 太紧（BTC tick 0.5 USDT，几秒必触发），SL 不
+        # 够覆盖 round-trip fee（5bps × 2 legs = 10bps），等于每笔都净亏。
+        # 改 30bp 让单笔 alpha 有空间覆盖 fee。
         stop_distance_bps: float = 30.0
         tp_rr_ratio: float = 1.5
         # M6+.X 修：reentry cooldown，平仓后 60s 内不能再入场
@@ -245,7 +246,7 @@ if _NT_AVAILABLE:
             avg_micro = sum(v for _, v in self._micro_history) / max(1, len(self._micro_history))
 
             # M6+.X reentry gate：平仓后 cooldown + 要求 imbalance 反转
-            # 才能再入场，避免同方向连扫（5/18 死亡螺旋根因）
+            # 才能再入场，避免同方向高频连扫（每次都吃 spread + fee）
             if self._last_exit_ts_ms > 0:
                 cooldown_ms = self.config.reentry_cooldown_sec * 1000
                 if now_ms - self._last_exit_ts_ms < cooldown_ms:

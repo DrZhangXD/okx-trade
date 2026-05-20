@@ -145,9 +145,36 @@ class PnLTracker:
         strategy_id: str,
         *,
         since_ms: int | None = None,
+        authoritative: bool = True,
     ) -> list[TradeRecord]:
-        """按 strategy_id 拉成交，按 ``closed_ts_ms`` 升序。"""
+        """按 strategy_id 拉成交，按时间升序。
+
+        ``authoritative=True`` (default) → 优先读 ``trades_okx``（由
+        ``scripts/reconcile_pnl_from_okx.py`` 从 OKX bills 写入的权威账本），
+        无该表 / 该表对此 strategy_id 无数据时回退到 ``trades``（策略侧 bar-
+        price 估算）。``authoritative=False`` 直接读 ``trades`` 表（保留旧
+        行为给单测 / 回测）。
+
+        为什么默认走 trades_okx：策略侧 ``record_strategy_trade`` 在
+        ``submit_order`` 后立即写 record，不等 OrderFilled，且用 bar.close
+        而非真实 fill 价。OBImbalance 5/18 写 485 条但 OKX 实际 31 笔，
+        PnL 估算 +6340 vs 实际 -754，差 +7094 USDT。trades_okx 用 OKX bills
+        作权威源避免 Kelly handoff 用脏数据。
+        """
         with self._lock:
+            # Phase 0: try authoritative trades_okx if it exists
+            if authoritative:
+                has_okx = self._conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' "
+                    "AND name='trades_okx'"
+                ).fetchone()
+                if has_okx:
+                    okx_rows = self._fetch_trades_okx(strategy_id, since_ms)
+                    if okx_rows:
+                        return okx_rows
+                    # No bill rows for this strategy → fall through to legacy
+                    # (most likely a strategy that never had OKX activity)
+
             if since_ms is None:
                 cur = self._conn.execute(
                     "SELECT strategy_id, instrument_id, closed_ts_ms, pnl_usdt, r_multiple "
@@ -169,6 +196,64 @@ class PnLTracker:
                 closed_ts_ms=int(r[2]),
                 pnl_usdt=Decimal(str(r[3])),
                 r_multiple=float(r[4]),
+            )
+            for r in rows
+        ]
+
+    def _fetch_trades_okx(
+        self, strategy_id: str, since_ms: int | None,
+    ) -> list[TradeRecord]:
+        """Aggregate ``trades_okx`` (raw bills) into TradeRecord rows.
+
+        Group by ``cl_ord_id`` so partial fills of the same order become one
+        record. r_multiple is left at 0 (we don't have risk_usdt here; Kelly
+        only needs win_rate/avg_R which can be computed from pnl alone).
+
+        Strategy match is by ``strategy_id`` column matching either the bare
+        config name (e.g. "ob_imbalance") or the NT-assigned id (e.g.
+        "OBImbalanceStrategy-004"); reconcile_pnl_from_okx.py writes the
+        bare name when clOrdId parse succeeds.
+        """
+        bare_name = strategy_id.split("Strategy")[0].lower()
+        # Strategy name from yaml: "ob_imbalance" etc. Try both forms.
+        candidates: list[str] = [strategy_id]
+        # snake_case mapping
+        mapping = {
+            "obimbalance": "ob_imbalance",
+            "fundingcarry": "funding_carry",
+            "xsmomentum": "xs_momentum",
+            "liqreversal": "liq_reversal",
+            "basisarb": "basis_arb",
+            "factorportfolio": "factor_portfolio",
+            "fundingxs": "funding_cross_section",
+            "fundingskew": "funding_skew_momentum",
+            "statarb": "stat_arb_pairs",
+            "optionvol": "option_vol_selling",
+            "mlfusion": "ml_fusion",
+        }
+        if bare_name in mapping:
+            candidates.append(mapping[bare_name])
+        placeholders = ",".join("?" * len(candidates))
+        params: list = list(candidates)
+        ts_filter = ""
+        if since_ms is not None:
+            ts_filter = " AND ts_ms >= ?"
+            params.append(int(since_ms))
+        cur = self._conn.execute(
+            f"SELECT strategy_id, inst_id, MAX(ts_ms) AS ts, "
+            f"  SUM(bal_chg) AS bal, cl_ord_id "
+            f"FROM trades_okx WHERE strategy_id IN ({placeholders}){ts_filter} "
+            f"GROUP BY cl_ord_id ORDER BY ts ASC",
+            params,
+        )
+        rows = cur.fetchall()
+        return [
+            TradeRecord(
+                strategy_id=r[0],
+                instrument_id=r[1] or "",
+                closed_ts_ms=int(r[2]),
+                pnl_usdt=Decimal(str(r[3] or 0)),
+                r_multiple=0.0,
             )
             for r in rows
         ]

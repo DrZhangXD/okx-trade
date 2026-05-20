@@ -7,7 +7,7 @@
 instrument_id: BTC-USDT-SWAP.OKX
 bar_type: BTC-USDT-SWAP.OKX-1-MINUTE-LAST-EXTERNAL
 
-# 信号（M6+.X：阈值收紧 + cooldown 防死亡螺旋）
+# 信号（M6+.X：阈值收紧 + cooldown 减少高频反复撞 spread/fee）
 aggregation_sec: 1          # 每秒聚合一次决策
 imbalance_window_sec: 30    # 30s 滚动平均
 imbalance_threshold: 0.45   # M6+.X：0.35→0.45 收紧避免噪声触发
@@ -19,7 +19,7 @@ hold_max_sec: 300           # 超过 5min 强平
 stop_distance_bps: 30.0     # M6+.X：8→30bp，BTC 上 ~ $24 stop distance
 tp_rr_ratio: 1.5            # TP = 45bp，需覆盖 fee 10bp + 滑点
 
-# Reentry gate（M6+.X 防死亡螺旋）
+# Reentry gate（M6+.X 减少高频反复撞 spread/fee）
 reentry_cooldown_sec: 60          # 平仓后 60s 内不能再入场
 reentry_requires_reversal: true   # 平仓后 imbalance 必须穿过 0 反转才能再入场
 

@@ -113,13 +113,22 @@ sudo journalctl -u okx-trade --since "1 hour ago" | grep -E "risk REJECT" | head
 
 # 2. 当前持仓 + 1H candles MTM 对照
 .venv/bin/python scripts/diag_mtm_swing.py
+
+# 3. (NEW) 把 OKX bills 写入权威账本 trades_okx + 与策略侧估算 trades 表对比
+.venv/bin/python scripts/reconcile_pnl_from_okx.py --days 4
 ```
 
 `diag_account_bills` 输出 3 块：按 (type, subType) 汇总的 balChg / pnl / fee，top 10 单笔最大 |balChg|，按 instId 净流水。能立即告诉你"那段时间真实现金流动了多少 + 来自什么"。
 
 `diag_mtm_swing` 输出当前所有 open positions + 12 大币 1H 收盘价格变动，让你估算 "MTM swing ≈ Σ position × pct_change" 是否能解释 totalEq 的变化。
 
-历史教训：5/20 这两个脚本帮我定位到"3099 USDT 暴跌"其实是 `equity_provider` 读错字段的假象（OKX bills 总共只动了 -4.75 USDT）。
+`reconcile_pnl_from_okx` 输出每日每策略的"估算 vs 真实"差异表。若发现某策略某天 `divergence_usdt` 远大于 0（如 +7094），说明该策略当天有大量 phantom record（订单失败 / 部分成交 / rate-limit drop，但 trades 表照样写）。详见 §4。
+
+历史教训：5/20 这三个脚本帮我定位到 "5/18 OBImbalance 死亡螺旋" 的实情——
+- 策略 trades 表估算 5/18 赚 +6340 USDT (485 笔)
+- OKX bills 真实显示 5/18 ob_imbalance 只成交 1757 笔 fills，balChg = **-754 USDT**
+- 差距 +7094 USDT 全是 phantom（NT submit_order 后没 fill 但 record 已写）
+- 而真正灾难日是 5/19，账户单日 balChg = **-12,205 USDT**（basis_arb -$7,297 + funding_carry -$4,826 为主），当时被 equity_provider 读 avail_eq + DD tracker 双源污染掩盖，**没触发任何 critical alert**。
 
 ### 2.5 weekly_breach 卡死需手动 ack
 
@@ -137,7 +146,20 @@ sudo systemctl restart okx-trade
 
 > 重启前请确认：触发 weekly_breach 是真亏损还是 bug。如果真亏了 8%，应该先停下来人工 review。
 
-### 2.6 数据流断（WS disconnect）
+### 2.6 PnL 数据可信度（trades 表 vs trades_okx 表）
+
+**核心事实**：`pnl.sqlite.trades` 是策略侧估算（不等 OrderFilled 就写，用 bar.close 估算），不可信。`pnl.sqlite.trades_okx` 是从 OKX bills 同步的权威账本，可信。
+
+| 表 | 写入方 | 时机 | 价格源 | 何时用 |
+|---|---|---|---|---|
+| `trades` | 策略 `record_strategy_trade(...)` | `submit_order` 后立即 | bar.close（信号时） | 仅 backtest / 实时近似展示 |
+| `trades_okx` | `scripts/reconcile_pnl_from_okx.py` | 每日 cron / 手动 | OKX 实际成交 balChg | Kelly handoff / Sharpe / 真实 PnL |
+
+`PnLTracker.get_trades(strategy_id, authoritative=True)` 是默认行为，会优先返回 `trades_okx` 行（按 cl_ord_id 聚合），有数据就 shadow 掉 `trades` 表的 phantom 行。
+
+**已经在 `trades` 表里的 phantom 行不删除**——保留作为 incident 历史 + 对比基准。reconciliation cron 跑过后，权威数据出现在 `trades_okx`，Kelly handoff / Sharpe / 报告会自动用权威数据，phantom 行被静默 shadow。
+
+### 2.7 数据流断（WS disconnect）
 
 ```
 ws_disconnected attempt=2 backoff_sec=2.0 error=ConnectionClosedError
