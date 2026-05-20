@@ -199,24 +199,29 @@ if _NT_AVAILABLE:
                 self.log.warning(f"stat_arb warmup failed: {exc}")
                 return
 
-            if not self._closes_left:
+            # Clear + refill unconditionally. NT may have pushed a handful of
+            # bars via on_bar during the 5s REST fetch (catalog replay); those
+            # would defeat a "only fill if empty" guard, leaving the deque
+            # with just those few bars while we discard 1440 historical ones.
+            # Losing 5s of live bars is the better tradeoff.
+            if left_candles:
+                self._closes_left.clear()
                 for c in left_candles:
                     close = float(c.close)
                     if close > 0:
                         self._closes_left.append(math.log(close))
-                if left_candles:
-                    last = left_candles[-1]
-                    self._last_left_close = float(last.close)
-                    self._last_left_ts_ms = int(last.ts)
-            if not self._closes_right:
+                last = left_candles[-1]
+                self._last_left_close = float(last.close)
+                self._last_left_ts_ms = int(last.ts)
+            if right_candles:
+                self._closes_right.clear()
                 for c in right_candles:
                     close = float(c.close)
                     if close > 0:
                         self._closes_right.append(math.log(close))
-                if right_candles:
-                    last = right_candles[-1]
-                    self._last_right_close = float(last.close)
-                    self._last_right_ts_ms = int(last.ts)
+                last = right_candles[-1]
+                self._last_right_close = float(last.close)
+                self._last_right_ts_ms = int(last.ts)
 
             self._recompute_cointegration()
             self._last_coint_check_ms = int(time.time() * 1000)
