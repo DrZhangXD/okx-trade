@@ -366,26 +366,26 @@ def build_live_context(
 
 
 def _build_okx_equity_provider() -> Any:
-    """返回 async () → float | None 的 equity provider:查 OKX REST USDT free balance。
+    """返回 async () → float | None 的 equity provider:查 OKX REST 整账户 totalEq。
 
     LiveMonitor 启动 + 每 ``alloc_interval_s`` 调用一次。失败(网络 / 凭证错)
     返回 None,monitor 静默跳过本次刷新(保留上次分配)。
+
+    用 ``Balance.total_eq``(整账户净值, 所有币种 + 未实现 PnL, 统一按 USDT 计)
+    而非 ``USDT.avail_eq``。后者只是 USDT 单币的可用余额, 开仓冻结保证金会
+    瞬间下降, 让 DD tracker 误判为 "权益下跌"。2026-05-20 事件: FundingXS 在
+    00:00 UTC 一次开 6 仓 (~$46k notional), avail_eq 跌 3099 USDT, 把全部
+    9 策略推入 daily_breach, 但实际 totalEq 完全没动。
     """
     async def _provider() -> float | None:
         from .. import OKXRestClient, OKXSettings
         try:
             settings = OKXSettings()
             async with OKXRestClient(settings) as client:
-                balance = await client.account.get_balance(ccy="USDT")
-                detail = balance.get("USDT")
-                if detail is None:
+                balance = await client.account.get_balance()
+                if balance.total_eq is None or float(balance.total_eq) <= 0:
                     return None
-                # 用 ``avail_eq``(可用净值,demo/实盘都是 OKX 的 cross/iso 可用)
-                # 退一步取 ``eq``(总净值)。两者通常相同除非有大额 unrealized loss。
-                val = getattr(detail, "avail_eq", None) or getattr(detail, "eq", None)
-                if val is None:
-                    return None
-                return float(val)
+                return float(balance.total_eq)
         except Exception:
             return None
     return _provider
