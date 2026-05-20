@@ -2,9 +2,9 @@
 
 **English** · [简体中文](README.md)
 
-Full-stack OKX quant trading: async SDK (REST + WebSocket) + NautilusTrader adapter + 4 strategies + risk pipeline + PnL tracker + monitoring + backtest + VPS deploy scripts.
+Full-stack OKX quant trading: async SDK (REST + WebSocket) + NautilusTrader adapter + **10 strategies** + factor research lab + layered risk pipeline + PnL tracker + monitoring + backtest + VPS deploy scripts.
 
-**Status**: paper trading running 24/7 on Aliyun VPS, observation window through **2026-05-22** → evaluate progression to M6 (real-money switch + Telegram alerts). 449/449 unit tests green.
+**Status**: paper trading running 24/7 on Aliyun VPS (**9 strategies enabled in parallel**), observation window through **2026-05-22** → evaluate progression to M7 (real-money switch + Telegram alerts). 803/803 unit tests green.
 
 ---
 
@@ -19,28 +19,36 @@ cp .env.example .env
 # Edit .env: OKX_API_KEY / SECRET / PASSPHRASE / IS_DEMO=true
 
 # 3) Run unit tests (no network)
-pytest tests/unit -v             # 449 tests
+pytest tests/unit -v             # 803 tests
 
 # 4) Integration tests (requires demo creds + proxy if in mainland China)
 pytest tests/integration -v -m integration
 ```
 
-## Three-layer architecture
+## Four-layer architecture
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│  Strategy Layer  (NautilusTrader Strategy subclasses)        │
-│    xs_momentum / funding_carry / liq_reversal /              │
-│    basis_arb / ob_imbalance (M5)                             │
-├─────────────────────────────────────────────────────────────┤
-│  Risk + PnL + Portfolio + Monitor                            │
-│    KellyCheck / DrawdownTracker / VolTargetCheck /           │
-│    CorrelationCheck / PnLTracker / Allocator / LiveMonitor   │
-├─────────────────────────────────────────────────────────────┤
-│  NT Adapter   (LiveDataClient + LiveExecutionClient)         │
-├─────────────────────────────────────────────────────────────┤
-│  okx_trade SDK   (REST + WS, async, no pandas)               │
-└─────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────┐
+│  Research Layer (P1, 2026-05-19)                                    │
+│    FactorRegistry / FactorPanel / grade_factor / walk_forward       │
+│    CLI: list / fetch / eval / grade-all / approve / backtest-...    │
+├─────────────────────────────────────────────────────────────────────┤
+│  Strategy Layer  (10 NautilusTrader Strategy subclasses)            │
+│    funding_carry / xs_momentum / liq_reversal / basis_arb /         │
+│    ob_imbalance / funding_cross_section / funding_skew_momentum /   │
+│    stat_arb_pairs / option_vol_selling / ml_fusion /                │
+│    factor_portfolio (generic factor synthesizer)                    │
+├─────────────────────────────────────────────────────────────────────┤
+│  Risk + PnL + Portfolio + Monitor                                   │
+│    KellyCheck / VolTargetCheck / DrawdownCheck /                    │
+│    AccountDrawdownCheck (Phase 0 single-source kill-switch) /       │
+│    CorrelationCheck / RegimeGateCheck /                             │
+│    PnLTracker / Allocator / LiveMonitor                             │
+├─────────────────────────────────────────────────────────────────────┤
+│  NT Adapter   (LiveDataClient + LiveExecutionClient)                │
+├─────────────────────────────────────────────────────────────────────┤
+│  okx_trade SDK   (REST + WS, async, no pandas)                      │
+└─────────────────────────────────────────────────────────────────────┘
 ```
 
 Detailed data flow: see [ARCHITECTURE.md](ARCHITECTURE.md).
@@ -83,28 +91,66 @@ More SDK examples in [`examples/`](examples/).
 
 `src/okx_trade/strategies/` ships strategies as subclasses of `nautilus_trader.trading.strategy.Strategy`. Backtest and live share the same code:
 
-| Strategy | Idea | Cadence | YAML |
+| Strategy | Idea | Cadence | Status |
 |---|---|---|---|
-| `FundingCarryStrategy` | Spot+perp delta-neutral funding rate carry | 8h funding cycle | [funding_carry.yaml](configs/strategies/funding_carry.yaml) |
-| `XSMomentumStrategy` | Cross-sectional momentum, vol-managed, 5 long + 5 short legs | Daily UTC 00:00 rebalance | [xs_momentum.yaml](configs/strategies/xs_momentum.yaml) |
-| `LiqReversalStrategy` | Liquidation cascade reversal (z-score on `liquidation-orders`) | Event-driven | [liq_reversal.yaml](configs/strategies/liq_reversal.yaml) |
-| `BasisArbStrategy` (M5) | Delivery futures vs spot basis arbitrage (spot long + futures short) | Hourly basis check | [basis_arb.yaml](configs/strategies/basis_arb.yaml) |
-| `OBImbalanceStrategy` (M5) | Order-flow microprice + book imbalance microstructure reversion | Sub-second aggregation, minute-scale holding | [ob_imbalance.yaml](configs/strategies/ob_imbalance.yaml) |
+| `FundingCarryStrategy` | Spot+perp delta-neutral funding rate carry | 8h funding cycle | ✅ enabled |
+| `XSMomentumStrategy` | Cross-sectional momentum, vol-managed, 5 long + 5 short legs | Daily UTC 00:00 rebalance | ✅ enabled |
+| `LiqReversalStrategy` | Liquidation cascade reversal (z-score on `liquidation-orders`) | Event-driven | ✅ enabled |
+| `BasisArbStrategy` (M5) | Delivery futures vs spot basis arbitrage | Hourly basis check | ✅ enabled |
+| `OBImbalanceStrategy` (M5) | Order-flow microprice + book imbalance microstructure reversion | Sub-second aggregation | ✅ enabled |
+| `FundingXSStrategy` (M6+) | Funding cross-section long/short with β-hedge | 8h funding cycle | ✅ enabled (5/19) |
+| `FundingSkewStrategy` (M6+) | Funding rate ±2σ reversal | ~30min poll | ✅ enabled (5/19) |
+| `StatArbStrategy` (M6+) | Cointegration pair (BTC-ETH default) spread reversal | Per 1H bar | ✅ enabled (5/19) |
+| `FactorPortfolioStrategy` (P1) | Generic factor synthesizer (z-score + top-K, factor list from yaml) | 4h rebalance, bar-driven | ✅ enabled (5/19) |
+| `OptionVolStrategy` (M6+) | BTC short straddle + perp delta-hedge | Hourly check | ❌ disabled |
+| `MLFusionStrategy` (M6+) | XGBoost meta-model fusing multiple alphas | Every 4h | ❌ disabled |
 
-Retired: `RangeBreakoutStrategy` (M5.X, weak alpha + unstable implementation). See [docs/strategy_roadmap.md](docs/strategy_roadmap.md).
+Two remain disabled: `option_vol_selling` needs `live_node` to dynamically inject `option_ulys` instrument-provider filter; `ml_fusion` needs `pip install xgboost` + a retrain script. See [docs/strategy_roadmap.md](docs/strategy_roadmap.md).
+
+Retired: `RangeBreakoutStrategy` (M5.X, weak alpha + unstable implementation).
+
+### Cold-start elimination: REST warmup
+
+`funding_skew_momentum` / `stat_arb_pairs` / `funding_cross_section` / `factor_portfolio` all spawn an async OKX REST fetch in `on_start` to pre-fill their history buffers, so on VPS restart they're immediately full-functional instead of waiting days-to-weeks for live data to accumulate. Config knobs: `warmup_via_rest: bool` or `warmup_via_rest_days: int`.
+
+### Factor research lab (P1, 2026-05-19)
+
+`okx_trade.research` module: a CLI to evaluate arbitrary candidate factors on IC / IR / decay / turnover / net-PnL, and pipe approved factors directly into `FactorPortfolioStrategy` via yaml:
+
+```bash
+# Fetch data + grade 15 v1 factors
+python -m okx_trade.research fetch --start 2025-11-01 --end 2026-05-15 --universe top30
+python -m okx_trade.research grade-all --start 2025-11-01 --end 2026-05-15 --horizon 1d
+
+# Approve a factor that passes the gate (writes configs/factor_portfolio.yaml)
+python -m okx_trade.research approve --factor basis_z_30d --weight 0.40
+
+# End-to-end portfolio backtest
+python -m okx_trade.research backtest-portfolio --total-bars 2000
+```
+
+Details in [strategy_roadmap.md](docs/strategy_roadmap.md#factor-research-lab-p1-2026-05-19).
 
 ## Risk pipeline
 
-`src/okx_trade/risk/` provides four independent checks chained by `RiskManager`, invoked once before every order:
+`src/okx_trade/risk/` provides independent checks chained by `RiskManager`, invoked once before every order:
 
-| Check | Behavior |
-|---|---|
-| `VolTargetCheck` | Size from N-day realized vol → annualized vol target |
-| `KellyCheck` | f\* = (p×R - q)/R, × 0.25 fractional Kelly (handed off to PnL tracker after first 20 trades) |
-| `DrawdownCheck` | Halts on -3% daily / -8% weekly equity drawdown |
-| `CorrelationCheck` | Rolling 30-day strategy PnL correlation > 0.7 → down-weight |
+| Check | Behavior | Tier |
+|---|---|---|
+| `AccountDrawdownCheck` | OKX `totalEq` -3%/day or -8%/week → halts ALL strategies (kill switch) | **Account (single instance)** |
+| `VolTargetCheck` | Size from N-day realized vol → annualized vol target | Per-strategy |
+| `KellyCheck` | f\* = (p×R - q)/R, × 0.25 fractional Kelly (PnL tracker takes over after first 20 trades) | Per-strategy |
+| `DrawdownCheck` | -3% daily / -8% weekly equity drawdown (per-strategy; Phase 0 not fed, Phase 1 will wire to PnLTracker) | Per-strategy |
+| `CorrelationCheck` | Rolling 30-day strategy PnL correlation > 0.7 → down-weight | Per-strategy |
+| `RegimeGateCheck` | BTC trending / mean_reverting / neutral → scale by `strategy_kind` map | Shared detector |
 
 Each check accepts `RiskIntent(size)` → returns `APPROVE / SCALE / REJECT`. All checks are pure functions / pure state machines, decoupled from NT runtime.
+
+### DD architecture split (Phase 0, 2026-05-20)
+
+- **Account-level `AccountDrawdownTracker`**: a singleton owned by `LiveMonitor`; each alloc_refresh pushes OKX `totalEq` into it
+- **Per-strategy `DrawdownTracker`**: one per strategy, **currently unfed** (Phase 1 will wire it to per-strategy realized PnL from `PnLTracker` for true single-strategy isolation)
+- Any `AccountDrawdownCheck` breach kill-switches every strategy via a single tracker + single alert, eliminating the 27% phantom-breach cascade caused by the prior multi-source feed.
 
 ## PnL tracking + portfolio optimization
 
@@ -146,7 +192,7 @@ Backtest engine is NautilusTrader's `BacktestNode`, data via `ParquetDataCatalog
 # Validate config + universe resolution (no NT engine)
 .venv/bin/python scripts/live.py --check
 
-# Start 4 strategies in parallel (NT TradingNode + monitor)
+# Start 9 strategies in parallel (NT TradingNode + monitor)
 .venv/bin/python scripts/live.py --run
 
 # Generate today's daily report and exit
@@ -154,6 +200,8 @@ Backtest engine is NautilusTrader's `BacktestNode`, data via `ParquetDataCatalog
 ```
 
 VPS deployment: see [deploy/README.md](deploy/README.md), includes systemd unit + healthcheck timer + bootstrap script.
+
+Operations playbook (incident response, diagnostic scripts, cron config): see [docs/operations.md](docs/operations.md).
 
 Pull observation report any time:
 
@@ -173,29 +221,43 @@ src/okx_trade/
 ├── rest/                    # REST client: account / market / public / trade / transport
 ├── ws/                      # WS client: public / private / business (3 connections)
 ├── adapter/                 # NT adapter: data / execution / parsing / instrument_provider / factories
-├── strategies/              # 4 strategies + base + confirmation/OFI + pnl_hook
-├── risk/                    # vol_target / kelly / drawdown / correlation / integration
+├── strategies/              # 10 strategies + base + confirmation/OFI + pnl_hook + _features
+├── research/                # P1 factor research lab: panel/registry/compute/data/grade/store/report/cli + factors/
+├── pricing/                 # Black-Scholes pricer + Greeks (for option_vol_selling)
+├── risk/                    # vol_target / kelly / drawdown (+ Account-level) / correlation / regime / stats / integration
 ├── pnl/                     # tracker / stats / feed
 ├── portfolio/               # equal_weight / risk_budget
 ├── monitor/                 # alerts / live / daily_report
-├── runtime/                 # live_node: assemble yaml + tracker + allocator → NT TradingNode
-└── backtest/                # data_loader / runner
+├── runtime/                 # live_node: yaml + tracker + allocator + account-DD-tracker → NT TradingNode
+└── backtest/                # data_loader / runner / plotting / walk_forward
 
 scripts/
 ├── live.py                  # Paper trading entrypoint (--check / --run / --report-only)
-├── backtest.py              # xs_momentum backtest (other strategies have their own scripts)
+├── backtest.py              # Multi-strategy backtest (--strategy ...)
 ├── backtest_funding_carry.py
+├── backtest_oneyear.py
 ├── backtest_m4_smoke.py
 ├── healthcheck.py           # Invoked by systemd timer
-└── observation_report.sh    # day_7 / day_14 evaluation report
+├── observation_report.sh    # day_7 / day_14 evaluation reports
+├── stat_arb_observe.sh      # stat_arb 24h / lunch snapshot
+├── reconcile_okx_positions.py  # ExecStartPre: reconcile before start
+├── factor_research_smoke.sh # Factor lab end-to-end smoke
+├── diag_account_bills.py    # OKX bills diagnostic (grouped by type/subType)
+└── diag_mtm_swing.py        # Current positions + 1H candles MTM correlation
 
 configs/
-├── live.yaml                # 4-strategy parallel config + risk_defaults + portfolio + monitor
+├── live.yaml                # 9 enabled strategies + risk_defaults + portfolio + monitor + alerts
 ├── risk.yaml                # Risk parameter reference (live.yaml inlines actual values)
+├── factor_portfolio.yaml    # FactorPortfolioStrategy config (5 approved factors)
 └── strategies/*.yaml        # Per-strategy parameters
 
 deploy/                      # VPS systemd deployment (see deploy/README.md)
-tests/unit/                  # 449 unit tests
+docs/
+├── strategy_roadmap.md      # Strategy status + engineering backlog
+├── operations.md            # Operations playbook (incident response, cron, diag scripts)
+└── superpowers/             # Spec / plan docs (P1 factor lab etc.)
+
+tests/unit/                  # 803 unit tests
 tests/integration/           # Skipped by default; run manually with credentials
 ```
 
@@ -235,9 +297,13 @@ Commit conventions: [Conventional Commits](https://www.conventionalcommits.org/)
 - ✅ **M3.6**: NT integration (`RiskAwareStrategy` injects check before `submit_order`)
 - ✅ **M4**: xs_momentum + liq_reversal + OFI confirmation + backtest engine
 - ✅ **M5**: PnL tracker + portfolio optimizer + monitor + alerts + daily report + paper trading runtime
-- 🟡 **M5 observation**: 2026-05-08 → 2026-05-22 paper trading
-- 🔲 **M6**: real-money switch + Telegram alerts + portfolio rebalance scheduler
-- 🔲 **M7**: multi-account / multi-venue routing
+- ✅ **M6+**: 5 mid-/long-term strategies (funding_xs / funding_skew / stat_arb / option_vol / ml_fusion) + regime gate + walk-forward + OPTION adapter
+- ✅ **P1 (2026-05-19)**: factor research lab (15 factors + grade pipeline + `FactorPortfolioStrategy` generic synthesizer)
+- ✅ **Phase 0 DD (2026-05-20)**: `AccountDrawdownTracker` single-source kill-switch + REST warmup eliminating cold-start
+- 🟡 **Observation window**: 2026-05-08 → **2026-05-22 (day_14)** paper trading
+- 🔲 **Phase 1 DD**: per-strategy `DrawdownTracker` wired to PnLTracker realized PnL (true isolation)
+- 🔲 **M7**: real-money switch + Telegram alerts + portfolio rebalance scheduler
+- 🔲 **M8**: multi-account / multi-venue routing / option strategies on / ml_fusion on
 
 Per-milestone detail: see [CHANGELOG.md](CHANGELOG.md).
 
