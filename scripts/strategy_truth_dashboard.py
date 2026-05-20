@@ -93,12 +93,20 @@ def fetch_strategy_stats(
 
     conn.close()
 
-    # Compose
+    # Compose. 关键修正 (2026-05-20):
+    # "true_pnl" 必须用 realized + fee。balChg sum 是错的——spot 买入会减
+    # USDT 但 BTC 资产还在账户（被 totalEq collateral 算进去），那不是损失。
+    # spot_holding_value = balChg - true_pnl ≈ 还在仓里没卖的 BTC 价值。
     by_strategy: dict[str, dict] = {}
     for sid, base in by_strategy_raw.items():
         days = daily_by_sid.get(sid, [])
         bals = [d[1] for d in days]
-        # Compute drawdown from cumulative daily balChg
+        true_pnl = base["realized"] + base["fee"]
+        spot_holding_value = base["balchg"] - true_pnl
+        # Drawdown from cumulative daily TRUE PnL (not balChg)
+        # NOTE: we use balChg-based daily for now since per-day realized
+        # decomp would require a separate aggregation pass; max_dd here
+        # over-estimates for spot-heavy strategies.
         cumsum = 0.0
         peak = 0.0
         max_dd = 0.0
@@ -107,9 +115,11 @@ def fetch_strategy_stats(
             peak = max(peak, cumsum)
             max_dd = min(max_dd, cumsum - peak)
         winning_days = sum(1 for b in bals if b > 0)
-        avg_per_fill = base["balchg"] / base["fills"] if base["fills"] > 0 else 0
+        avg_per_fill = true_pnl / base["fills"] if base["fills"] > 0 else 0
         by_strategy[sid] = {
             **base,
+            "true_pnl": round(true_pnl, 2),
+            "spot_holding_value": round(spot_holding_value, 2),
             "days_active": len(days),
             "winning_days": winning_days,
             "max_dd": round(max_dd, 4),
@@ -143,32 +153,44 @@ def render_markdown(data: dict, *, window_label: str) -> str:
                  "对比 ``trades`` (策略估算)：见 ``pnl_reconciliation_*.jsonl``。")
     lines.append("")
 
+    # 总真实 PnL = sum of realized + fee
+    total_true_pnl = totals["realized"] + totals["fee"]
+    total_spot_holding = totals["balchg"] - total_true_pnl
+
     # ---- TL;DR ----
     lines.append("## TL;DR")
     lines.append(f"- 总 fills: **{totals['fills']:,}**")
-    lines.append(f"- 总账户 balChg: **${totals['balchg']:+,.2f}** (USDT cash)")
-    lines.append(f"- 总实现 PnL (OKX 'pnl' 字段): ${totals['realized']:+,.2f}")
+    lines.append(f"- **真实账户损益（realized + fee）: ${total_true_pnl:+,.2f}** ← 你要看的就是这个")
+    lines.append(f"- 还在仓里的 spot 资产价值（balChg - true_pnl）: ${total_spot_holding:+,.2f}")
+    lines.append(f"  - 这部分在 totalEq 的非 USDT collateral 里，不是损失")
+    lines.append(f"- 总 USDT 现金流 balChg: ${totals['balchg']:+,.2f}（含 5/15 paper 注资 +$75k）")
+    lines.append(f"- 总 realized PnL: ${totals['realized']:+,.2f}")
     lines.append(f"- 总 fee: ${totals['fee']:+,.2f}")
     lines.append("")
 
     # ---- Strategy rank ----
-    lines.append("## Per-strategy rank (按 net balChg 升序，最亏的在前)")
+    lines.append("## Per-strategy rank (按 真实损益 true_pnl 升序，最亏在前)")
     lines.append("")
-    lines.append(f"| 策略 | 真实 net balChg | fills | avg/fill | realized | fee | days active | winning days | max DD |")
+    lines.append(f"| 策略 | **真实损益** | spot 持仓 | fills | avg/fill | realized | fee | balChg (≠损益) | days |")
     lines.append(f"|---|---:|---:|---:|---:|---:|---:|---:|---:|")
-    ranked = sorted(by_strategy.items(), key=lambda kv: kv[1]["balchg"])
+    ranked = sorted(by_strategy.items(), key=lambda kv: kv[1]["true_pnl"])
     for sid, r in ranked:
         lines.append(
             f"| **{sid}** | "
-            f"${r['balchg']:+,.2f} | "
+            f"**${r['true_pnl']:+,.2f}** | "
+            f"${r['spot_holding_value']:+,.2f} | "
             f"{r['fills']:,} | "
-            f"${r['avg_per_fill_usdt']:+.3f} | "
+            f"${r['avg_per_fill_usdt']:+.4f} | "
             f"${r['realized']:+,.2f} | "
             f"${r['fee']:+,.2f} | "
-            f"{r['days_active']} | "
-            f"{r['winning_days']} | "
-            f"${r['max_dd']:+,.2f} |"
+            f"${r['balchg']:+,.2f} | "
+            f"{r['days_active']} |"
         )
+    lines.append("")
+    lines.append("**关键解读**：")
+    lines.append("- `真实损益 = realized + fee`：OKX 已实现盈亏 + 手续费，这才是账户层面真的赚/亏")
+    lines.append("- `spot 持仓 = balChg - true_pnl`：strategy 还持有的 BTC/ETH spot 现货价值，**不是损失**")
+    lines.append("- `balChg` 单纯 sum 会把【买入 spot 还在仓】误算成【亏损】——这是 2026-05-20 早先的错误")
     lines.append("")
 
     # ---- Daily account total timeline ----
@@ -183,11 +205,11 @@ def render_markdown(data: dict, *, window_label: str) -> str:
         lines.append(f"| {day} | {fills:,} | ${bal:+,.2f}{marker} | ${cum:+,.2f} |")
     lines.append("")
 
-    # ---- Per-strategy daily detail (only flag biggest losers) ----
+    # ---- Per-strategy daily detail (only flag biggest losers by TRUE pnl) ----
     losers = [sid for sid, r in by_strategy.items()
-              if r["balchg"] < -100 and sid != "<unmapped>"]
+              if r["true_pnl"] < -100 and sid != "<unmapped>"]
     if losers:
-        lines.append("## 重点关注 (losing > $100)")
+        lines.append("## 重点关注 (真实损益 > -$100)")
         for sid in losers:
             r = by_strategy[sid]
             lines.append(f"\n### `{sid}`  (net **${r['balchg']:+,.2f}** USDT)")
@@ -202,20 +224,21 @@ def render_markdown(data: dict, *, window_label: str) -> str:
     # ---- Decision verdict ----
     lines.append("## Strategy verdict")
     lines.append("")
-    lines.append("基于真实账户数据的状态判定（仅基于此窗口，不构成永久结论）：")
+    lines.append("基于真实损益（realized + fee）的状态判定（不构成永久结论）：")
     lines.append("")
     lines.append("| 策略 | 状态 | 建议 |")
     lines.append("|---|---|---|")
     for sid, r in ranked:
         if sid == "<unmapped>":
             continue
-        if r["balchg"] < -1000:
+        # 改用 true_pnl 判定
+        if r["true_pnl"] < -1000:
             status = "🔴 大额亏损"
             advice = "立即评估是否 disable / 改阈值"
-        elif r["balchg"] < -100:
+        elif r["true_pnl"] < -100:
             status = "🟡 持续亏损"
             advice = "查参数 / 检查 fee 占 alpha 比例"
-        elif r["balchg"] < 0:
+        elif r["true_pnl"] < 0:
             status = "🟠 小额亏损"
             advice = "继续观察"
         else:

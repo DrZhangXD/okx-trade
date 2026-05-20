@@ -31,13 +31,16 @@ strategies:
   # - ob_imbalance：订阅 books5 WS，秒级聚合，30s 滚动 imbalance；信号触发后
   #   target 30s–5min 持仓，单笔 risk_pct=0.3%。
   basis_arb:
-    # 2026-05-20 DISABLE：5/19 单日真实账户 -$7,297 USDT (41 OKX fills)。
-    # 流水分析（scripts/strategy_truth_dashboard.py / pnl_reconciliation_*.jsonl）：
-    # 出现 sub_type=6 (futures 短仓强平) + 大量 spot 端子单。说明 futures 短腿
-    # margin 不够被独立强平 → hedge 破裂 → spot 单边裸 long → 价格反向时再亏。
-    # 这是 margin 配置问题（spot 现金账户 vs futures cross margin 隔离不当），
-    # 不是阈值或 alpha 问题。立即 disable，等修复 margin 隔离方案再重启。
-    enabled: false
+    # 2026-05-19 修复后重启：execution.resolve_td_mode 加 FUTURES 分支
+    # （3 段 + 末段全 6 位数字识别为 FUTURES，td_mode=cross，发 posSide）。
+    # OKX paper posMode 已确认为 long_short_mode，跟 yaml 对齐。
+    #
+    # 2026-05-20 update: 早先用 balChg sum (-$7,340) 误判为大亏，差点 disable。
+    # OKX 真实 realized + fee = +$734（盈利！）。balChg 大负是因为还持有 BTC
+    # spot 仓（$8k 价值在 totalEq 的非 USDT collateral 里）。5/19 sub_type=6
+    # futures 短仓强平事件存在但实际只亏 ~$23（很小），不是 -$7,297。保留 enabled。
+    # 仍然 roadmap todo #8：futures 端独立强平是真实风险，长期需做 margin 隔离。
+    enabled: true
     config: configs/strategies/basis_arb.yaml
   ob_imbalance:
     # 2026-05-19 修复后重启（5/18 死亡螺旋后第一天）：
