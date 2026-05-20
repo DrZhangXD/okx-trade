@@ -230,8 +230,6 @@ if _NT_AVAILABLE:
                 equity_usdt = None
             if equity_usdt is not None:
                 now_ms = int(time.time() * 1000)
-                if handles.drawdown_tracker is not None:
-                    handles.drawdown_tracker.record_equity(ts_ms=now_ms, equity=equity_usdt)
                 self._last_equity_day = record_strategy_equity_daily(
                     self._pnl_tracker,
                     strategy_id=str(self.id),

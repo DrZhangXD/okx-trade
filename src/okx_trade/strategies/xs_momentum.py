@@ -428,8 +428,6 @@ if _NT_AVAILABLE:
             if equity_usdt is not None:
                 # equity 用 wall-clock：snap.ts 是 bar 收线时间，对 1D bar 可能在未来。
                 now_ms = int(time.time() * 1000)
-                if handles.drawdown_tracker is not None:
-                    handles.drawdown_tracker.record_equity(ts_ms=now_ms, equity=equity_usdt)
                 # M5: 每个 UTC 日写一条 equity snapshot 给 PnL tracker
                 self._last_equity_day = record_strategy_equity_daily(
                     self._pnl_tracker,
