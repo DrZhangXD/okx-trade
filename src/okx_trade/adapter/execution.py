@@ -143,12 +143,41 @@ def _build_account_balances(balance: Balance) -> list[AccountBalance]:
     return out
 
 
-def resolve_td_mode(inst_id: str, default_mode: TdMode) -> TdMode:
+def parse_td_mode_tag(tags: list[str] | tuple[str, ...] | None) -> TdMode | None:
+    """从 NT order tags 解析 ``"td_mode:isolated"`` / ``"td_mode:cross"``。
+
+    用于 per-strategy td_mode override：策略 yaml 配 ``td_mode_override: isolated``
+    后，策略层在构造 order 时附带 ``tags=["td_mode:isolated"]``，adapter 用此
+    helper 解析覆盖全局默认。
+
+    Returns:
+        - ``TdMode`` if a valid tag is present
+        - ``None`` if no tag or unrecognized value
+    """
+    if not tags:
+        return None
+    for t in tags:
+        if not isinstance(t, str) or not t.startswith("td_mode:"):
+            continue
+        val = t.split(":", 1)[1].strip()
+        try:
+            return TdMode(val)
+        except ValueError:
+            return None
+    return None
+
+
+def resolve_td_mode(
+    inst_id: str,
+    default_mode: TdMode,
+    *,
+    tag_override: TdMode | None = None,
+) -> TdMode:
     """按 instrument 类型自动选 trade mode。
 
     - **现货**（``BTC-USDT`` / ``ETH-USDT`` 等）→ ``cash``：OKX 现货账户必须用 cash，
       否则报 51005；
-    - **永续 / 交割 / 期权** → ``default_mode``（一般 ``cross`` 或 ``isolated``）。
+    - **永续 / 交割 / 期权** → ``tag_override`` if set, else ``default_mode``。
 
     判断启发式（按 OKX instId 命名规则）：
       - ``BTC-USDT-SWAP``        → SWAP（permanent suffix）
@@ -160,18 +189,23 @@ def resolve_td_mode(inst_id: str, default_mode: TdMode) -> TdMode:
     posSide=None → OKX 51000 'Parameter posSide error'（2026-05-19 basis_arb
     入场被拒的根因）。
 
+    2026-05-20 add: ``tag_override`` for per-strategy td_mode override on
+    derivative instruments. SPOT always uses CASH (OKX hard constraint),
+    override ignored for SPOT — caller can pass tag freely without worrying.
+
     模块级纯函数：便于单测，不依赖 LiveExecutionClient 实例。
     """
+    effective_default = tag_override if tag_override is not None else default_mode
     if inst_id.endswith("-SWAP"):
-        return default_mode
+        return effective_default
     if inst_id.endswith("-C") or inst_id.endswith("-P"):
         # OPTION
-        return default_mode
+        return effective_default
     parts = inst_id.split("-")
     # FUTURES：3 段，末段全数字（YYMMDD）
     if len(parts) == 3 and parts[-1].isdigit() and len(parts[-1]) == 6:
-        return default_mode
-    # 其余按现货
+        return effective_default
+    # 其余按现货 — SPOT 必须 CASH，override 失效
     return TdMode.CASH
 
 
@@ -330,7 +364,12 @@ class OKXLiveExecutionClient(LiveExecutionClient):
         inst_id = from_instrument_id(order.instrument_id)
         side = order_side_to_okx(order.side)
         ord_type = order_type_and_tif_to_okx(order.order_type, order.time_in_force)
-        td_mode = resolve_td_mode(inst_id, self._td_mode)
+        # Per-strategy td_mode override via NT order tags ("td_mode:isolated"
+        # / "td_mode:cross"). Currently used by basis_arb futures leg to
+        # isolate margin so a hedge break (5/19 sub_type=6) can't bleed
+        # into the spot leg. SPOT always stays CASH (OKX constraint).
+        tag_override = parse_td_mode_tag(getattr(order, "tags", None))
+        td_mode = resolve_td_mode(inst_id, self._td_mode, tag_override=tag_override)
 
         # 提交前 min-lot 防线：低于 instrument.min_quantity 直接 raise，避免浪费
         # OKX 配额（每条都会被 sCode=51020 拒）+ 污染 monitor reject_per_hour 计数。

@@ -11,6 +11,7 @@ import pytest
 
 from okx_trade.adapter.execution import (
     _build_account_balances,
+    parse_td_mode_tag,
     resolve_pos_side,
     resolve_td_mode,
 )
@@ -52,6 +53,75 @@ class TestResolveTdMode:
             pos_side_mode="long_short", td_mode=td_mode,
         )
         assert ps == PosSide.SHORT
+
+
+class TestParseTdModeTag:
+    """Per-strategy td_mode override via NT order tags (2026-05-20)."""
+
+    def test_returns_isolated_for_isolated_tag(self) -> None:
+        assert parse_td_mode_tag(["td_mode:isolated"]) == TdMode.ISOLATED
+
+    def test_returns_cross_for_cross_tag(self) -> None:
+        assert parse_td_mode_tag(["td_mode:cross"]) == TdMode.CROSS
+
+    def test_returns_cash_for_cash_tag(self) -> None:
+        assert parse_td_mode_tag(["td_mode:cash"]) == TdMode.CASH
+
+    def test_none_for_empty_or_missing(self) -> None:
+        assert parse_td_mode_tag(None) is None
+        assert parse_td_mode_tag([]) is None
+        assert parse_td_mode_tag(()) is None
+
+    def test_none_for_unrelated_tags(self) -> None:
+        assert parse_td_mode_tag(["risk_pct:0.5", "exec:taker"]) is None
+
+    def test_none_for_invalid_value(self) -> None:
+        assert parse_td_mode_tag(["td_mode:bogus"]) is None
+        assert parse_td_mode_tag(["td_mode:"]) is None
+
+    def test_tuple_works_same_as_list(self) -> None:
+        """NT Order.tags can be tuple or list."""
+        assert parse_td_mode_tag(("td_mode:isolated",)) == TdMode.ISOLATED
+
+    def test_finds_among_multiple_tags(self) -> None:
+        tags = ["strategy:basis_arb", "td_mode:isolated", "ts:1234"]
+        assert parse_td_mode_tag(tags) == TdMode.ISOLATED
+
+
+class TestResolveTdModeOverride:
+    """resolve_td_mode honors tag_override on derivative instruments only."""
+
+    def test_swap_uses_override_when_set(self) -> None:
+        result = resolve_td_mode(
+            "BTC-USDT-SWAP", TdMode.CROSS, tag_override=TdMode.ISOLATED,
+        )
+        assert result == TdMode.ISOLATED
+
+    def test_futures_uses_override(self) -> None:
+        result = resolve_td_mode(
+            "BTC-USDT-260626", TdMode.CROSS, tag_override=TdMode.ISOLATED,
+        )
+        assert result == TdMode.ISOLATED
+
+    def test_option_uses_override(self) -> None:
+        result = resolve_td_mode(
+            "BTC-USD-260626-100000-C", TdMode.CROSS, tag_override=TdMode.ISOLATED,
+        )
+        assert result == TdMode.ISOLATED
+
+    def test_spot_ignores_override(self) -> None:
+        """SPOT must always be CASH per OKX; tag override is ignored without
+        raising so the caller (strategy) can apply tag uniformly to all legs
+        without branching on inst type."""
+        result = resolve_td_mode(
+            "BTC-USDT", TdMode.CROSS, tag_override=TdMode.ISOLATED,
+        )
+        assert result == TdMode.CASH
+
+    def test_no_override_falls_back_to_default(self) -> None:
+        """tag_override=None ⇒ behavior identical to original two-arg form."""
+        assert resolve_td_mode("BTC-USDT-SWAP", TdMode.CROSS, tag_override=None) == TdMode.CROSS
+        assert resolve_td_mode("BTC-USDT-SWAP", TdMode.CROSS) == TdMode.CROSS
 
 
 class TestResolvePosSide:

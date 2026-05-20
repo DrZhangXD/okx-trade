@@ -120,6 +120,13 @@ if _NT_AVAILABLE:
         check_interval_sec: int = 3600
         account_equity_usdt: float = 10000.0
         risk_config: RiskConfig | None = None
+        # Per-strategy td_mode override (futures leg only; SPOT always CASH).
+        # 2026-05-20: default "isolated" so the futures short leg has its own
+        # margin pool — if it gets liquidated (5/19 sub_type=6 incident), the
+        # loss is capped at the isolated margin, the spot long leg's USDT
+        # collateral is untouched, and no other strategy's margin is bled.
+        # Set to "cross" to revert to account-wide pooling.
+        td_mode_override: str = "isolated"
 
 
     class BasisArbStrategy(Strategy):  # type: ignore[misc]
@@ -156,6 +163,12 @@ if _NT_AVAILABLE:
             self._check_task: asyncio.Task | None = None
             self._rest = None  # type: ignore[var-annotated]
             self._rest_settings = None  # type: ignore[var-annotated]
+            # Futures leg td_mode override tag (consumed by OKX adapter).
+            # SPOT leg ignores it (OKX forces CASH); tag is harmless there.
+            self._futures_tags: list[str] | None = (
+                [f"td_mode:{config.td_mode_override}"]
+                if config.td_mode_override else None
+            )
 
             self._risk_manager, self._risk_handles = build_risk_manager(config.risk_config)
             self._prev_spot_close: float | None = None
@@ -328,6 +341,7 @@ if _NT_AVAILABLE:
                 order_side=OrderSide.SELL,
                 quantity=futures_qty_obj,
                 time_in_force=TimeInForce.IOC,
+                tags=self._futures_tags,
             )
             self.submit_order(spot_order)
             self.submit_order(futures_order)
@@ -378,6 +392,7 @@ if _NT_AVAILABLE:
                 quantity=futures_qty_obj,
                 time_in_force=TimeInForce.IOC,
                 reduce_only=True,
+                tags=self._futures_tags,
             )
             self.submit_order(spot_close)
             self.submit_order(futures_close)

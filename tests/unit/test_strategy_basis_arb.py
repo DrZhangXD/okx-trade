@@ -99,3 +99,40 @@ def test_strategy_registry_includes_basis_arb() -> None:
     cfg_cls, strat_cls = registry["basis_arb"]
     assert cfg_cls.__name__ == "BasisArbConfig"
     assert strat_cls.__name__ == "BasisArbStrategy"
+
+
+def test_basis_arb_config_defaults_to_isolated_td_mode_override() -> None:
+    """5/19 sub_type=6 incident motivated isolating the futures leg's
+    margin. Default config now ships td_mode_override='isolated' so each
+    new deploy gets the safety regardless of yaml drift."""
+    from okx_trade.strategies.basis_arb import BasisArbConfig
+    cfg = BasisArbConfig(
+        spot_instrument_id="BTC-USDT.OKX",
+        futures_instrument_id="BTC-USDT-260626.OKX",
+        spot_bar_type="BTC-USDT.OKX-1-HOUR-LAST-EXTERNAL",
+    )
+    assert cfg.td_mode_override == "isolated"
+
+
+def test_basis_arb_strategy_builds_futures_tag_from_config() -> None:
+    """Strategy.__init__ should compose self._futures_tags = ['td_mode:<value>']
+    from config.td_mode_override; empty string ⇒ no tag (uses adapter default)."""
+    from okx_trade.strategies.basis_arb import BasisArbConfig, BasisArbStrategy
+    cfg = BasisArbConfig(
+        spot_instrument_id="BTC-USDT.OKX",
+        futures_instrument_id="BTC-USDT-260626.OKX",
+        spot_bar_type="BTC-USDT.OKX-1-HOUR-LAST-EXTERNAL",
+        td_mode_override="isolated",
+    )
+    strat = BasisArbStrategy(cfg)
+    assert strat._futures_tags == ["td_mode:isolated"]
+
+    # opt-out: empty string → no tag (uses adapter global default)
+    cfg_off = BasisArbConfig(
+        spot_instrument_id="BTC-USDT.OKX",
+        futures_instrument_id="BTC-USDT-260626.OKX",
+        spot_bar_type="BTC-USDT.OKX-1-HOUR-LAST-EXTERNAL",
+        td_mode_override="",
+    )
+    strat_off = BasisArbStrategy(cfg_off)
+    assert strat_off._futures_tags is None
