@@ -44,6 +44,7 @@ class TestStatArbConfig:
         assert cfg.spread_z_stop == 3.5
         assert cfg.risk_pct == 0.003
         assert cfg.lookback_bars == 1440
+        assert cfg.warmup_via_rest is True
 
     def test_z_ordering(self) -> None:
         """exit < entry < stop 是必须的逻辑约束。"""

@@ -292,6 +292,16 @@ def build_live_context(
         else:
             regime_detector = RuleBasedRegimeDetector()
 
+    # 2026-05-20 DD architecture Phase 0: single AccountDrawdownTracker shared
+    # across all strategies. Monitor pushes totalEq to it; AccountDrawdownCheck
+    # is injected into every strategy's risk pipeline → any breach = kill switch
+    # for all. Thresholds come from risk_defaults (same as per-strategy DD).
+    from ..risk.drawdown import AccountDrawdownTracker
+    account_drawdown_tracker = AccountDrawdownTracker(
+        daily_threshold_pct=float(risk_defaults.get("drawdown_daily_pct", 0.03)),
+        weekly_threshold_pct=float(risk_defaults.get("drawdown_weekly_pct", 0.08)),
+    )
+
     if build_node:
         node = _build_trading_node(live_cfg)
         registry = _strategy_registry()
@@ -305,13 +315,20 @@ def build_live_context(
             cfg = cfg_cls(**kwargs)
             strategy = strat_cls(cfg)
             strategy._pnl_tracker = tracker
-            # 重建 risk manager，注入 regime detector（如果该策略启用 gate）
-            if regime_detector is not None and cfg.risk_config is not None \
-                    and cfg.risk_config.enable_regime_gate:
-                from ..risk.integration import build_risk_manager as _build_rm
-                new_mgr, new_handles = _build_rm(cfg.risk_config, regime_detector=regime_detector)
-                strategy._risk_manager = new_mgr
-                strategy._risk_handles = new_handles
+            # 重建 risk manager,无条件注入 account_drawdown_tracker (单源 kill-switch),
+            # 如该策略启用 regime_gate 也一并注入 regime_detector。
+            from ..risk.integration import build_risk_manager as _build_rm
+            inject_regime = (
+                regime_detector is not None and cfg.risk_config is not None
+                and cfg.risk_config.enable_regime_gate
+            )
+            new_mgr, new_handles = _build_rm(
+                cfg.risk_config,
+                regime_detector=regime_detector if inject_regime else None,
+                account_drawdown_tracker=account_drawdown_tracker,
+            )
+            strategy._risk_manager = new_mgr
+            strategy._risk_handles = new_handles
             node.trader.add_strategy(strategy)
             strategies[name] = strategy
             handles_map[name] = strategy._risk_handles
@@ -344,6 +361,7 @@ def build_live_context(
         pnl_tracker=tracker,
         alloc_interval_s=int(monitor_cfg.get("alloc_interval_s", 3600)),
         regime_detector=regime_detector,
+        account_drawdown_tracker=account_drawdown_tracker,
         regime_inst_id=(live_cfg.get("regime", {}) or {}).get("inst_id", "BTC-USDT-SWAP"),
         regime_refresh_interval_s=int(
             (live_cfg.get("regime", {}) or {}).get("refresh_interval_s", 86400)

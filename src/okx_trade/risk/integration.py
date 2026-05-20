@@ -26,7 +26,7 @@ from typing import TYPE_CHECKING, Any
 
 from .base import RiskAction, RiskCheck, RiskIntent, RiskManager
 from .correlation import CorrelationCheck
-from .drawdown import DrawdownCheck, DrawdownTracker
+from .drawdown import AccountDrawdownCheck, AccountDrawdownTracker, DrawdownCheck, DrawdownTracker
 from .kelly import KellyCheck
 from .regime import RegimeDetectorProtocol, RegimeGateCheck, StrategyKind
 from .vol_target import VolTargetCheck
@@ -90,12 +90,16 @@ class RiskHandles:
     # regime detector 由调用方传入（``live_node`` 单例 + 注入），所有启用
     # regime gate 的策略共享同一引用
     regime_detector: RegimeDetectorProtocol | None = None
+    # account-level DD tracker 单例 (共享):由 ``LiveMonitor`` 持有,通过
+    # ``build_risk_manager`` 的 ``account_drawdown_tracker`` 参数注入。
+    account_drawdown_tracker: AccountDrawdownTracker | None = None
 
 
 def build_risk_manager(
     config: RiskConfig | None,
     *,
     regime_detector: RegimeDetectorProtocol | None = None,
+    account_drawdown_tracker: AccountDrawdownTracker | None = None,
 ) -> tuple[RiskManager | None, RiskHandles]:
     """根据 config 构造 ``RiskManager`` + handles。
 
@@ -104,16 +108,34 @@ def build_risk_manager(
         regime_detector: 可选 ``RegimeDetector`` 实例。当 ``config.enable_regime_gate``
             为 True 且 detector 非空时，追加 ``RegimeGateCheck`` 到 pipeline。多个
             策略应共享同一 detector 实例（``live_node`` 启动时构造）。
+        account_drawdown_tracker: 可选共享 ``AccountDrawdownTracker`` 单例。非 None
+            时,前置 ``AccountDrawdownCheck`` 到 pipeline (优先级最高);该 tracker
+            的状态由 ``LiveMonitor`` 统一推送 OKX totalEq 更新,任一策略命中后
+            所有策略都被 kill-switch。即使 ``config is None`` 也会注入。
 
     Returns:
         ``(manager, handles)``。``manager`` 在所有 check 都关闭时也是 None
         （省一次 pipeline 调用）。
     """
     if config is None:
+        if account_drawdown_tracker is not None:
+            handles = RiskHandles(
+                regime_detector=regime_detector,
+                account_drawdown_tracker=account_drawdown_tracker,
+            )
+            return (
+                RiskManager(checks=[AccountDrawdownCheck(account_drawdown_tracker)]),
+                handles,
+            )
         return None, RiskHandles(regime_detector=regime_detector)
 
     checks: list[RiskCheck] = []
     handles_kwargs: dict[str, Any] = {}
+
+    # Account-level kill-switch goes first so it short-circuits the rest.
+    if account_drawdown_tracker is not None:
+        checks.append(AccountDrawdownCheck(account_drawdown_tracker))
+        handles_kwargs["account_drawdown_tracker"] = account_drawdown_tracker
 
     if config.enable_vol_target:
         vt = VolTargetCheck(

@@ -6,6 +6,8 @@ import math
 import pytest
 
 from okx_trade.risk import (
+    AccountDrawdownCheck,
+    AccountDrawdownTracker,
     CorrelationCheck,
     DrawdownCheck,
     DrawdownState,
@@ -217,6 +219,47 @@ class TestDrawdownCheck:
         result = check.check(_intent())
         assert result.action == RiskAction.REJECT
         assert "DD" in result.reason
+
+
+class TestAccountDrawdown:
+    """Account-level kill-switch tracker (Phase 0 of DD architecture split).
+
+    Same state-machine semantics as DrawdownTracker; distinct class identity
+    + check name lets ops disambiguate "single strategy DD" vs "all-strategy
+    account kill-switch" in alerts and risk-reject logs.
+    """
+
+    def test_inherits_drawdown_semantics(self) -> None:
+        t = AccountDrawdownTracker(daily_threshold_pct=0.03, weekly_threshold_pct=0.08)
+        t.record_equity(1_700_000_000_000, 100_000)
+        t.record_equity(1_700_001_000_000, 96_500)  # -3.5%
+        assert t.state == DrawdownState.DAILY_BREACH
+
+    def test_check_reject_message_says_account(self) -> None:
+        t = AccountDrawdownTracker(daily_threshold_pct=0.03)
+        t.record_equity(1_700_000_000_000, 100_000)
+        t.record_equity(1_700_001_000_000, 95_000)  # -5%
+        result = AccountDrawdownCheck(t).check(_intent())
+        assert result.action == RiskAction.REJECT
+        assert result.check_name == "account_drawdown"
+        assert "account" in result.reason.lower()
+
+    def test_shared_tracker_rejects_all_strategies(self) -> None:
+        """Same tracker injected into N strategies' pipelines → one breach
+        kill-switches all (replaces the pre-Phase-0 per-strategy cascade)."""
+        t = AccountDrawdownTracker(daily_threshold_pct=0.03)
+        t.record_equity(1_700_000_000_000, 100_000)
+        t.record_equity(1_700_001_000_000, 95_000)  # account-wide -5%
+        check = AccountDrawdownCheck(t)
+        for sid in ("strat_a", "strat_b", "strat_c"):
+            r = check.check(_intent(strategy_id=sid))
+            assert r.action == RiskAction.REJECT, f"{sid} should be killed"
+
+    def test_normal_state_approves(self) -> None:
+        t = AccountDrawdownTracker(daily_threshold_pct=0.03)
+        t.record_equity(1_700_000_000_000, 100_000)
+        t.record_equity(1_700_001_000_000, 99_000)  # -1%
+        assert AccountDrawdownCheck(t).check(_intent()).action == RiskAction.APPROVE
 
 
 # ============================================================================

@@ -5,7 +5,9 @@
 from __future__ import annotations
 
 from okx_trade.risk import (
+    AccountDrawdownTracker,
     DrawdownState,
+    RiskAction,
     RiskCheckResult,
     RiskConfig,
     RiskHandles,
@@ -107,6 +109,41 @@ class TestBuildRiskManager:
         assert handles.kelly.win_rate == 0.6
         assert handles.kelly.avg_r == 2.0
         assert handles.kelly.fraction == 0.5
+
+    def test_account_drawdown_tracker_injected_with_none_config(self) -> None:
+        """No per-strategy RiskConfig but account tracker still wired ⇒
+        a single-check pipeline whose only gate is the kill-switch."""
+        tracker = AccountDrawdownTracker()
+        mgr, handles = build_risk_manager(None, account_drawdown_tracker=tracker)
+        assert mgr is not None
+        assert len(mgr.checks) == 1
+        assert mgr.checks[0].name == "account_drawdown"
+        assert handles.account_drawdown_tracker is tracker
+
+    def test_account_drawdown_tracker_prepends_check(self) -> None:
+        """When per-strategy checks AND account tracker are set, account
+        check goes first so a breach short-circuits before any kelly/vol
+        compute that might log noise."""
+        tracker = AccountDrawdownTracker()
+        mgr, handles = build_risk_manager(
+            RiskConfig(enable_kelly=True, enable_drawdown=True),
+            account_drawdown_tracker=tracker,
+        )
+        assert mgr is not None
+        assert mgr.checks[0].name == "account_drawdown"
+        assert handles.account_drawdown_tracker is tracker
+        assert handles.kelly is not None
+        assert handles.drawdown_tracker is not None
+
+    def test_account_drawdown_kill_switch_rejects(self) -> None:
+        tracker = AccountDrawdownTracker(daily_threshold_pct=0.03)
+        tracker.record_equity(1_700_000_000_000, 100_000)
+        tracker.record_equity(1_700_001_000_000, 95_000)  # -5%
+        mgr, _ = build_risk_manager(None, account_drawdown_tracker=tracker)
+        assert mgr is not None
+        result = mgr.check_all(_intent(size=10.0))
+        assert result.action == RiskAction.REJECT
+        assert result.check_name == "account_drawdown"
 
 
 # ---------------------------------------------------------------------------

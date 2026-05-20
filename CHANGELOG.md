@@ -8,6 +8,16 @@
 
 ## [Unreleased] — Paper trading 观察期
 
+### Added (P1 — 因子研究实验室 + FactorPortfolioStrategy, 2026-05-19)
+
+- **`feat(rest)`** — `public.get_open_interest` / `get_open_interest_history` / `get_open_interest_history_extended`：OI 当前快照 + 历史回放 + 分页扩展。`models.OpenInterest` / `OpenInterestPoint` 解析。
+- **`feat(research)`** — 新增 `src/okx_trade/research/` 模块：`FactorPanel` dataclass（多 inst 多频特征容器）、`@register_factor` 装饰器、`compute_factor` 单因子求值、`grade_factor` (IC/IR/decay/turnover/net-PnL)、`walk_forward_grade` (OOS 滚窗)、`fetch_panel` parquet 缓存、`FactorStore` sqlite 元数据 + grade 历史、markdown report 渲染器。
+- **`feat(research/factors)`** — 15 个 v1 因子分 5 类：momentum (`momentum_1d_reversal` / `momentum_3d` / `momentum_7d` / `momentum_risk_adj_7d`)、funding/OI (`funding_current` / `funding_z_30d` / `oi_change_1d` / `oi_to_volume_ratio`)、basis (`basis_apr` / `basis_z_30d`)、volatility (`rv_pct_365d` / `rv_skew_up_down` / `vol_of_vol_30d`)、flow (`spread_avg_1d` / `taker_buy_ratio_1d`)。
+- **`feat(research/cli)`** — `python -m okx_trade.research <list|fetch|eval|approve|reject|backtest-portfolio|report|grade-all|wf-grade|corr-matrix>`。online 子命令直连 OKX REST + parquet 缓存到 `var/factor_research/`。
+- **`feat(strategies)`** — `FactorPortfolioStrategy`（generic factor synthesizer，z-score + top-K 多空 + 4h rebalance）。`--warmup-days` 从 panel 缓存预填 buffer 避免 30 天冷启动。spot bar 订阅 + REST polling 让 basis/funding/OI 因子在 live 模式实时可用。
+- **`config`** — `configs/factor_portfolio.yaml`：5 个 approved 因子（basis_z_30d 0.40 / basis_apr 0.30 / momentum_1d_reversal 0.20 / funding_z_30d 0.10 / funding_current 0.05），10 个 USDT-perp universe，2026-05-19 paper trading 启用。
+- **`docs`** — `docs/superpowers/specs/2026-05-19-factor-research-lab-design.md` (545 行设计) + `docs/superpowers/plans/2026-05-19-factor-research-lab.md` (4128 行 / 21 TDD task)。
+
 ### Added (M6+ — 中长期策略一次性交付)
 
 - **`feat(pricing)`** — 新增 `src/okx_trade/pricing/options.py`：纯 Python Black-Scholes pricer + Greeks（delta/gamma/vega/theta）+ implied vol Newton-Raphson + vol_premium。
@@ -26,6 +36,14 @@
 - **`pyproject`** — 新增 optional deps：`[stat-arb]` (statsmodels)、`[ml-fusion]` (xgboost)。
 
 5 个 M6+ 策略默认 `enabled: false`，需要逐个 paper 验证后开启。
+
+### Fixed (2026-05-20 — DD architecture + stat_arb warmup)
+
+- **`fix(monitor)`** — `_build_okx_equity_provider` 改读 `Balance.total_eq`（整账户净值，所有币种 + 未实现 PnL）而非 `USDT.avail_eq`（USDT 单币扣保证金后可用）。后者在开仓冻结保证金时瞬间下降，让 DD tracker 把"margin freeze"误判为"权益下跌"。2026-05-20 00:00 UTC FundingXS 整点 rebalance 开 6 仓 ~$46k notional 冻 ~$3099 USDT 保证金，触发全部 9 策略 daily_breach 假警报。totalEq 实际完全没动；OKX bills 仅 -4.75 USDT 真实现金流。
+- **`fix(strategies)`** — 10 处策略侧 `drawdown_tracker.record_equity(...)` 清零（funding_carry / xs_momentum / liq_reversal / basis_arb / ob_imbalance / funding_cross_section / funding_skew_momentum / stat_arb_pairs / ml_fusion / option_vol_selling）。M6+.X fix #4 已把 push 统一到 monitor 中央源，策略侧旧 push 用的是 NT 内部 USDT cached balance，与 monitor 喂的 totalEq 差异巨大（59k vs 82k），让 tracker 看到 27% 假"暴跌"。
+- **`feat(risk)`** — Phase 0 DD 架构分层：新增 `AccountDrawdownTracker` 单例 + `AccountDrawdownCheck`。`LiveMonitor` 持有一份，`_refresh_allocations` 只推送给它（不再推给 N 个 per-strategy tracker）。`build_risk_manager(...)` 接收 `account_drawdown_tracker=` 注入到所有策略 risk pipeline 前置。任一策略命中即全员 kill-switch。per-strategy `DrawdownTracker` 保留但不再被喂数据（Phase 1 后续接 PnLTracker 做真正的每策略隔离）。
+- **`feat(strategies)`** — `StatArbConfig.warmup_via_rest: bool = True`。`on_start` 启动 async 任务调 OKX REST 一次性拉 1440 根 1H BTC + ETH 历史 close 喂 deque，立即触发首次 engle_granger_coint 检验。之前 `lookback_bars=1440`（60 天 × 24h）需要服务连续运行 60 天才能跑协整，新部署/重启永远不开仓。
+- **`add(scripts)`** — `scripts/diag_account_bills.py` + `scripts/diag_mtm_swing.py`：OKX 账户流水按 type/subType 汇总诊断 + 当前持仓 MTM × 1H candles 变化对照，用于将来怀疑 MTM/ledger 异常时定位。
 
 ### Added (M5.X strategy optimization)
 

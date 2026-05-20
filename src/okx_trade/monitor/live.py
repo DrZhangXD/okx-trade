@@ -97,6 +97,7 @@ class LiveMonitor:
         regime_inst_id: str = "BTC-USDT-SWAP",
         regime_refresh_interval_s: int = 86400,
         regime_bootstrap_days: int = 400,
+        account_drawdown_tracker: Any = None,
     ) -> None:
         self.handles_by_strategy = handles_by_strategy
         self.sinks = sinks
@@ -128,6 +129,11 @@ class LiveMonitor:
         self._regime_refresh_interval_s = regime_refresh_interval_s
         self._regime_bootstrap_days = regime_bootstrap_days
         self._last_regime_ms: int = 0
+        # Account-level DD: single tracker shared across all strategies via
+        # AccountDrawdownCheck (injected at build_risk_manager time). Monitor
+        # is the only writer; per-strategy DrawdownTrackers are no longer fed
+        # by alloc_refresh (Phase 0 of 2026-05-20 DD architecture split).
+        self._account_drawdown_tracker = account_drawdown_tracker
 
     def stop(self) -> None:
         self._stopped.set()
@@ -208,21 +214,19 @@ class LiveMonitor:
             if old != new_equity:
                 changed[name] = new_equity
 
-        # M6+.X fix #4: 把真实 OKX 余额推到每个策略的 drawdown_tracker。
-        # 之前各策略各自从 portfolio.account.balance_total(USDT) 读 NT 内部 cached
-        # 余额，paper 模式下与 OKX REST 真实余额不同步——5/18 ob_imbalance 死亡
-        # 螺旋时账户从 80,878 跌到 63,799 (-21%) 但 daily_breach 没触发，因为各策略
-        # 的 NT 内部 account 没反映真实跌幅。
-        # 现在统一由 monitor 用 OKX REST 余额 + wall clock ts 喂所有 drawdown_tracker。
-        try:
-            now_ms = self._clock()
-            for sid, handles in self.handles_by_strategy.items():
-                if handles.drawdown_tracker is not None:
-                    handles.drawdown_tracker.record_equity(
-                        ts_ms=now_ms, equity=float(total_equity),
-                    )
-        except Exception:
-            pass
+        # 2026-05-20 DD architecture Phase 0: feed ONLY the account-level
+        # tracker (single shared instance). Per-strategy DrawdownTracker
+        # is no longer fed here — strategies that need per-strategy DD
+        # isolation should subscribe to PnLTracker (Phase 1, future).
+        # AccountDrawdownCheck is injected into every strategy's risk
+        # pipeline so a single breach kill-switches all strategies.
+        if self._account_drawdown_tracker is not None:
+            try:
+                self._account_drawdown_tracker.record_equity(
+                    ts_ms=self._clock(), equity=float(total_equity),
+                )
+            except Exception:
+                pass
 
         if changed:
             try:

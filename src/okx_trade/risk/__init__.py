@@ -29,6 +29,8 @@ from .correlation import (
     correlation_weight_adjustment,
 )
 from .drawdown import (
+    AccountDrawdownCheck,
+    AccountDrawdownTracker,
     DrawdownCheck,
     DrawdownState,
     DrawdownTracker,
@@ -62,6 +64,8 @@ __all__ = [
     "kelly_fraction",
     "quarter_kelly_size",
     # drawdown
+    "AccountDrawdownCheck",
+    "AccountDrawdownTracker",
     "DrawdownCheck",
     "DrawdownState",
     "DrawdownTracker",

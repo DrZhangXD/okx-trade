@@ -97,6 +97,10 @@ if _NT_AVAILABLE:
         risk_pct: float = 0.003
         account_equity_usdt: float = 10000.0
         risk_config: RiskConfig | None = None
+        # Live REST warmup: on_start fetches historical 1H bars so the strategy
+        # can run coint check immediately instead of waiting weeks of live bars.
+        # Disable for backtest (simulated clock + offline data).
+        warmup_via_rest: bool = True
 
 
     class StatArbStrategy(Strategy):  # type: ignore[misc]
@@ -142,6 +146,7 @@ if _NT_AVAILABLE:
             self._risk_manager, self._risk_handles = build_risk_manager(config.risk_config)
             self._pnl_tracker = None  # type: ignore[var-annotated]
             self._last_equity_day: str | None = None
+            self._warmup_task = None  # type: ignore[var-annotated]
 
         def on_start(self) -> None:
             self.subscribe_bars(self._bar_type_left)
@@ -150,9 +155,77 @@ if _NT_AVAILABLE:
                 f"stat_arb start: {self._left_id.value} vs {self._right_id.value} "
                 f"entry_z={self.config.spread_z_entry} exit_z={self.config.spread_z_exit}"
             )
+            if self.config.warmup_via_rest:
+                import asyncio
+                try:
+                    loop = asyncio.get_event_loop()
+                    self._warmup_task = loop.create_task(self._warmup_bars_via_rest())
+                except RuntimeError as exc:
+                    self.log.warning(
+                        f"stat_arb: cannot spawn warmup task (no event loop): {exc}"
+                    )
 
         def on_stop(self) -> None:
+            if self._warmup_task is not None and not self._warmup_task.done():
+                self._warmup_task.cancel()
+                self._warmup_task = None
             self.log.info(f"stat_arb stop; position={self._position}")
+
+        async def _warmup_bars_via_rest(self) -> None:
+            """One-shot REST fetch of ``lookback_bars`` 1H closes into both deques.
+
+            Without warmup, fresh-start service waits ~60 days for ``on_bar`` to
+            accumulate enough history for engle_granger_coint (which needs n≥50).
+            With warmup, the first coint check fires within ~30s of startup.
+
+            Only pre-fills when the deque is empty (NT may already have replayed
+            a few bars from its catalog). Sets ``_last_coint_check_ms`` to now so
+            the next 24h interval check waits a full day.
+            """
+            from .. import OKXRestClient, OKXSettings
+
+            n_needed = self.config.lookback_bars
+            try:
+                async with OKXRestClient(OKXSettings()) as client:
+                    bare_left = self._left_id.value.split(".")[0]
+                    bare_right = self._right_id.value.split(".")[0]
+                    left_candles = await client.market.get_candles_extended(
+                        bare_left, bar="1H", total=n_needed,
+                    )
+                    right_candles = await client.market.get_candles_extended(
+                        bare_right, bar="1H", total=n_needed,
+                    )
+            except Exception as exc:  # noqa: BLE001
+                self.log.warning(f"stat_arb warmup failed: {exc}")
+                return
+
+            if not self._closes_left:
+                for c in left_candles:
+                    close = float(c.close)
+                    if close > 0:
+                        self._closes_left.append(math.log(close))
+                if left_candles:
+                    last = left_candles[-1]
+                    self._last_left_close = float(last.close)
+                    self._last_left_ts_ms = int(last.ts)
+            if not self._closes_right:
+                for c in right_candles:
+                    close = float(c.close)
+                    if close > 0:
+                        self._closes_right.append(math.log(close))
+                if right_candles:
+                    last = right_candles[-1]
+                    self._last_right_close = float(last.close)
+                    self._last_right_ts_ms = int(last.ts)
+
+            self._recompute_cointegration()
+            self._last_coint_check_ms = int(time.time() * 1000)
+            self.log.info(
+                f"stat_arb warmup loaded: left={len(self._closes_left)} "
+                f"right={len(self._closes_right)} β={self._hedge_ratio:.4f} "
+                f"p={self._coint_pvalue:.4f} "
+                f"tradeable={self._coint_pvalue < self.config.coint_pvalue_threshold}"
+            )
 
         def on_bar(self, bar: Bar) -> None:
             close = bar.close.as_double()

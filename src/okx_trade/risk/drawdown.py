@@ -154,7 +154,48 @@ class DrawdownCheck(RiskCheck):
         return RiskCheckResult.approve(intent.size, check_name=self.name)
 
 
+class AccountDrawdownTracker(DrawdownTracker):
+    """账户级熝断 tracker。语义上与 ``DrawdownTracker`` 完全一致，
+    用作单例: ``LiveMonitor`` 实例化一份, 每次 alloc_refresh 喂 OKX
+    ``totalEq``, 并通过 ``AccountDrawdownCheck`` 注入到所有策略的
+    risk pipeline。
+
+    与 per-strategy 的 ``DrawdownTracker`` 区分:
+    - per-strategy: 每个策略独立, 监控该策略自己的 PnL (Phase 1 接入 PnLTracker)
+    - account-level (本类): 全账户单例, 任一策略触发后所有策略 kill-switch
+    """
+
+
+class AccountDrawdownCheck(RiskCheck):
+    """账户级熝断 check。共享同一个 ``AccountDrawdownTracker``;
+    任一策略命中即拒绝。日志前缀 ``account_drawdown`` 区分于
+    ``drawdown`` (per-strategy)。
+    """
+
+    name = "account_drawdown"
+
+    def __init__(self, tracker: AccountDrawdownTracker) -> None:
+        self.tracker = tracker
+
+    def check(self, intent: RiskIntent) -> RiskCheckResult:
+        if self.tracker.state == DrawdownState.WEEKLY_BREACH:
+            return RiskCheckResult.reject(
+                f"account weekly DD {self.tracker.weekly_drawdown:.2%} > "
+                f"{self.tracker.weekly_threshold_pct:.2%}; manual review needed",
+                check_name=self.name,
+            )
+        if self.tracker.state == DrawdownState.DAILY_BREACH:
+            return RiskCheckResult.reject(
+                f"account daily DD {self.tracker.daily_drawdown:.2%} > "
+                f"{self.tracker.daily_threshold_pct:.2%}; auto-reset at 00:00 UTC",
+                check_name=self.name,
+            )
+        return RiskCheckResult.approve(intent.size, check_name=self.name)
+
+
 __all__ = [
+    "AccountDrawdownCheck",
+    "AccountDrawdownTracker",
     "DrawdownCheck",
     "DrawdownState",
     "DrawdownTracker",

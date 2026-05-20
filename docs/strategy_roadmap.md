@@ -16,12 +16,12 @@
 | [`LiqReversalStrategy`](../src/okx_trade/strategies/liq_reversal.py) | reversal | event-driven | M4 | ✅ true | regime gate 已接入 |
 | [`BasisArbStrategy`](../src/okx_trade/strategies/basis_arb.py) | neutral | 1h check | M5.X | ✅ true | 季度合约滚动需手动改 yaml |
 | [`OBImbalanceStrategy`](../src/okx_trade/strategies/ob_imbalance.py) | reversal | 中频 30s–5min | M5.X | ✅ true | books5 WS 订阅 |
-| [`FundingXSStrategy`](../src/okx_trade/strategies/funding_cross_section.py) | neutral β-hedged | 8h cycle | **M6+** | ❌ false | 多空 funding 横截面 + β hedge |
-| [`FundingSkewStrategy`](../src/okx_trade/strategies/funding_skew_momentum.py) | reversal | ~30min poll | **M6+** | ❌ false | funding ±2σ 反向 |
-| [`StatArbStrategy`](../src/okx_trade/strategies/stat_arb_pairs.py) | mean-reverting | 1H bar | **M6+** | ❌ false | BTC-ETH 协整套利（默认 pair） |
-| [`OptionVolStrategy`](../src/okx_trade/strategies/option_vol_selling.py) | vol carry | 1h check | **M6+** | ❌ false | BTC short straddle + delta hedge |
-| [`MLFusionStrategy`](../src/okx_trade/strategies/ml_fusion.py) | meta | 每 4h | **M6+** | ❌ false | XGBoost 多空均匀腿 |
-| [`FactorPortfolioStrategy`](../src/okx_trade/strategies/factor_portfolio.py) | meta | bar-driven (4h default) | **P1** | ❌ false | Generic factor synthesizer; reads configs/factor_portfolio.yaml populated by research lab |
+| [`FundingXSStrategy`](../src/okx_trade/strategies/funding_cross_section.py) | neutral β-hedged | 8h cycle | **M6+** | ✅ true | 多空 funding 横截面 + β hedge (2026-05-19 启用) |
+| [`FundingSkewStrategy`](../src/okx_trade/strategies/funding_skew_momentum.py) | reversal | ~30min poll | **M6+** | ✅ true | funding ±2σ 反向 (2026-05-19 启用) |
+| [`StatArbStrategy`](../src/okx_trade/strategies/stat_arb_pairs.py) | mean-reverting | 1H bar | **M6+** | ✅ true | BTC-ETH 协整套利。2026-05-20 加 REST warmup (lookback_bars=1440 即时填齐) |
+| [`OptionVolStrategy`](../src/okx_trade/strategies/option_vol_selling.py) | vol carry | 1h check | **M6+** | ❌ false | BTC short straddle + delta hedge。启用前需 live_node 动态注入 `option_ulys=["BTC-USD"]` filter |
+| [`MLFusionStrategy`](../src/okx_trade/strategies/ml_fusion.py) | meta | 每 4h | **M6+** | ❌ false | XGBoost 多空均匀腿。启用前需 `pip install xgboost` + 写 retrain 脚本 |
+| [`FactorPortfolioStrategy`](../src/okx_trade/strategies/factor_portfolio.py) | meta | bar-driven (4h default) | **P1** | ✅ true | Generic factor synthesizer; reads configs/factor_portfolio.yaml populated by research lab (2026-05-19 启用) |
 
 ---
 
@@ -122,3 +122,7 @@
    `allocator.allocate(...)` 切到 risk_budget。
 4. **OPTION instrument loading**：`option_vol_selling` 启用前 `live_node` 需要根据策略是否
    enabled 动态注入 `option_ulys=["BTC-USD"]` 到 instrument_provider filter；目前需手动改代码。
+5. **DD 架构 Phase 1（per-strategy 真隔离）**：2026-05-20 已落 Phase 0（账户级 kill-switch
+   `AccountDrawdownTracker` + `AccountDrawdownCheck`，单源单告警）。Phase 1 接 `PnLTracker`
+   做按 strategy_id 的 daily realized PnL 喂 per-strategy `DrawdownTracker`，让单一策略爆掉
+   只停那一个，其他正常跑（5/18 ob_imbalance 死亡螺旋场景的最终防线）。
