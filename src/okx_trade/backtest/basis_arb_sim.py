@@ -11,7 +11,15 @@ MMR (no IMR ladder), flat bps fees only.
 """
 from __future__ import annotations
 
+from bisect import bisect_right
 from dataclasses import dataclass
+
+from ..strategies._signals import (
+    BasisAction,
+    BasisArbParams,
+    annualized_basis,
+    basis_decision,
+)
 
 
 @dataclass
@@ -154,8 +162,9 @@ class FuturesCrossAccount:
 
         OKX clamps post-liquidation balance to >= 0 — we model that here.
         """
-        if self.futures_qty == 0 or self.liquidated:
-            self.liquidated = True
+        if self.liquidated:
+            return
+        if self.futures_qty == 0:
             return
         qty = abs(self.futures_qty)
         pnl = (self.entry_price - mark_price) * qty if self.futures_qty < 0 \
@@ -178,16 +187,6 @@ class FuturesCrossAccount:
         self.cash_usdt += cashflow
         self.funding_cashflow_total += cashflow
         self.realized_pnl += cashflow
-
-
-from bisect import bisect_right
-
-from ..strategies._signals import (
-    BasisAction,
-    BasisArbParams,
-    annualized_basis,
-    basis_decision,
-)
 
 
 @dataclass(frozen=True, slots=True)
