@@ -99,6 +99,12 @@ if _NT_AVAILABLE:
         # per instrument so β-hedge is accurate from the first rebalance instead
         # of waiting ~30 days of live 1D bars. Disable for backtest.
         warmup_via_rest: bool = True
+        funding_panel_parquet_path: str | None = None
+        """Optional: parquet catalog root (the directory that contains a
+        ``funding/<inst_id>/<YYYYMM>.parquet`` subtree). When set, on_start
+        reads the panel via read_funding_parquet() and calls feed_funding_panel()
+        before any bar subscription. Used for backtest.
+        """
 
 
     class FundingXSStrategy(Strategy):  # type: ignore[misc]
@@ -144,6 +150,21 @@ if _NT_AVAILABLE:
             self._funding_source_kind: str = "rest"  # "rest" (live) | "panel" (backtest)
 
         def on_start(self) -> None:
+            # Backtest: auto-load funding panels for all configured insts
+            if self.config.funding_panel_parquet_path:
+                from pathlib import Path
+                from ..backtest.funding_data import FundingPanel, read_funding_parquet
+                panels: dict[str, FundingPanel] = {}
+                cat_path = Path(self.config.funding_panel_parquet_path)
+                for inst_id_obj in self._inst_ids:
+                    sym = inst_id_obj.symbol.value
+                    try:
+                        panels[sym] = read_funding_parquet(sym, catalog_path=cat_path)
+                    except FileNotFoundError:
+                        self.log.warning(f"no funding panel for {sym}, skipping")
+                if panels:
+                    self.feed_funding_panel(panels)
+                    self.log.info(f"loaded funding panels for {len(panels)} insts")
             for iid, bar_type in self._bar_types.items():
                 self.subscribe_bars(bar_type)
             from ..config import OKXSettings

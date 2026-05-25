@@ -95,3 +95,53 @@ def test_basis_arb_accepts_funding_panel_for_entry_context():
     )
     strat.feed_funding_panel(panel)
     assert strat._funding_panel is panel
+
+
+def test_funding_carry_config_has_panel_parquet_path_field():
+    pytest.importorskip("nautilus_trader")
+    from okx_trade.strategies.funding_carry import FundingCarryConfig
+    cfg = FundingCarryConfig(
+        spot_instrument_id="BTC-USDT.OKX",
+        perp_instrument_id="BTC-USDT-SWAP.OKX",
+        spot_bar_type="BTC-USDT.OKX-1-HOUR-LAST-EXTERNAL",
+    )
+    assert cfg.funding_panel_parquet_path is None  # default
+    cfg2 = FundingCarryConfig(
+        spot_instrument_id="BTC-USDT.OKX",
+        perp_instrument_id="BTC-USDT-SWAP.OKX",
+        spot_bar_type="BTC-USDT.OKX-1-HOUR-LAST-EXTERNAL",
+        funding_panel_parquet_path="/some/path",
+    )
+    assert cfg2.funding_panel_parquet_path == "/some/path"
+
+
+def test_funding_xs_config_has_panel_parquet_path_field():
+    pytest.importorskip("nautilus_trader")
+    from okx_trade.strategies.funding_cross_section import FundingXSConfig
+    cfg = FundingXSConfig(
+        instrument_ids=["BTC-USDT-SWAP.OKX", "ETH-USDT-SWAP.OKX"],
+        beta_bar_type_template="{inst}-1-DAY-LAST-EXTERNAL",
+    )
+    assert cfg.funding_panel_parquet_path is None
+
+
+def test_funding_skew_config_has_panel_parquet_path_field():
+    pytest.importorskip("nautilus_trader")
+    from okx_trade.strategies.funding_skew_momentum import FundingSkewConfig
+    cfg = FundingSkewConfig(
+        instrument_id="BTC-USDT-SWAP.OKX",
+        bar_type="BTC-USDT-SWAP.OKX-1-HOUR-LAST-EXTERNAL",
+    )
+    assert cfg.funding_panel_parquet_path is None
+
+
+def test_basis_arb_config_has_panel_parquet_path_and_perp_fields():
+    pytest.importorskip("nautilus_trader")
+    from okx_trade.strategies.basis_arb import BasisArbConfig
+    cfg = BasisArbConfig(
+        spot_instrument_id="BTC-USDT.OKX",
+        futures_instrument_id="BTC-USDT-250627.OKX",
+        spot_bar_type="BTC-USDT.OKX-1-HOUR-LAST-EXTERNAL",
+    )
+    assert cfg.funding_panel_parquet_path is None
+    assert cfg.funding_perp_instrument_id is None

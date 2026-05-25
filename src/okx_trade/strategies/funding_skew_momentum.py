@@ -137,6 +137,12 @@ if _NT_AVAILABLE:
         check_interval_sec: int = 1800
         account_equity_usdt: float = 10000.0
         risk_config: RiskConfig | None = None
+        funding_panel_parquet_path: str | None = None
+        """Optional: parquet catalog root (the directory that contains a
+        ``funding/<inst_id>/<YYYYMM>.parquet`` subtree). When set, on_start
+        reads the panel via read_funding_parquet() and calls feed_funding_panel()
+        before any bar subscription. Used for backtest.
+        """
 
 
     class FundingSkewStrategy(Strategy):  # type: ignore[misc]
@@ -171,6 +177,18 @@ if _NT_AVAILABLE:
             self._funding_source_kind: str = "rest"
 
         def on_start(self) -> None:
+            if self.config.funding_panel_parquet_path:
+                from pathlib import Path
+                from ..backtest.funding_data import read_funding_parquet
+                sym = self._inst_id.symbol.value
+                try:
+                    panel = read_funding_parquet(
+                        sym, catalog_path=Path(self.config.funding_panel_parquet_path),
+                    )
+                    self.feed_funding_panel({sym: panel})
+                    self.log.info(f"loaded funding panel: {len(panel.ts_ms)} samples for {sym}")
+                except FileNotFoundError as exc:
+                    self.log.warning(f"funding panel auto-load failed: {exc}")
             self.subscribe_bars(self._bar_type)
             from ..config import OKXSettings
             self._rest_settings = OKXSettings()

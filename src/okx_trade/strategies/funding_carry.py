@@ -187,6 +187,12 @@ if _NT_AVAILABLE:
         # M3.6 风控（None → 透明跳过；推荐 enable_drawdown=True，不开 vol_target——
         # delta-neutral 仓位的 vol≈0，vol_target 没意义）
         risk_config: RiskConfig | None = None
+        funding_panel_parquet_path: str | None = None
+        """Optional: parquet catalog root (the directory that contains a
+        ``funding/<inst_id>/<YYYYMM>.parquet`` subtree). When set, on_start
+        reads the panel via read_funding_parquet() and calls feed_funding_panel()
+        before any bar subscription. Used for backtest.
+        """
 
     class FundingCarryStrategy(Strategy):  # type: ignore[misc]
         """Funding cash-and-carry：定时拉 funding rate，命中阈值开/平 delta-neutral 组合。
@@ -238,6 +244,22 @@ if _NT_AVAILABLE:
             self._carry_entry_spot_price: float = 0.0
 
         def on_start(self) -> None:
+            # Backtest: auto-load funding panel from parquet if configured
+            if self.config.funding_panel_parquet_path:
+                from pathlib import Path
+                from ..backtest.funding_data import read_funding_parquet
+                try:
+                    panel = read_funding_parquet(
+                        self.perp_id.symbol.value,
+                        catalog_path=Path(self.config.funding_panel_parquet_path),
+                    )
+                    self.feed_funding_panel(panel)
+                    self.log.info(
+                        f"loaded funding panel: {len(panel.ts_ms)} samples "
+                        f"for {self.perp_id.symbol.value}"
+                    )
+                except FileNotFoundError as exc:
+                    self.log.warning(f"funding panel auto-load failed: {exc}")
             self.subscribe_bars(self.spot_bar_type)
             # 实盘：构造一个独立 REST 客户端拉 funding rate
             # 不复用 adapter 的 OKXRestClient，避免事件循环耦合
