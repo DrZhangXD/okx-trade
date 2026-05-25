@@ -47,10 +47,6 @@ SUPPORTED_STRATEGIES = {
         "okx_trade.strategies.xs_momentum:XSMomentumStrategy",
         "okx_trade.strategies.xs_momentum:XSMomentumConfig",
     ),
-    "funding_carry": (
-        "okx_trade.strategies.funding_carry:FundingCarryStrategy",
-        "okx_trade.strategies.funding_carry:FundingCarryConfig",
-    ),
 }
 
 
@@ -83,20 +79,6 @@ def _parse_args() -> argparse.Namespace:
                    help="xs_momentum 动量窗口天数（默认 7）")
     p.add_argument("--target-vol-annualized", type=float, default=0.15,
                    help="xs_momentum 目标年化波动率（默认 0.15）")
-    # funding_carry / funding_cross_section / funding_skew / basis_arb shared flags
-    p.add_argument("--spot-instrument-id", default=None,
-                   help="现货 inst (funding_carry / basis_arb)")
-    p.add_argument("--perp-instrument-id", default=None,
-                   help="永续 inst (funding_carry / *_funding)")
-    p.add_argument("--funding-total", type=int, default=1095,
-                   help="funding rate 历史样本数（默认 1095 ≈ 1 年 × 3 次/天）")
-    # funding_carry-specific
-    p.add_argument("--entry-apr-threshold", type=float, default=0.08,
-                   help="funding_carry 开仓 APR 阈值（默认 8%% APR）")
-    p.add_argument("--exit-apr-threshold", type=float, default=0.02,
-                   help="funding_carry 平仓 APR 阈值（默认 2%% APR）")
-    p.add_argument("--max-position-pct", type=float, default=0.30,
-                   help="funding_carry 单次开仓占净值比例（默认 30%%）")
     # 手续费模型（默认零费用，与历史行为兼容）
     p.add_argument("--taker-fee-bps", type=float, default=0.0,
                    help="taker 手续费率 (bps)。>0 时开启 NT MakerTakerFeeModel；"
@@ -254,108 +236,12 @@ async def _run_xs_momentum(args: argparse.Namespace) -> None:
 
 
 # ---------------------------------------------------------------------------
-# funding_carry：spot + perp delta-neutral funding harvest
-# ---------------------------------------------------------------------------
-
-
-async def _run_funding_carry(args: argparse.Namespace) -> None:
-    if not args.spot_instrument_id or not args.perp_instrument_id:
-        raise SystemExit("funding_carry 需要 --spot-instrument-id 和 --perp-instrument-id")
-
-    catalog_path = Path(args.catalog).resolve()
-    catalog_path.mkdir(parents=True, exist_ok=True)
-
-    if not args.reuse_data:
-        print(f"[1/4] downloading bars + instrument specs for "
-              f"{args.spot_instrument_id} / {args.perp_instrument_id}...")
-        async with OKXRestClient(OKXSettings()) as client:
-            spot_inst, spot_bars = await prepare_backtest_catalog(
-                client, args.spot_instrument_id, args.signal_bar,
-                total=args.total_bars, catalog_path=str(catalog_path),
-            )
-            # download perp instrument spec and write to catalog so the strategy
-            # can resolve it from cache; we don't need perp bar data for this strategy
-            from okx_trade.adapter.parsing import parse_okx_instrument
-            from okx_trade.backtest.data_loader import write_instrument_to_catalog
-            perp_inst_type = (
-                InstType.SWAP if args.perp_instrument_id.endswith("-SWAP") else InstType.SPOT
-            )
-            okx_perp = await client.public.get_instrument(perp_inst_type, args.perp_instrument_id)
-            perp_inst = parse_okx_instrument(okx_perp, ts_init=0)
-            write_instrument_to_catalog(catalog_path, perp_inst)
-            print(f"        spot={len(spot_bars)} bars, perp instrument registered in catalog")
-    else:
-        print("[1/4] reusing catalog (--reuse-data)")
-
-    print("[2/4] building backtest config...")
-    from nautilus_trader.backtest.config import BacktestDataConfig
-    from nautilus_trader.config import ImportableStrategyConfig
-    from nautilus_trader.model.data import Bar
-
-    spot_bar_type = make_bar_type(args.spot_instrument_id, args.signal_bar)
-    spot_nt_id = f"{args.spot_instrument_id}.{OKX_VENUE}"
-    perp_nt_id = f"{args.perp_instrument_id}.{OKX_VENUE}"
-
-    data_configs = [
-        BacktestDataConfig(
-            catalog_path=str(catalog_path),
-            data_cls=Bar.fully_qualified_name(),
-            instrument_id=spot_nt_id,
-            bar_types=[str(spot_bar_type)],
-        ),
-    ]
-
-    fee_kwargs = {
-        "taker_fee_bps": args.taker_fee_bps,
-        "maker_fee_bps": args.maker_fee_bps,
-    } if args.taker_fee_bps > 0 else {}
-
-    venue = build_okx_venue_config(
-        starting_balance_usdt=args.equity,
-        leverage=args.leverage,
-        enable_fees=args.taker_fee_bps > 0,
-        **fee_kwargs,
-    )
-
-    strategy_path, config_path = SUPPORTED_STRATEGIES["funding_carry"]
-    strategy_config = ImportableStrategyConfig(
-        strategy_path=strategy_path,
-        config_path=config_path,
-        config={
-            "spot_instrument_id": spot_nt_id,
-            "perp_instrument_id": perp_nt_id,
-            "spot_bar_type": str(spot_bar_type),
-            "entry_apr_threshold": args.entry_apr_threshold,
-            "exit_apr_threshold": args.exit_apr_threshold,
-            "max_position_pct": args.max_position_pct,
-            "account_equity_usdt": args.equity,
-        },
-    )
-
-    print(f"        spot_instrument={spot_nt_id} perp_instrument={perp_nt_id}")
-    print(f"        entry_apr={args.entry_apr_threshold:.1%} "
-          f"exit_apr={args.exit_apr_threshold:.1%} "
-          f"max_pos={args.max_position_pct:.0%}")
-    print("[3/4] running backtest...")
-    summary = _run_and_maybe_plot(
-        args,
-        venue=venue,
-        data=data_configs,
-        strategies=[strategy_config],
-        plot_title=f"funding_carry — {args.spot_instrument_id} / {args.perp_instrument_id}",
-    )
-    print("\n=== RESULT ===")
-    print(summary)
-
-
-# ---------------------------------------------------------------------------
 # Dispatch
 # ---------------------------------------------------------------------------
 
 
 _RUNNERS = {
     "xs_momentum": _run_xs_momentum,
-    "funding_carry": _run_funding_carry,
 }
 
 
