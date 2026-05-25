@@ -310,6 +310,46 @@ config 字段从 `${catalog}/funding/<inst>/<YYYYMM>.parquet` 自动加载 fundi
 
 ---
 
+### 2.12 basis_arb margin-sim vs NT-default — when to use which
+
+`basis_arb` 现在有两条回测路径，差异在**账户隔离模型**：
+
+| 路径 | 命令 | 账户模型 | 适用 |
+|---|---|---|---|
+| NT 默认 | `python scripts/backtest.py --strategy basis_arb ...` | 单一 MARGIN 账户：spot + futures 共享保证金 | 快速原型 / sanity check |
+| margin-sim | `python scripts/backtest.py --strategy basis_arb --use-margin-sim ...` 或 `python scripts/backtest_basis_arb.py ...` | spot cash sub-account + futures cross-margin sub-account 独立爆仓 | 真实 tail risk（推荐 production decision-making） |
+
+NT 默认路径**低估了**爆仓风险——单账户模型下，spot 多头的浮盈可以撑住 futures 短腿的亏损；
+真实 OKX 是两个独立账户，futures 爆掉时 spot 不会被拉出来救场。Plan 6 margin-sim 复现了这个隔离。
+
+**margin-sim 关键参数**：
+
+- `--mmr 0.005`（默认 0.5% ≈ OKX 一档 BTC perp）— 维持保证金率，低于此触发爆仓。
+- `--futures-margin-pct 0.5`（默认 50% 分给 futures 子账户）— 启动时如何切分本金。
+- `--force-close-days 2`（默认 2 天）— 距到期 < 此天数强制平仓，避结算日强平 ladder。
+
+**MMR / IMR 限制**：margin-sim 只用单档 MMR；OKX 真实有 tier 1-7 ladder（仓位越大保证金率越严）。
+跑超过 USD 50k 的合约 size 时结果会乐观。Production 决策应在 margin-sim 基础上额外预留 buffer。
+
+**输出对比**：
+
+```bash
+# NT default — 通常显示 maxDD 较温和（虚高）
+python scripts/backtest.py --strategy basis_arb \
+    --spot-instrument-id BTC-USDT --futures-instrument-id BTC-USDT-250627 \
+    --total-bars 1500
+
+# margin-sim — futures_liquidated 可能为 true，spot 仍正
+python scripts/backtest.py --strategy basis_arb --use-margin-sim \
+    --spot-instrument-id BTC-USDT --futures-instrument-id BTC-USDT-250627 \
+    --total-bars 1500 --equity 10000 --mmr 0.005
+```
+
+如果 margin-sim 显示 `futures_liquidated: True` 但 NT default 没爆 → **以 margin-sim 为准**，
+NT default 是在错误的账户模型下虚高了存活率。
+
+---
+
 ## 三、Cron / Observation 报告
 
 VPS 上的 `sudo crontab` 维护：
