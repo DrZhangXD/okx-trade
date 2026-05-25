@@ -71,6 +71,10 @@ SUPPORTED_STRATEGIES = {
         "okx_trade.strategies.option_vol_selling:OptionVolStrategy",
         "okx_trade.strategies.option_vol_selling:OptionVolConfig",
     ),
+    "factor_portfolio": (
+        "okx_trade.strategies.factor_portfolio:FactorPortfolioStrategy",
+        "okx_trade.strategies.factor_portfolio:FactorPortfolioConfig",
+    ),
 }
 
 
@@ -129,6 +133,13 @@ def _parse_args() -> argparse.Namespace:
                    help="ob_imbalance backtest target instrument (e.g. BTC-USDT-SWAP)")
     p.add_argument("--option-underlying", default=None,
                    help="option_vol_selling backtest underlying (e.g. BTC-USD)")
+    # factor_portfolio
+    p.add_argument("--factor-yaml", default="configs/factor_portfolio.yaml",
+                   help="factor_portfolio.yaml path (default: configs/factor_portfolio.yaml)")
+    p.add_argument("--research-cache-dir", default="./data/research_panel",
+                   help="research panel parquet cache dir (default: ./data/research_panel)")
+    p.add_argument("--warmup-days", type=int, default=30,
+                   help="factor_portfolio: days of warmup panel to pre-fetch for rolling factors (default: 30)")
     return p.parse_args()
 
 
@@ -840,6 +851,79 @@ async def _run_option_vol_selling(args: argparse.Namespace) -> None:
 
 
 # ---------------------------------------------------------------------------
+# factor_portfolio: research-runtime-based multi-factor portfolio backtest
+# ---------------------------------------------------------------------------
+
+
+async def _run_factor_portfolio(args: argparse.Namespace) -> None:
+    """Backtest factor_portfolio via the research runtime + auto cache warm.
+
+    Pre-flights yaml approval state, pre-warms the panel cache (so subsequent
+    factor analysis on the same window hits cache), then dispatches into
+    okx_trade.research.runtime.cmd_backtest_portfolio which handles the NT
+    BacktestNode wiring.
+    """
+    import time
+    import yaml as _yaml
+
+    from okx_trade.research.data import _bar_ms
+    from okx_trade.research.runtime import cmd_backtest_portfolio, ensure_panel_cached
+
+    yaml_path = Path(args.factor_yaml)
+    if not yaml_path.exists():
+        raise SystemExit(f"factor_portfolio yaml not found: {yaml_path}")
+    yaml_cfg = _yaml.safe_load(yaml_path.read_text()) or {}
+    if not yaml_cfg.get("factor_weights"):
+        raise SystemExit(
+            f"{yaml_path} has empty factor_weights; approve at least one factor first: "
+            "`python -m okx_trade.research approve <factor> <weight>`"
+        )
+
+    raw_inst_ids = yaml_cfg.get("instrument_ids") or []
+    if not raw_inst_ids:
+        raise SystemExit(f"{yaml_path} has no instrument_ids")
+    bare_ids = [s.split(".")[0] for s in raw_inst_ids]
+
+    bar_ms = _bar_ms(args.signal_bar)
+    if bar_ms <= 0:
+        raise SystemExit(f"unsupported --signal-bar: {args.signal_bar!r}")
+    end_ms = int(time.time() * 1000)
+    start_ms = end_ms - int(args.total_bars) * bar_ms
+    include = ("close", "volume_usdt", "funding_rate", "open_interest")
+    cache_dir = Path(args.research_cache_dir)
+    catalog_path = Path(args.catalog).resolve()
+
+    print(
+        f"[0/3] pre-warming research panel cache "
+        f"({len(bare_ids)} instruments × {args.total_bars} {args.signal_bar} bars)"
+    )
+    async with OKXRestClient(OKXSettings()) as client:
+        panel_path = await ensure_panel_cached(
+            rest_client=client, inst_ids=bare_ids, bar=args.signal_bar,
+            start_ms=start_ms, end_ms=end_ms, include=include,
+            cache_dir=cache_dir,
+        )
+        print(f"        panel parquet: {panel_path} ({panel_path.stat().st_size:,} bytes)")
+
+        summary = await cmd_backtest_portfolio(
+            rest_client=client,
+            yaml_cfg=yaml_cfg,
+            bar=args.signal_bar,
+            total_bars=args.total_bars,
+            catalog_path=catalog_path,
+            taker_fee_bps=args.taker_fee_bps,
+            maker_fee_bps=args.maker_fee_bps,
+            warmup_days=args.warmup_days,
+            warmup_panel_dir=cache_dir,
+        )
+    print("\n=== RESULT ===")
+    for k, v in summary.items():
+        if k == "_raw":
+            continue
+        print(f"  {k}: {v}")
+
+
+# ---------------------------------------------------------------------------
 # Dispatch
 # ---------------------------------------------------------------------------
 
@@ -852,6 +936,7 @@ _RUNNERS = {
     "basis_arb": _run_basis_arb,
     "ob_imbalance": _run_ob_imbalance,
     "option_vol_selling": _run_option_vol_selling,
+    "factor_portfolio": _run_factor_portfolio,
 }
 
 
