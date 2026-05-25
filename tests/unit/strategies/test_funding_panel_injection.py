@@ -77,3 +77,21 @@ def test_funding_skew_momentum_panel_preloads_history_window():
     history_deque = strat._funding_history
     assert history_deque is not None
     assert len(history_deque) == 90  # capped at maxlen=90
+
+
+def test_basis_arb_accepts_funding_panel_for_entry_context():
+    pytest.importorskip("nautilus_trader")
+    from okx_trade.strategies.basis_arb import BasisArbStrategy, BasisArbConfig
+
+    cfg = BasisArbConfig(
+        spot_instrument_id="BTC-USDT.OKX",
+        futures_instrument_id="BTC-USDT-250627.OKX",
+        spot_bar_type="BTC-USDT.OKX-1-HOUR-LAST-EXTERNAL",
+    )
+    strat = BasisArbStrategy(cfg)
+    panel = FundingPanel(
+        inst_id="BTC-USDT-SWAP",
+        ts_ms=[1_700_000_000_000], rates=[0.0001],
+    )
+    strat.feed_funding_panel(panel)
+    assert strat._funding_panel is panel

@@ -45,6 +45,7 @@ from .qty import safe_make_qty
 
 if TYPE_CHECKING:
     from nautilus_trader.model.data import Bar
+    from ..backtest.funding_data import FundingPanel
 
 
 try:
@@ -170,6 +171,8 @@ if _NT_AVAILABLE:
                 if config.td_mode_override else None
             )
 
+            self._funding_panel: "FundingPanel | None" = None
+
             self._risk_manager, self._risk_handles = build_risk_manager(config.risk_config)
             self._prev_spot_close: float | None = None
 
@@ -208,6 +211,12 @@ if _NT_AVAILABLE:
 
         def on_stop(self) -> None:
             self.log.info(f"basis_arb stop; has_position={self._has_position}")
+
+        def feed_funding_panel(self, panel: "FundingPanel") -> None:
+            """Optional funding-context hook for backtest. Stored but not yet used in
+            entry decision (reserved for future regime-filter wiring).
+            """
+            self._funding_panel = panel
 
         def _feed_risk_data(self, ts_ms: int, close: float) -> None:
             handles = self._risk_handles
