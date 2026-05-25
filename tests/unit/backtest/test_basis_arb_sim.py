@@ -96,3 +96,92 @@ def test_futures_account_rejects_short_while_long():
     acc.long_futures(price=60_000, qty=0.1, fee_bps=0)
     with pytest.raises(RuntimeError, match="while long"):
         acc.short_futures(price=60_000, qty=0.1, fee_bps=0)
+
+
+def test_simulator_engineered_basis_blowout_liquidates_futures():
+    """Engineer a scenario: enter cash-and-carry; futures premium explodes;
+    futures sub-account gets liquidated; spot sub-account survives."""
+    from okx_trade.backtest.basis_arb_sim import run_basis_arb_sim
+    from okx_trade.strategies._signals import BasisArbParams
+
+    n = 40
+    base_ts = 1_700_000_000_000
+    bar_ms = 3_600_000
+
+    # Spot stays roughly flat near 60000
+    spot_bars = [(base_ts + i * bar_ms, 60_000.0 + 10 * (i % 5)) for i in range(n)]
+    # Futures: starts at 1% premium (encouraging entry); from bar 10 onward,
+    # premium explodes to drive the short futures into liquidation.
+    futures_bars = []
+    for i, (ts, s) in enumerate(spot_bars):
+        if i < 10:
+            premium_pct = 0.01
+        else:
+            premium_pct = 0.01 + 0.05 * (i - 9)  # +5% per bar after bar 10
+        futures_bars.append((ts, s * (1 + premium_pct)))
+
+    # Days to expiry decreases over time
+    dte = [30.0 - i * 0.5 for i in range(n)]
+
+    res = run_basis_arb_sim(
+        spot_bars=spot_bars,
+        futures_bars=futures_bars,
+        funding_panel={"BTC-USDT-SWAP": []},
+        days_to_expiry_per_bar=dte,
+        params=BasisArbParams(
+            entry_basis_apr=0.08,  # 8% APR threshold — bar 0 premium 1% × 365/30 ≈ 12% APR
+            exit_basis_apr=0.02,
+            force_close_days_before_expiry=2,
+        ),
+        starting_cash_usdt=10_000.0,
+        futures_margin_pct=0.5,
+        mmr=0.005,
+        fee_bps=5.0,
+    )
+
+    assert res.futures_liquidated is True
+    assert res.n_entries >= 1
+    assert res.spot_final_equity > 0  # spot survived (cash account, can't liquidate)
+    assert res.net_final_equity < res.starting_equity  # but net took the hit
+    assert len(res.equity_curve) == n
+
+
+def test_simulator_no_position_no_funding_no_change():
+    """All bars below entry threshold → no trades, equity unchanged."""
+    from okx_trade.backtest.basis_arb_sim import run_basis_arb_sim
+    from okx_trade.strategies._signals import BasisArbParams
+
+    n = 20
+    base_ts = 1_700_000_000_000
+    bar_ms = 3_600_000
+    spot_bars = [(base_ts + i * bar_ms, 60_000.0) for i in range(n)]
+    futures_bars = [(base_ts + i * bar_ms, 60_010.0) for i in range(n)]  # ~0.017% prem
+    dte = [30.0] * n
+
+    res = run_basis_arb_sim(
+        spot_bars=spot_bars, futures_bars=futures_bars,
+        funding_panel={"BTC-USDT-SWAP": []},
+        days_to_expiry_per_bar=dte,
+        params=BasisArbParams(entry_basis_apr=0.50),  # very high threshold → no entry
+        starting_cash_usdt=10_000.0,
+        futures_margin_pct=0.5, mmr=0.005, fee_bps=5.0,
+    )
+    assert res.n_entries == 0
+    assert res.n_exits == 0
+    assert res.futures_liquidated is False
+    assert res.net_final_equity == pytest.approx(10_000.0)
+
+
+def test_simulator_rejects_misaligned_bars():
+    from okx_trade.backtest.basis_arb_sim import run_basis_arb_sim
+    from okx_trade.strategies._signals import BasisArbParams
+
+    with pytest.raises(ValueError, match="same length"):
+        run_basis_arb_sim(
+            spot_bars=[(0, 60_000.0)],
+            futures_bars=[(0, 60_010.0), (1, 60_020.0)],
+            funding_panel={},
+            days_to_expiry_per_bar=[30.0, 29.5],
+            params=BasisArbParams(),
+            starting_cash_usdt=10_000.0,
+        )
