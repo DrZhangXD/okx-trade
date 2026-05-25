@@ -17,3 +17,13 @@ def test_funding_panel_lookup_returns_most_recent_rate_at_or_before_ts():
     assert panel.rate_at_or_before(1_500) == 0.0001  # latest <= ts
     assert panel.rate_at_or_before(2_500) == 0.0002
     assert panel.rate_at_or_before(10_000) == 0.00015  # after latest -> last
+
+
+def test_funding_panel_rejects_length_mismatch():
+    with pytest.raises(ValueError, match="length mismatch"):
+        FundingPanel(inst_id="BTC-USDT-SWAP", ts_ms=[1, 2], rates=[0.0001])
+
+
+def test_funding_panel_rejects_unsorted_timestamps():
+    with pytest.raises(ValueError, match="sorted ascending"):
+        FundingPanel(inst_id="BTC-USDT-SWAP", ts_ms=[2, 1], rates=[0.0001, 0.0002])

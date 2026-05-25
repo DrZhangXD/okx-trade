@@ -11,7 +11,7 @@ Partition: ${catalog}/funding/<inst_id>/<YYYYMM>.parquet
 from __future__ import annotations
 
 from bisect import bisect_right
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 
 @dataclass(frozen=True, slots=True)
