@@ -59,6 +59,10 @@ SUPPORTED_STRATEGIES = {
         "okx_trade.strategies.funding_skew_momentum:FundingSkewStrategy",
         "okx_trade.strategies.funding_skew_momentum:FundingSkewConfig",
     ),
+    "basis_arb": (
+        "okx_trade.strategies.basis_arb:BasisArbStrategy",
+        "okx_trade.strategies.basis_arb:BasisArbConfig",
+    ),
 }
 
 
@@ -111,6 +115,8 @@ def _parse_args() -> argparse.Namespace:
                         "OKX 实盘 taker = 5 bps")
     p.add_argument("--maker-fee-bps", type=float, default=2.0,
                    help="maker 手续费率 (bps)，仅在 --taker-fee-bps > 0 时生效")
+    p.add_argument("--futures-instrument-id", default=None,
+                   help="dated future inst (basis_arb; e.g. BTC-USDT-250627)")
     return p.parse_args()
 
 
@@ -540,6 +546,128 @@ async def _run_funding_skew_momentum(args: argparse.Namespace) -> None:
 
 
 # ---------------------------------------------------------------------------
+# basis_arb：spot + dated-future cash-and-carry (basis收敛套利)
+# ---------------------------------------------------------------------------
+
+
+async def _run_basis_arb(args: argparse.Namespace) -> None:
+    """Run a basis arb (cash-and-carry) backtest.
+
+    Trades a spot leg + a dated futures leg simultaneously.  Both legs are
+    booked inside a single NT MARGIN account — the simplified single-account
+    margin model that NautilusTrader provides out of the box.
+
+    .. warning::
+        **Margin isolation caveat**: real OKX separates spot collateral and
+        futures margin into distinct account pools (spot account vs. futures
+        account, or at least distinct isolated-margin pools within one
+        unified account).  The NT default MARGIN venue does NOT replicate
+        this: a liquidation on the futures short leg can eat into the same
+        balance that backs the spot long leg, overstating drawdown risk in
+        simulation.  A proper cross-account margin isolation simulator is
+        tracked in Plan 6 and is NOT part of this runner.
+    """
+    if not args.spot_instrument_id or not args.futures_instrument_id:
+        raise SystemExit(
+            "basis_arb 需要 --spot-instrument-id 和 --futures-instrument-id (dated future)"
+        )
+
+    catalog_path = Path(args.catalog).resolve()
+    catalog_path.mkdir(parents=True, exist_ok=True)
+
+    from okx_trade.backtest.data_loader import prepare_funding_panel
+
+    if not args.reuse_data:
+        print(f"[1/4] downloading spot + futures bars for "
+              f"{args.spot_instrument_id} / {args.futures_instrument_id}...")
+    else:
+        print("[1/4] reusing catalog (--reuse-data)")
+
+    async with OKXRestClient(OKXSettings()) as client:
+        if not args.reuse_data:
+            _, spot_bars = await prepare_backtest_catalog(
+                client, args.spot_instrument_id, args.signal_bar,
+                total=args.total_bars, catalog_path=str(catalog_path),
+            )
+            _, fut_bars = await prepare_backtest_catalog(
+                client, args.futures_instrument_id, args.signal_bar,
+                total=args.total_bars, catalog_path=str(catalog_path),
+            )
+            print(f"        spot={len(spot_bars)} bars, futures={len(fut_bars)} bars")
+        # Funding context is OPTIONAL — only if perp_instrument_id provided
+        funding_args: dict = {}
+        if args.perp_instrument_id:
+            panel = await prepare_funding_panel(
+                client, args.perp_instrument_id,
+                total=args.funding_total,
+                catalog_path=catalog_path, reuse_cache=args.reuse_data,
+            )
+            funding_args = {
+                "funding_panel_parquet_path": str(catalog_path),
+                "funding_perp_instrument_id": args.perp_instrument_id,
+            }
+            print(f"        funding context: {len(panel.ts_ms)} samples "
+                  f"from {args.perp_instrument_id}")
+
+    print("[2/4] building backtest config...")
+    from nautilus_trader.backtest.config import BacktestDataConfig
+    from nautilus_trader.config import ImportableStrategyConfig
+    from nautilus_trader.model.data import Bar
+
+    spot_bar_type = make_bar_type(args.spot_instrument_id, args.signal_bar)
+    spot_nt_id = f"{args.spot_instrument_id}.{OKX_VENUE}"
+    fut_nt_id = f"{args.futures_instrument_id}.{OKX_VENUE}"
+
+    # Subscribe to both spot + futures bars (strategy needs both prices)
+    fut_bar_type = make_bar_type(args.futures_instrument_id, args.signal_bar)
+    data_configs = [
+        BacktestDataConfig(
+            catalog_path=str(catalog_path),
+            data_cls=Bar.fully_qualified_name(),
+            instrument_id=spot_nt_id,
+            bar_types=[str(spot_bar_type)],
+        ),
+        BacktestDataConfig(
+            catalog_path=str(catalog_path),
+            data_cls=Bar.fully_qualified_name(),
+            instrument_id=fut_nt_id,
+            bar_types=[str(fut_bar_type)],
+        ),
+    ]
+
+    venue = build_okx_venue_config(
+        starting_balance_usdt=args.equity,
+        leverage=args.leverage,
+        enable_fees=args.taker_fee_bps > 0,
+        **({"taker_fee_bps": args.taker_fee_bps, "maker_fee_bps": args.maker_fee_bps}
+           if args.taker_fee_bps > 0 else {}),
+    )
+
+    strategy_path, config_path = SUPPORTED_STRATEGIES["basis_arb"]
+    strategy_config = ImportableStrategyConfig(
+        strategy_path=strategy_path,
+        config_path=config_path,
+        config={
+            "spot_instrument_id": spot_nt_id,
+            "futures_instrument_id": fut_nt_id,
+            "spot_bar_type": str(spot_bar_type),
+            "account_equity_usdt": args.equity,
+            **funding_args,
+        },
+    )
+
+    print("[3/4] running backtest...")
+    print("        NOTE: NT default uses single MARGIN account for both legs.")
+    print("        For cross-account margin isolation (real OKX behavior), use Plan 6 simulator.")
+    summary = _run_and_maybe_plot(
+        args, venue=venue, data=data_configs, strategies=[strategy_config],
+        plot_title=f"basis_arb — {args.spot_instrument_id} / {args.futures_instrument_id}",
+    )
+    print("\n=== RESULT ===")
+    print(summary)
+
+
+# ---------------------------------------------------------------------------
 # Dispatch
 # ---------------------------------------------------------------------------
 
@@ -549,6 +677,7 @@ _RUNNERS = {
     "funding_carry": _run_funding_carry,
     "funding_cross_section": _run_funding_cross_section,
     "funding_skew_momentum": _run_funding_skew_momentum,
+    "basis_arb": _run_basis_arb,
 }
 
 
