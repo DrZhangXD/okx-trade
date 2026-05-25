@@ -133,6 +133,18 @@ def _parse_args() -> argparse.Namespace:
                    help="maker 手续费率 (bps)，仅在 --taker-fee-bps > 0 时生效")
     p.add_argument("--futures-instrument-id", default=None,
                    help="dated future inst (basis_arb; e.g. BTC-USDT-250627)")
+    p.add_argument("--use-margin-sim", action="store_true",
+                   help="basis_arb only: route through the cross-account margin simulator "
+                        "(more accurate tail risk; replaces NT single-account model)")
+    p.add_argument("--futures-margin-pct", type=float, default=0.5,
+                   help="basis_arb --use-margin-sim: fraction of equity allocated to "
+                        "the futures sub-account (default 0.5)")
+    p.add_argument("--mmr", type=float, default=0.005,
+                   help="basis_arb --use-margin-sim: maintenance margin ratio "
+                        "(default 0.005 = 0.5%%, approx OKX tier-1)")
+    p.add_argument("--force-close-days", type=int, default=2,
+                   help="basis_arb --use-margin-sim: exit when days-to-expiry < this "
+                        "(default 2)")
     p.add_argument("--orderbook-instrument-id", default=None,
                    help="ob_imbalance backtest target instrument (e.g. BTC-USDT-SWAP)")
     p.add_argument("--option-underlying", default=None,
@@ -581,6 +593,100 @@ async def _run_funding_skew_momentum(args: argparse.Namespace) -> None:
 # ---------------------------------------------------------------------------
 
 
+async def _run_basis_arb_margin_sim(args: argparse.Namespace) -> None:
+    """basis_arb via cross-account margin simulator (Plan 6).
+
+    Replaces NT's single-MARGIN-account model with isolated spot cash + futures
+    cross-margin sub-accounts that can independently liquidate. Equity curve
+    reflects the actual tail risk; the NT path is kept for backwards-compat
+    via the default (no --use-margin-sim flag).
+    """
+    from datetime import datetime, timezone
+
+    from okx_trade.backtest.basis_arb_sim import run_basis_arb_sim
+    from okx_trade.backtest.data_loader import prepare_funding_panel
+    from okx_trade.strategies._signals import BasisArbParams
+
+    # Validate YYMMDD suffix BEFORE any REST round-trip — a malformed inst id
+    # is a user error we can reject cheaply.
+    suffix = args.futures_instrument_id.split("-")[-1]
+    if len(suffix) != 6 or not suffix.isdigit():
+        raise SystemExit(
+            f"--futures-instrument-id {args.futures_instrument_id!r} expected "
+            "YYMMDD suffix, e.g. BTC-USDT-250627"
+        )
+    expiry = datetime.strptime("20" + suffix, "%Y%m%d").replace(tzinfo=timezone.utc)
+
+    catalog_path = Path(args.catalog).resolve()
+    catalog_path.mkdir(parents=True, exist_ok=True)
+
+    spot_nt_bars = []
+    fut_nt_bars = []
+    funding: dict[str, list[tuple[int, float]]] = {}
+    async with OKXRestClient(OKXSettings()) as client:
+        if not args.reuse_data:
+            print(f"[1/3] downloading bars: {args.spot_instrument_id} + "
+                  f"{args.futures_instrument_id} ({args.total_bars} × {args.signal_bar})")
+            _, spot_nt_bars = await prepare_backtest_catalog(
+                client, args.spot_instrument_id, args.signal_bar,
+                total=args.total_bars, catalog_path=str(catalog_path),
+            )
+            _, fut_nt_bars = await prepare_backtest_catalog(
+                client, args.futures_instrument_id, args.signal_bar,
+                total=args.total_bars, catalog_path=str(catalog_path),
+            )
+        else:
+            print("[1/3] reusing catalog (--reuse-data)")
+        if args.perp_instrument_id:
+            panel = await prepare_funding_panel(
+                client, args.perp_instrument_id, total=args.funding_total,
+                catalog_path=catalog_path, reuse_cache=args.reuse_data,
+            )
+            funding[args.perp_instrument_id] = list(zip(panel.ts_ms, panel.rates, strict=True))
+            print(f"        funding samples for {args.perp_instrument_id}: {len(panel.ts_ms)}")
+
+    if not spot_nt_bars or not fut_nt_bars:
+        if args.reuse_data:
+            raise SystemExit(
+                "--reuse-data set but no bars in memory; rerun without --reuse-data "
+                "once to populate the catalog."
+            )
+        raise SystemExit("REST returned no bars; check --spot-instrument-id / --futures-instrument-id")
+
+    spot_bars = [(int(b.ts_event // 1_000_000), float(b.close)) for b in spot_nt_bars]
+    fut_bars = [(int(b.ts_event // 1_000_000), float(b.close)) for b in fut_nt_bars]
+    n = min(len(spot_bars), len(fut_bars))
+    spot_bars, fut_bars = spot_bars[-n:], fut_bars[-n:]
+    dte: list[float] = []
+    for ts, _ in fut_bars:
+        bar_dt = datetime.fromtimestamp(ts / 1000, tz=timezone.utc)
+        dte.append(max(0.5, (expiry - bar_dt).total_seconds() / 86_400))
+
+    print(f"[2/3] margin-sim: {n} aligned bars, equity ${args.equity:,.0f}, "
+          f"MMR {args.mmr:.2%}, futures sub-account {args.futures_margin_pct:.0%}")
+    result = run_basis_arb_sim(
+        spot_bars=spot_bars, futures_bars=fut_bars, funding_panel=funding,
+        days_to_expiry_per_bar=dte,
+        params=BasisArbParams(
+            entry_basis_apr=args.entry_apr_threshold,
+            exit_basis_apr=args.exit_apr_threshold,
+            force_close_days_before_expiry=args.force_close_days,
+        ),
+        starting_cash_usdt=args.equity,
+        futures_margin_pct=args.futures_margin_pct,
+        mmr=args.mmr,
+        fee_bps=args.taker_fee_bps if args.taker_fee_bps > 0 else 5.0,
+    )
+
+    print("[3/3] result:")
+    print(f"  net final equity: ${result.net_final_equity:,.2f}  "
+          f"(spot ${result.spot_final_equity:,.2f}, "
+          f"futures ${result.futures_final_equity:,.2f})")
+    print(f"  futures liquidated: {result.futures_liquidated}")
+    print(f"  entries={result.n_entries}  exits={result.n_exits}  "
+          f"funding cashflow=${result.total_funding_cashflow:,.2f}")
+
+
 async def _run_basis_arb(args: argparse.Namespace) -> None:
     """Run a basis arb (cash-and-carry) backtest.
 
@@ -602,6 +708,10 @@ async def _run_basis_arb(args: argparse.Namespace) -> None:
         raise SystemExit(
             "basis_arb 需要 --spot-instrument-id 和 --futures-instrument-id (dated future)"
         )
+
+    if args.use_margin_sim:
+        await _run_basis_arb_margin_sim(args)
+        return
 
     catalog_path = Path(args.catalog).resolve()
     catalog_path.mkdir(parents=True, exist_ok=True)
