@@ -116,6 +116,12 @@ if _NT_AVAILABLE:
         subscribe_books5: bool = True
         depth: int = 5
         risk_config: RiskConfig | None = None
+        orderbook_parquet_path: str | None = None
+        """Optional: catalog root (the directory that contains a
+        ``books5/<inst_id>/<YYYYMMDD>.parquet`` subtree). When set,
+        on_start loads frames via read_orderbook_parquet() and on_bar
+        drains them through process_orderbook() before invoking the
+        normal bar logic. Used for backtest only."""
 
 
     class OBImbalanceStrategy(Strategy):  # type: ignore[misc]
@@ -161,6 +167,8 @@ if _NT_AVAILABLE:
             self._okx_ws = None  # type: ignore[var-annotated]
             self._book_task: asyncio.Task | None = None
 
+            self._orderbook_replay = None  # type: ignore[var-annotated]
+
         def on_start(self) -> None:
             self.subscribe_bars(self._bar_type)
             self.log.info(
@@ -169,6 +177,24 @@ if _NT_AVAILABLE:
                 f"micro_prem={self.config.microprice_premium_bps}bp "
                 f"hold_max={self.config.hold_max_sec}s"
             )
+            # Backtest: auto-load orderbook frames from parquet if configured
+            if self.config.orderbook_parquet_path:
+                from pathlib import Path as _Path
+                from ..backtest.orderbook_data import (
+                    read_orderbook_parquet, OrderbookReplayStream,
+                )
+                try:
+                    frames = read_orderbook_parquet(
+                        self._inst_id.symbol.value,
+                        catalog_path=_Path(self.config.orderbook_parquet_path),
+                    )
+                    self._orderbook_replay = OrderbookReplayStream(frames)
+                    self.log.info(
+                        f"loaded {len(frames)} orderbook frames from "
+                        f"{self.config.orderbook_parquet_path}"
+                    )
+                except FileNotFoundError as exc:
+                    self.log.warning(f"orderbook auto-load failed: {exc}")
             if self.config.subscribe_books5:
                 try:
                     loop = asyncio.get_running_loop()
@@ -192,6 +218,14 @@ if _NT_AVAILABLE:
         def on_bar(self, bar: Bar) -> None:
             if bar.bar_type != self._bar_type:
                 return
+            # Replay any captured orderbook frames that arrived before this bar
+            if self._orderbook_replay is not None:
+                from ..backtest.orderbook_runner import _replay_books_for_bar
+                bar_ts_ms = int(bar.ts_event // 1_000_000)
+                _replay_books_for_bar(
+                    self, self._orderbook_replay,
+                    bar_ts_ms_exclusive=bar_ts_ms,
+                )
             snap = to_bar_snapshots([bar])[0]
             self._latest_close = snap.close
             self._latest_ts_ms = snap.ts

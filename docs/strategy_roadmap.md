@@ -15,7 +15,7 @@
 | [`XSMomentumStrategy`](../src/okx_trade/strategies/xs_momentum.py) | momentum | 每日 UTC 0 | M4 | ✅ true | regime gate 已接入 |
 | [`LiqReversalStrategy`](../src/okx_trade/strategies/liq_reversal.py) | reversal | event-driven | M4 | ✅ true | regime gate 已接入 |
 | [`BasisArbStrategy`](../src/okx_trade/strategies/basis_arb.py) | neutral | 1h check | M5.X | ❌ false | 5/19 -$7,297 单日真亏（futures 短腿被强平 hedge 破裂），需修 margin 隔离才能重启（todo #8）<br>✅ backtestable via `scripts/backtest.py --strategy basis_arb` (2026-05-25, Plan 1) |
-| [`OBImbalanceStrategy`](../src/okx_trade/strategies/ob_imbalance.py) | reversal | 中频 30s–5min | M5.X | ✅ true | books5 WS 订阅 |
+| [`OBImbalanceStrategy`](../src/okx_trade/strategies/ob_imbalance.py) | reversal | 中频 30s–5min | M5.X | ✅ true | books5 WS 订阅<br>✅ backtestable via scripts/backtest.py --strategy ob_imbalance (2026-05-25, Plan 2; requires capture_orderbook.py to populate catalog first) |
 | [`FundingXSStrategy`](../src/okx_trade/strategies/funding_cross_section.py) | neutral β-hedged | 8h cycle | **M6+** | ✅ true | 多空 funding 横截面 + β hedge (2026-05-19 启用)<br>✅ backtestable via `scripts/backtest.py --strategy funding_cross_section` (2026-05-25, Plan 1) |
 | [`FundingSkewStrategy`](../src/okx_trade/strategies/funding_skew_momentum.py) | reversal | ~30min poll | **M6+** | ✅ true | funding ±2σ 反向 (2026-05-19 启用)<br>✅ backtestable via `scripts/backtest.py --strategy funding_skew_momentum` (2026-05-25, Plan 1) |
 | [`StatArbStrategy`](../src/okx_trade/strategies/stat_arb_pairs.py) | mean-reverting | 1H bar | **M6+** | ✅ true | BTC-ETH 协整套利。2026-05-20 加 REST warmup (lookback_bars=1440 即时填齐) |
@@ -124,6 +124,27 @@ python scripts/backtest.py --strategy funding_cross_section \
 `basis_arb` backtest uses NT's single-MARGIN-account model, which understates the
 margin-isolation tail risk seen on real OKX. Plan 6 (separate roadmap) will add
 a cross-account simulator for production-grade `basis_arb` backtesting.
+
+### Plan 2: ob_imbalance (2026-05-25)
+
+`ob_imbalance` can be backtested by first capturing live WS books5 snapshots to parquet:
+
+````bash
+# Step 1: capture (long-running; one terminal)
+python scripts/capture_orderbook.py --inst-id BTC-USDT-SWAP \
+    --duration-hours 168 --downsample-sec 1
+
+# Step 2: backtest
+python scripts/backtest.py --strategy ob_imbalance \
+    --orderbook-instrument-id BTC-USDT-SWAP --signal-bar 1m \
+    --total-bars 1440 --reuse-data
+````
+
+OKX has no historical orderbook REST endpoint — capture is mandatory before
+backtest. Frames are stored at `${catalog}/books5/<inst_id>/<YYYYMMDD>.parquet`
+(lz4-compressed). The strategy's `on_start` auto-loads via the
+`orderbook_parquet_path` config field, and `on_bar` drains frames through
+`process_orderbook()` before invoking normal bar logic.
 
 ---
 

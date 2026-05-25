@@ -63,6 +63,10 @@ SUPPORTED_STRATEGIES = {
         "okx_trade.strategies.basis_arb:BasisArbStrategy",
         "okx_trade.strategies.basis_arb:BasisArbConfig",
     ),
+    "ob_imbalance": (
+        "okx_trade.strategies.ob_imbalance:OBImbalanceStrategy",
+        "okx_trade.strategies.ob_imbalance:OBImbalanceConfig",
+    ),
 }
 
 
@@ -117,6 +121,8 @@ def _parse_args() -> argparse.Namespace:
                    help="maker 手续费率 (bps)，仅在 --taker-fee-bps > 0 时生效")
     p.add_argument("--futures-instrument-id", default=None,
                    help="dated future inst (basis_arb; e.g. BTC-USDT-250627)")
+    p.add_argument("--orderbook-instrument-id", default=None,
+                   help="ob_imbalance backtest target instrument (e.g. BTC-USDT-SWAP)")
     return p.parse_args()
 
 
@@ -668,6 +674,85 @@ async def _run_basis_arb(args: argparse.Namespace) -> None:
 
 
 # ---------------------------------------------------------------------------
+# ob_imbalance：books5 capture 回放 + 中频 imbalance 策略回测
+# ---------------------------------------------------------------------------
+
+
+async def _run_ob_imbalance(args: argparse.Namespace) -> None:
+    """Backtest ob_imbalance via captured books5 replay.
+
+    Requires a pre-captured orderbook catalog at ``${catalog}/books5/<inst>/...``.
+    Run scripts/capture_orderbook.py to populate.
+    """
+    inst_id = args.orderbook_instrument_id
+    if not inst_id:
+        raise SystemExit("ob_imbalance 需要 --orderbook-instrument-id")
+
+    catalog_path = Path(args.catalog).resolve()
+    if not (catalog_path / "books5" / inst_id).exists():
+        raise SystemExit(
+            f"orderbook cache missing at {catalog_path / 'books5' / inst_id}. "
+            f"Run: python scripts/capture_orderbook.py --inst-id {inst_id} ..."
+        )
+
+    if not args.reuse_data:
+        print(f"[1/4] downloading bars for {inst_id}...")
+    else:
+        print("[1/4] reusing catalog (--reuse-data)")
+
+    async with OKXRestClient(OKXSettings()) as client:
+        if not args.reuse_data:
+            _, bars = await prepare_backtest_catalog(
+                client, inst_id, args.signal_bar,
+                total=args.total_bars, catalog_path=str(catalog_path),
+            )
+            print(f"        {inst_id}: {len(bars)} bars")
+
+    print("[2/4] building backtest config...")
+    from nautilus_trader.backtest.config import BacktestDataConfig
+    from nautilus_trader.config import ImportableStrategyConfig
+    from nautilus_trader.model.data import Bar
+
+    nt_inst_id = f"{inst_id}.{OKX_VENUE}"
+    bar_type = make_bar_type(inst_id, args.signal_bar)
+    data_configs = [BacktestDataConfig(
+        catalog_path=str(catalog_path),
+        data_cls=Bar.fully_qualified_name(),
+        instrument_id=nt_inst_id,
+        bar_types=[str(bar_type)],
+    )]
+
+    venue = build_okx_venue_config(
+        starting_balance_usdt=args.equity,
+        leverage=args.leverage,
+        enable_fees=args.taker_fee_bps > 0,
+        **({"taker_fee_bps": args.taker_fee_bps, "maker_fee_bps": args.maker_fee_bps}
+           if args.taker_fee_bps > 0 else {}),
+    )
+
+    strategy_path, config_path = SUPPORTED_STRATEGIES["ob_imbalance"]
+    strategy_config = ImportableStrategyConfig(
+        strategy_path=strategy_path,
+        config_path=config_path,
+        config={
+            "instrument_id": nt_inst_id,
+            "bar_type": str(bar_type),
+            "subscribe_books5": False,  # critical: backtest mode
+            "orderbook_parquet_path": str(catalog_path),
+            "account_equity_usdt": args.equity,
+        },
+    )
+
+    print("[3/4] running backtest...")
+    summary = _run_and_maybe_plot(
+        args, venue=venue, data=data_configs, strategies=[strategy_config],
+        plot_title=f"ob_imbalance — {inst_id}",
+    )
+    print("\n=== RESULT ===")
+    print(summary)
+
+
+# ---------------------------------------------------------------------------
 # Dispatch
 # ---------------------------------------------------------------------------
 
@@ -678,6 +763,7 @@ _RUNNERS = {
     "funding_cross_section": _run_funding_cross_section,
     "funding_skew_momentum": _run_funding_skew_momentum,
     "basis_arb": _run_basis_arb,
+    "ob_imbalance": _run_ob_imbalance,
 }
 
 
