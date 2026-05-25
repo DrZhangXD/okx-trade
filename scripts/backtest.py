@@ -382,7 +382,6 @@ async def _run_funding_carry(args: argparse.Namespace) -> None:
         starting_balance_usdt=args.equity,
         leverage=args.leverage,
         enable_fees=args.taker_fee_bps > 0,
-        **fee_kwargs,
     )
 
     strategy_path, config_path = SUPPORTED_STRATEGIES["funding_carry"]
@@ -482,8 +481,6 @@ async def _run_funding_cross_section(args: argparse.Namespace) -> None:
         starting_balance_usdt=args.equity,
         leverage=args.leverage,
         enable_fees=args.taker_fee_bps > 0,
-        **({"taker_fee_bps": args.taker_fee_bps, "maker_fee_bps": args.maker_fee_bps}
-           if args.taker_fee_bps > 0 else {}),
     )
 
     strategy_path, config_path = SUPPORTED_STRATEGIES["funding_cross_section"]
@@ -563,8 +560,6 @@ async def _run_funding_skew_momentum(args: argparse.Namespace) -> None:
         starting_balance_usdt=args.equity,
         leverage=args.leverage,
         enable_fees=args.taker_fee_bps > 0,
-        **({"taker_fee_bps": args.taker_fee_bps, "maker_fee_bps": args.maker_fee_bps}
-           if args.taker_fee_bps > 0 else {}),
     )
 
     strategy_path, config_path = SUPPORTED_STRATEGIES["funding_skew_momentum"]
@@ -780,8 +775,6 @@ async def _run_basis_arb(args: argparse.Namespace) -> None:
         starting_balance_usdt=args.equity,
         leverage=args.leverage,
         enable_fees=args.taker_fee_bps > 0,
-        **({"taker_fee_bps": args.taker_fee_bps, "maker_fee_bps": args.maker_fee_bps}
-           if args.taker_fee_bps > 0 else {}),
     )
 
     strategy_path, config_path = SUPPORTED_STRATEGIES["basis_arb"]
@@ -861,8 +854,6 @@ async def _run_ob_imbalance(args: argparse.Namespace) -> None:
         starting_balance_usdt=args.equity,
         leverage=args.leverage,
         enable_fees=args.taker_fee_bps > 0,
-        **({"taker_fee_bps": args.taker_fee_bps, "maker_fee_bps": args.maker_fee_bps}
-           if args.taker_fee_bps > 0 else {}),
     )
 
     strategy_path, config_path = SUPPORTED_STRATEGIES["ob_imbalance"]
@@ -942,8 +933,6 @@ async def _run_option_vol_selling(args: argparse.Namespace) -> None:
         starting_balance_usdt=args.equity,
         leverage=args.leverage,
         enable_fees=args.taker_fee_bps > 0,
-        **({"taker_fee_bps": args.taker_fee_bps, "maker_fee_bps": args.maker_fee_bps}
-           if args.taker_fee_bps > 0 else {}),
     )
 
     strategy_path, config_path = SUPPORTED_STRATEGIES["option_vol_selling"]
@@ -1117,7 +1106,6 @@ async def _run_ml_fusion(args: argparse.Namespace) -> None:
         starting_balance_usdt=args.equity,
         leverage=args.leverage,
         enable_fees=args.taker_fee_bps > 0,
-        **fee_kwargs,
     )
 
     sample_bar_str = str(bar_types[0])

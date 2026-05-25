@@ -20,7 +20,22 @@ from ..adapter.parsing import (
     parse_okx_candle_to_bar,
     parse_okx_instrument,
 )
-from ..enums import BarSize
+from ..enums import BarSize, InstType
+
+
+def _infer_inst_type(inst_id: str) -> InstType:
+    """Infer OKX inst_type from inst_id string.
+
+    - ``BTC-USDT-SWAP`` → SWAP
+    - ``BTC-USDT-260626`` (YYMMDD suffix) → FUTURES
+    - ``BTC-USDT`` → SPOT
+    """
+    if inst_id.endswith("-SWAP"):
+        return InstType.SWAP
+    tail = inst_id.rsplit("-", 1)[-1]
+    if len(tail) == 6 and tail.isdigit():
+        return InstType.FUTURES
+    return InstType.SPOT
 
 if TYPE_CHECKING:
     from nautilus_trader.model.data import Bar
@@ -123,7 +138,7 @@ async def prepare_backtest_catalog(
     from ..enums import InstType
 
     # 1) 拉 instrument 规格
-    inst_type = InstType.SWAP if inst_id.endswith("-SWAP") else InstType.SPOT
+    inst_type = _infer_inst_type(inst_id)
     okx_inst = await client.public.get_instrument(inst_type, inst_id)
     nt_inst = parse_okx_instrument(
         okx_inst, ts_init=0,
