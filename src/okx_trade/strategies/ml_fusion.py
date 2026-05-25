@@ -40,6 +40,7 @@ from .qty import safe_make_qty
 
 if TYPE_CHECKING:
     from nautilus_trader.model.data import Bar
+    from ..backtest.funding_data import FundingPanel
 
 
 try:
@@ -159,6 +160,7 @@ if _NT_AVAILABLE:
         risk_pct: float = 0.003
         account_equity_usdt: float = 10000.0
         risk_config: RiskConfig | None = None
+        funding_panel_parquet_path: str | None = None
 
 
     class MLFusionStrategy(Strategy):  # type: ignore[misc]
@@ -195,7 +197,29 @@ if _NT_AVAILABLE:
             self._pnl_tracker = None  # type: ignore[var-annotated]
             self._last_equity_day: str | None = None
 
+            # Backtest funding-rate injection (mirrors funding_cross_section pattern):
+            # when funding_panel_parquet_path is set, on_start loads panels and
+            # _predict_and_trade routes funding feature lookups through them
+            # instead of leaving funding_current=0 / funding_history=None.
+            self._funding_panels: dict[str, "FundingPanel"] = {}
+            self._funding_source_kind: str = "rest"  # "rest" (live, currently no-op) | "panel" (backtest)
+            self._last_bar_ts_ms: int = 0
+
         def on_start(self) -> None:
+            if self.config.funding_panel_parquet_path:
+                from pathlib import Path
+                from ..backtest.funding_data import FundingPanel, read_funding_parquet
+                panels: dict[str, FundingPanel] = {}
+                cat_path = Path(self.config.funding_panel_parquet_path)
+                for inst_id_obj in self._inst_ids:
+                    sym = inst_id_obj.symbol.value  # bare inst id e.g. "BTC-USDT-SWAP"
+                    try:
+                        panels[sym] = read_funding_parquet(sym, catalog_path=cat_path)
+                    except FileNotFoundError:
+                        self.log.warning(f"ml_fusion: no funding panel for {sym}, skipping")
+                if panels:
+                    self.feed_funding_panel(panels)
+                    self.log.info(f"ml_fusion: loaded funding panels for {len(panels)} insts")
             for bar_type in self._bar_types.values():
                 self.subscribe_bars(bar_type)
             self._model = load_model(self.config.model_path)
@@ -212,6 +236,16 @@ if _NT_AVAILABLE:
         def on_stop(self) -> None:
             self.log.info(f"ml_fusion stop; open_legs={len(self._positions)}")
 
+        def feed_funding_panel(self, panels: dict[str, "FundingPanel"]) -> None:
+            """Inject pre-loaded funding panels keyed by bare inst_id (no venue suffix).
+
+            Used during backtest so funding_current / funding_z_30d features have
+            real values instead of zeros. No-op on live (funding stays REST-sourced,
+            though MLFusionStrategy doesn't currently poll funding live).
+            """
+            self._funding_panels = dict(panels)
+            self._funding_source_kind = "panel"
+
         def on_bar(self, bar: Bar) -> None:
             inst_value = bar.bar_type.instrument_id.value
             if inst_value not in self._closes:
@@ -221,6 +255,7 @@ if _NT_AVAILABLE:
 
             # Hold-period 检查：到了 target_horizon_hours 平仓
             now_ms = int(bar.ts_event // 1_000_000)
+            self._last_bar_ts_ms = now_ms
             stale_positions = []
             for inst_v, (_, _, entry_ts) in self._positions.items():
                 if now_ms - entry_ts >= self.config.target_horizon_hours * 3_600_000:
@@ -257,6 +292,22 @@ if _NT_AVAILABLE:
                     last_day=self._last_equity_day,
                 )
 
+        def _funding_for_inst(self, inst_id_symbol: str) -> tuple[float, list[float] | None]:
+            """Look up (current, history_90) for inst from injected panel; defaults otherwise."""
+            if self._funding_source_kind != "panel":
+                return 0.0, None
+            panel = self._funding_panels.get(inst_id_symbol)
+            if panel is None or not panel.ts_ms:
+                return 0.0, None
+            from bisect import bisect_right
+            ref_ts = self._last_bar_ts_ms if self._last_bar_ts_ms > 0 else panel.ts_ms[-1]
+            idx = bisect_right(panel.ts_ms, ref_ts) - 1
+            if idx < 0:
+                return 0.0, None
+            current = panel.rates[idx]
+            history = panel.rates[max(0, idx - 90):idx]
+            return current, (history if history else None)
+
         def _predict_and_trade(self, ts_ms: int) -> None:
             import numpy as np
 
@@ -269,9 +320,12 @@ if _NT_AVAILABLE:
                 closes = list(self._closes[iid.value])
                 if len(closes) < 50:
                     continue
+                funding_current, funding_history = self._funding_for_inst(iid.symbol.value)
                 feat = build_feature_row(
                     inst_id=iid.value, ts_ms=ts_ms,
                     closes=closes, btc_closes=btc_closes,
+                    funding_current=funding_current,
+                    funding_history=funding_history,
                 )
                 X_rows.append(feat.as_list())
                 inst_order.append(iid.value)
@@ -287,10 +341,14 @@ if _NT_AVAILABLE:
 
             for i, inst_value in enumerate(inst_order):
                 # 重建 FeatureRow（为日志友好）
+                bare_sym = inst_value.split(".")[0]
+                funding_current, funding_history = self._funding_for_inst(bare_sym)
                 feat = build_feature_row(
                     inst_id=inst_value, ts_ms=ts_ms,
                     closes=list(self._closes[inst_value]),
                     btc_closes=btc_closes,
+                    funding_current=funding_current,
+                    funding_history=funding_history,
                 )
                 rows.append((inst_value, feat, float(probas[i])))
 

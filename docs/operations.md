@@ -262,6 +262,54 @@ python scripts/backtest.py --strategy factor_portfolio \
 
 ---
 
+### 2.11 ml_fusion 回测 / 重训练 one-pager
+
+ml_fusion 是 XGBoost meta-strategy，跑回测前需要先训练。两步走：
+
+**1. 训练模型（首次或周末）**
+
+```bash
+pip install -e ".[ml-fusion]"     # 装 xgboost
+python scripts/ml_fusion_retrain.py \
+    --instrument-ids BTC-USDT-SWAP,ETH-USDT-SWAP,SOL-USDT-SWAP \
+    --bar-period 1H --total-bars 2000 \
+    --funding-total 750 \
+    --train-window-hours 1440 --test-window-hours 168 \
+    --output-path var/ml_fusion_model.pkl
+```
+
+会拉每个 inst 的 2000 根 1H bars + 750 个 funding rate 样本（≈ 8 个月），跑 walk-forward
+切分，选 OOS accuracy 最高的折，最后在全数据上 refit 一次。输出 pickle 到 `--output-path`
+（默认 `var/ml_fusion_model.pkl`）。
+
+`--funding-total` 默认 750 ≈ 8h × 750 = 6000h ≈ 250 天。
+
+**2. 跑回测**
+
+```bash
+python scripts/backtest.py --strategy ml_fusion \
+    --instrument-ids BTC-USDT-SWAP,ETH-USDT-SWAP,SOL-USDT-SWAP \
+    --signal-bar 1H --total-bars 2000 --funding-total 750 \
+    --ml-model-path var/ml_fusion_model.pkl
+```
+
+策略在 `on_start` 读 `--ml-model-path` 的 pickle 模型，并通过 `funding_panel_parquet_path`
+config 字段从 `${catalog}/funding/<inst>/<YYYYMM>.parquet` 自动加载 funding 历史，喂给
+`feed_funding_panel`（Plan 1 同款 NT injection 套路）。
+
+常见错误：
+- `ml_fusion model not found at ...` → 先跑 step 1 训练。
+- `ml_fusion 至少需要 2 个标的` → `--instrument-ids` 至少传 2 个（多空 baseline 需要 universe）。
+- `import xgboost` 报错 → `pip install -e ".[ml-fusion]"`。
+
+**模型时效性**：OOS 衰减半衰期约 2-4 周；建议每周/双周重训。可挂 cron：
+
+```bash
+0 4 * * 1 /home/okx-trade/venv/bin/python scripts/ml_fusion_retrain.py --instrument-ids ...
+```
+
+---
+
 ## 三、Cron / Observation 报告
 
 VPS 上的 `sudo crontab` 维护：
