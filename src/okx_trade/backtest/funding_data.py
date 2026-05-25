@@ -12,6 +12,10 @@ from __future__ import annotations
 
 from bisect import bisect_right
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from ..rest.client import OKXRestClient
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,3 +47,23 @@ class FundingPanel:
             return None
         idx = bisect_right(self.ts_ms, ts_ms) - 1
         return self.rates[idx]
+
+
+async def download_historical_funding_rates(
+    client: "OKXRestClient",
+    inst_id: str,
+    *,
+    total: int = 1095,
+) -> FundingPanel:
+    """Download up to ``total`` historical funding rates for ``inst_id``.
+
+    Uses the existing ``_extended`` paginated wrapper (handles 100/page +
+    deduplication). Returns a sorted ``FundingPanel``.
+    """
+    rates = await client.public.get_funding_rate_history_extended(inst_id, total=total)
+    sorted_rates = sorted(rates, key=lambda r: r.funding_time)
+    return FundingPanel(
+        inst_id=inst_id,
+        ts_ms=[r.funding_time for r in sorted_rates],
+        rates=[float(r.funding_rate) for r in sorted_rates],
+    )
