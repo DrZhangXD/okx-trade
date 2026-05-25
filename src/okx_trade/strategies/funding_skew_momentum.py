@@ -43,6 +43,7 @@ from .qty import safe_make_qty
 
 if TYPE_CHECKING:
     from nautilus_trader.model.data import Bar
+    from ..backtest.funding_data import FundingPanel
 
 
 TradeDir = Literal["long", "short"]
@@ -136,6 +137,12 @@ if _NT_AVAILABLE:
         check_interval_sec: int = 1800
         account_equity_usdt: float = 10000.0
         risk_config: RiskConfig | None = None
+        funding_panel_parquet_path: str | None = None
+        """Optional: parquet catalog root (the directory that contains a
+        ``funding/<inst_id>/<YYYYMM>.parquet`` subtree). When set, on_start
+        reads the panel via read_funding_parquet() and calls feed_funding_panel()
+        before any bar subscription. Used for backtest.
+        """
 
 
     class FundingSkewStrategy(Strategy):  # type: ignore[misc]
@@ -166,23 +173,64 @@ if _NT_AVAILABLE:
             self._rest = None  # type: ignore[var-annotated]
             self._rest_settings = None  # type: ignore[var-annotated]
 
+            self._funding_panels: dict[str, "FundingPanel"] = {}
+            self._funding_source_kind: str = "rest"
+
         def on_start(self) -> None:
+            if self.config.funding_panel_parquet_path:
+                from pathlib import Path
+                from ..backtest.funding_data import read_funding_parquet
+                sym = self._inst_id.symbol.value
+                try:
+                    panel = read_funding_parquet(
+                        sym, catalog_path=Path(self.config.funding_panel_parquet_path),
+                    )
+                    self.feed_funding_panel({sym: panel})
+                    self.log.info(f"loaded funding panel: {len(panel.ts_ms)} samples for {sym}")
+                except FileNotFoundError as exc:
+                    self.log.warning(f"funding panel auto-load failed: {exc}")
             self.subscribe_bars(self._bar_type)
             from ..config import OKXSettings
             self._rest_settings = OKXSettings()
-            # 异步预填充 30d funding rate history
-            try:
-                loop = asyncio.get_running_loop()
-                loop.create_task(self._bootstrap_history())
-            except RuntimeError:
-                self.log.warning("funding_skew: no running loop; skip history bootstrap")
+            # 异步预填充 30d funding rate history（panel 模式下跳过 REST bootstrap）
+            if self._funding_source_kind != "panel":
+                try:
+                    loop = asyncio.get_running_loop()
+                    loop.create_task(self._bootstrap_history())
+                except RuntimeError:
+                    self.log.warning("funding_skew: no running loop; skip history bootstrap")
             self.log.info(
                 f"funding_skew start: inst={self._inst_id.value} "
-                f"z_thr={self.config.z_threshold}σ history={self.config.history_periods}"
+                f"z_thr={self.config.z_threshold}σ history={self.config.history_periods} "
+                f"source={self._funding_source_kind}"
             )
 
         def on_stop(self) -> None:
             self.log.info(f"funding_skew stop; active={self._active_direction}")
+
+        def feed_funding_panel(self, panels: dict[str, "FundingPanel"]) -> None:
+            """Inject pre-loaded funding panels + pre-fill rolling history deque.
+
+            Replaces the async ``_bootstrap_history`` REST call in backtest mode.
+
+            Args:
+                panels: Mapping of inst_id (symbol, e.g. "BTC-USDT-SWAP") to
+                    :class:`FundingPanel`. Only the panel whose key matches this
+                    strategy's instrument symbol is consumed.
+            """
+            from collections import deque as _deque
+            self._funding_panels = dict(panels)
+            self._funding_source_kind = "panel"
+            # This strategy is single-instrument; find the matching panel by symbol.
+            symbol = self._inst_id.symbol.value  # e.g. "BTC-USDT-SWAP"
+            panel = panels.get(symbol)
+            if panel is None:
+                return
+            # Re-initialise the deque with the correct maxlen and pre-fill.
+            maxlen = self.config.history_periods
+            self._funding_history = _deque(maxlen=maxlen)
+            for rate in panel.rates[-maxlen:]:
+                self._funding_history.append(rate)
 
         async def _bootstrap_history(self) -> None:
             try:

@@ -45,6 +45,7 @@ from .qty import safe_make_qty
 
 if TYPE_CHECKING:
     from nautilus_trader.model.data import Bar
+    from ..backtest.funding_data import FundingPanel
 
 
 try:
@@ -127,6 +128,15 @@ if _NT_AVAILABLE:
         # collateral is untouched, and no other strategy's margin is bled.
         # Set to "cross" to revert to account-wide pooling.
         td_mode_override: str = "isolated"
+        funding_panel_parquet_path: str | None = None
+        """Optional: parquet catalog root (the directory that contains a
+        ``funding/<inst_id>/<YYYYMM>.parquet`` subtree). When set, on_start
+        reads the panel via read_funding_parquet() and calls feed_funding_panel()
+        before any bar subscription. Used for backtest.
+        """
+        funding_perp_instrument_id: str | None = None
+        """Optional: perp inst_id (e.g. BTC-USDT-SWAP) whose funding panel to
+        load for context. Only used when funding_panel_parquet_path is set."""
 
 
     class BasisArbStrategy(Strategy):  # type: ignore[misc]
@@ -170,6 +180,8 @@ if _NT_AVAILABLE:
                 if config.td_mode_override else None
             )
 
+            self._funding_panel: "FundingPanel | None" = None
+
             self._risk_manager, self._risk_handles = build_risk_manager(config.risk_config)
             self._prev_spot_close: float | None = None
 
@@ -180,6 +192,20 @@ if _NT_AVAILABLE:
             self._entry_futures_price: float = 0.0
 
         def on_start(self) -> None:
+            if self.config.funding_panel_parquet_path and self.config.funding_perp_instrument_id:
+                from pathlib import Path
+                from ..backtest.funding_data import read_funding_parquet
+                try:
+                    panel = read_funding_parquet(
+                        self.config.funding_perp_instrument_id,
+                        catalog_path=Path(self.config.funding_panel_parquet_path),
+                    )
+                    self.feed_funding_panel(panel)
+                    self.log.info(
+                        f"loaded funding context panel: {len(panel.ts_ms)} samples"
+                    )
+                except FileNotFoundError as exc:
+                    self.log.warning(f"funding panel auto-load failed: {exc}")
             self.subscribe_bars(self.spot_bar_type)
             from ..config import OKXSettings
             self._rest_settings = OKXSettings()
@@ -208,6 +234,12 @@ if _NT_AVAILABLE:
 
         def on_stop(self) -> None:
             self.log.info(f"basis_arb stop; has_position={self._has_position}")
+
+        def feed_funding_panel(self, panel: "FundingPanel") -> None:
+            """Optional funding-context hook for backtest. Stored but not yet used in
+            entry decision (reserved for future regime-filter wiring).
+            """
+            self._funding_panel = panel
 
         def _feed_risk_data(self, ts_ms: int, close: float) -> None:
             handles = self._risk_handles

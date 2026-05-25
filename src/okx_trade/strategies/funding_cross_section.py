@@ -44,6 +44,7 @@ from .qty import safe_make_qty
 
 if TYPE_CHECKING:
     from nautilus_trader.model.data import Bar
+    from ..backtest.funding_data import FundingPanel
 
 
 try:
@@ -98,6 +99,12 @@ if _NT_AVAILABLE:
         # per instrument so β-hedge is accurate from the first rebalance instead
         # of waiting ~30 days of live 1D bars. Disable for backtest.
         warmup_via_rest: bool = True
+        funding_panel_parquet_path: str | None = None
+        """Optional: parquet catalog root (the directory that contains a
+        ``funding/<inst_id>/<YYYYMM>.parquet`` subtree). When set, on_start
+        reads the panel via read_funding_parquet() and calls feed_funding_panel()
+        before any bar subscription. Used for backtest.
+        """
 
 
     class FundingXSStrategy(Strategy):  # type: ignore[misc]
@@ -139,8 +146,25 @@ if _NT_AVAILABLE:
             self._warmup_task: asyncio.Task | None = None
             self._rest = None  # type: ignore[var-annotated]
             self._rest_settings = None  # type: ignore[var-annotated]
+            self._funding_panels: dict[str, "FundingPanel"] = {}
+            self._funding_source_kind: str = "rest"  # "rest" (live) | "panel" (backtest)
 
         def on_start(self) -> None:
+            # Backtest: auto-load funding panels for all configured insts
+            if self.config.funding_panel_parquet_path:
+                from pathlib import Path
+                from ..backtest.funding_data import FundingPanel, read_funding_parquet
+                panels: dict[str, FundingPanel] = {}
+                cat_path = Path(self.config.funding_panel_parquet_path)
+                for inst_id_obj in self._inst_ids:
+                    sym = inst_id_obj.symbol.value
+                    try:
+                        panels[sym] = read_funding_parquet(sym, catalog_path=cat_path)
+                    except FileNotFoundError:
+                        self.log.warning(f"no funding panel for {sym}, skipping")
+                if panels:
+                    self.feed_funding_panel(panels)
+                    self.log.info(f"loaded funding panels for {len(panels)} insts")
             for iid, bar_type in self._bar_types.items():
                 self.subscribe_bars(bar_type)
             from ..config import OKXSettings
@@ -166,6 +190,34 @@ if _NT_AVAILABLE:
                 self._warmup_task.cancel()
                 self._warmup_task = None
             self.log.info(f"funding_xs stop; open_legs={len(self._positions)}")
+
+        def feed_funding_panel(self, panels: dict[str, "FundingPanel"]) -> None:
+            """Inject pre-loaded funding panels keyed by inst_id (no venue suffix).
+
+            When called, the funding-rate poll routes lookups through these
+            panels instead of hitting REST.
+            """
+            self._funding_panels = dict(panels)
+            self._funding_source_kind = "panel"
+
+        async def _fetch_current_funding(self, inst_id_symbol: str) -> float | None:
+            """Return latest funding rate for one inst from the active source.
+
+            Args:
+                inst_id_symbol: bare symbol without venue, e.g. ``"BTC-USDT-SWAP"``.
+            """
+            if self._funding_source_kind == "panel":
+                panel = self._funding_panels.get(inst_id_symbol)
+                if panel is None:
+                    return None
+                # Use the latest seen bar timestamp; fall back to last sample if no bar yet
+                ts_ms = int(getattr(self, "_last_bar_ts_ns", 0) // 1_000_000)
+                if ts_ms <= 0 and panel.ts_ms:
+                    return panel.rates[-1]
+                return panel.rate_at_or_before(ts_ms)
+            # REST path (live)
+            fr = await self._rest.public.get_funding_rate(inst_id_symbol)
+            return float(fr.funding_rate)
 
         async def _warmup_closes_via_rest(self) -> None:
             """One-shot REST fetch of ``beta_window_days + 2`` 1D closes per
@@ -261,21 +313,21 @@ if _NT_AVAILABLE:
 
         async def _rebalance_async(self) -> None:
             try:
-                if self._rest is None:
+                if self._funding_source_kind == "rest" and self._rest is None:
                     from ..rest.client import OKXRestClient
                     self._rest = OKXRestClient(self._rest_settings)
                     await self._rest.__aenter__()
-                # 1) 拉所有 universe 当前 funding rate
+                # 1) 拉所有 universe 当前 funding rate（REST or panel）
                 funding_tasks = [
-                    self._rest.public.get_funding_rate(iid.symbol.value)
+                    self._fetch_current_funding(iid.symbol.value)
                     for iid in self._inst_ids
                 ]
                 rates = await asyncio.gather(*funding_tasks, return_exceptions=True)
                 self._latest_funding = {}
                 for iid, r in zip(self._inst_ids, rates):
-                    if isinstance(r, Exception):
+                    if isinstance(r, Exception) or r is None:
                         continue
-                    self._latest_funding[iid.value] = float(r.funding_rate)
+                    self._latest_funding[iid.value] = float(r)
 
                 # 2) 选股 + 计算 β-hedged 仓位
                 target_positions = self._compute_target_positions()

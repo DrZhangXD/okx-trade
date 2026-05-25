@@ -48,6 +48,7 @@ from .qty import safe_make_qty
 
 if TYPE_CHECKING:
     from nautilus_trader.model.data import Bar
+    from ..backtest.funding_data import FundingPanel
 
 
 class CarryAction(str, Enum):
@@ -186,6 +187,12 @@ if _NT_AVAILABLE:
         # M3.6 风控（None → 透明跳过；推荐 enable_drawdown=True，不开 vol_target——
         # delta-neutral 仓位的 vol≈0，vol_target 没意义）
         risk_config: RiskConfig | None = None
+        funding_panel_parquet_path: str | None = None
+        """Optional: parquet catalog root (the directory that contains a
+        ``funding/<inst_id>/<YYYYMM>.parquet`` subtree). When set, on_start
+        reads the panel via read_funding_parquet() and calls feed_funding_panel()
+        before any bar subscription. Used for backtest.
+        """
 
     class FundingCarryStrategy(Strategy):  # type: ignore[misc]
         """Funding cash-and-carry：定时拉 funding rate，命中阈值开/平 delta-neutral 组合。
@@ -221,6 +228,8 @@ if _NT_AVAILABLE:
             self._check_task: asyncio.Task | None = None
             # 可注入的 funding-rate 取数函数（测试时用 stub）；默认走 REST
             self._funding_fetcher = None  # 由 on_start 初始化
+            self._funding_panel: "FundingPanel | None" = None
+            self._funding_source_kind: str = "rest"  # "rest" (live) | "panel" (backtest)
 
             # M3.6 风控
             self._risk_manager, self._risk_handles = build_risk_manager(config.risk_config)
@@ -235,6 +244,22 @@ if _NT_AVAILABLE:
             self._carry_entry_spot_price: float = 0.0
 
         def on_start(self) -> None:
+            # Backtest: auto-load funding panel from parquet if configured
+            if self.config.funding_panel_parquet_path:
+                from pathlib import Path
+                from ..backtest.funding_data import read_funding_parquet
+                try:
+                    panel = read_funding_parquet(
+                        self.perp_id.symbol.value,
+                        catalog_path=Path(self.config.funding_panel_parquet_path),
+                    )
+                    self.feed_funding_panel(panel)
+                    self.log.info(
+                        f"loaded funding panel: {len(panel.ts_ms)} samples "
+                        f"for {self.perp_id.symbol.value}"
+                    )
+                except FileNotFoundError as exc:
+                    self.log.warning(f"funding panel auto-load failed: {exc}")
             self.subscribe_bars(self.spot_bar_type)
             # 实盘：构造一个独立 REST 客户端拉 funding rate
             # 不复用 adapter 的 OKXRestClient，避免事件循环耦合
@@ -306,21 +331,24 @@ if _NT_AVAILABLE:
         def on_stop(self) -> None:
             self.log.info(f"funding_carry stop; has_position={self._has_position}")
 
-        async def _check_funding_async(self) -> None:
-            """异步拉 funding rate 并按 decision 执行。"""
-            try:
-                if self._rest is None:
-                    from ..rest.client import OKXRestClient
-                    self._rest = OKXRestClient(self._rest_settings)
-                    await self._rest.__aenter__()
+        def feed_funding_panel(self, panel: "FundingPanel") -> None:
+            """Inject a pre-loaded funding-rate panel for backtest.
 
-                perp_inst_id_str = self.perp_id.symbol.value
-                fr = await self._rest.public.get_funding_rate(perp_inst_id_str)
-                rate_8h = float(fr.funding_rate)
+            When called, the strategy will look up rates from the panel
+            (keyed by latest bar timestamp) instead of hitting REST.
+            """
+            self._funding_panel = panel
+            self._funding_source_kind = "panel"
+
+        async def _check_funding_async(self) -> None:
+            """Pull funding rate (REST live, or panel for backtest) and act."""
+            try:
+                rate_8h = await self._fetch_current_funding()
+                if rate_8h is None:
+                    return  # no data yet
                 action = funding_carry_decision(rate_8h, self._has_position, self._params)
                 self.log.info(
-                    f"funding={rate_8h:+.4%}/8h apr={float(fr.apr):+.2%} "
-                    f"action={action.value} pos={self._has_position}"
+                    f"funding={rate_8h:+.4%}/8h action={action.value} pos={self._has_position}"
                 )
                 if action == CarryAction.ENTER:
                     self._enter_carry()
@@ -328,6 +356,23 @@ if _NT_AVAILABLE:
                     self._exit_carry()
             except Exception as exc:
                 self.log.error(f"funding check failed: {exc}")
+
+        async def _fetch_current_funding(self) -> float | None:
+            """Return latest 8h funding rate from the active source."""
+            if self._funding_source_kind == "panel" and self._funding_panel is not None:
+                # Use the latest bar timestamp we have seen
+                if self._last_check_ts_ns <= 0:
+                    return None
+                ts_ms = int(self._last_check_ts_ns // 1_000_000)
+                return self._funding_panel.rate_at_or_before(ts_ms)
+            # REST path (live)
+            if self._rest is None:
+                from ..rest.client import OKXRestClient
+                self._rest = OKXRestClient(self._rest_settings)
+                await self._rest.__aenter__()
+            perp_inst_id_str = self.perp_id.symbol.value
+            fr = await self._rest.public.get_funding_rate(perp_inst_id_str)
+            return float(fr.funding_rate)
 
         def _enter_carry(self) -> None:
             spot_inst = self.cache.instrument(self.spot_id)
