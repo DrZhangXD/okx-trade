@@ -19,12 +19,9 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 def test_margin_sim_isolates_futures_blowout_from_spot_survival():
-    """Engineered scenario: enter cash-and-carry; futures premium explodes;
-    futures sub-account liquidates; spot sub-account survives intact.
-
-    Note: mmr=0.8 is deliberately elevated (real OKX is ~0.005) so the test
-    reaches the liquidation threshold within 200 synthetic bars.  The goal is
-    to verify the *isolation mechanic*, not a realistic parameter set.
+    """Engineered scenario: enter cash-and-carry; futures premium explodes
+    100%+ above spot; futures sub-account liquidates at realistic MMR=0.5%
+    while the spot sub-account survives intact.
     """
     from okx_trade.backtest.basis_arb_sim import run_basis_arb_sim
     from okx_trade.strategies._signals import BasisArbParams
@@ -35,16 +32,18 @@ def test_margin_sim_isolates_futures_blowout_from_spot_survival():
 
     # Spot drifts up modestly (positive market environment)
     spot_bars = [(base_ts + i * bar_ms, 60_000.0 + 5.0 * i) for i in range(n)]
-    # Futures: starts at 0.5% premium, blows out from bar 50 onward at +0.4%/bar
+    # Futures: starts at ~3% premium (entry-worthy at 30-day APR), blows out
+    # from bar 30 onward at +1.5%/bar so premium exceeds 200% within the window
+    # — enough to crater the short futures account at realistic MMR (0.5%).
     futures_bars = []
     for i, (ts, s) in enumerate(spot_bars):
-        if i < 50:
-            premium = 0.005  # 0.5% — entry-worthy at 30-day APR
+        if i < 30:
+            premium = 0.03
         else:
-            premium = 0.005 + 0.004 * (i - 49)  # explode
+            premium = 0.03 + 0.015 * (i - 29)
         futures_bars.append((ts, s * (1 + premium)))
 
-    # 30-day expiry, decreasing 0.5 days per bar
+    # 30-day expiry, decreasing 0.05 days per bar
     dte = [max(0.5, 30.0 - i * 0.05) for i in range(n)]
 
     res = run_basis_arb_sim(
@@ -57,7 +56,7 @@ def test_margin_sim_isolates_futures_blowout_from_spot_survival():
         ),
         starting_cash_usdt=10_000.0,
         futures_margin_pct=0.5,
-        mmr=0.8,   # elevated: triggers liq at ~bar 82 within the 200-bar window
+        mmr=0.005,   # OKX tier-1 BTC perp MMR
         fee_bps=5.0,
     )
 
