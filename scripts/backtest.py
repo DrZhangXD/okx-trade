@@ -892,6 +892,7 @@ async def _run_factor_portfolio(args: argparse.Namespace) -> None:
     include = ("close", "volume_usdt", "funding_rate", "open_interest")
     cache_dir = Path(args.research_cache_dir)
     catalog_path = Path(args.catalog).resolve()
+    catalog_path.mkdir(parents=True, exist_ok=True)
 
     print(
         f"[0/3] pre-warming research panel cache "
