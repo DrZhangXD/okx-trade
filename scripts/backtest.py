@@ -67,6 +67,10 @@ SUPPORTED_STRATEGIES = {
         "okx_trade.strategies.ob_imbalance:OBImbalanceStrategy",
         "okx_trade.strategies.ob_imbalance:OBImbalanceConfig",
     ),
+    "option_vol_selling": (
+        "okx_trade.strategies.option_vol_selling:OptionVolStrategy",
+        "okx_trade.strategies.option_vol_selling:OptionVolConfig",
+    ),
 }
 
 
@@ -123,6 +127,8 @@ def _parse_args() -> argparse.Namespace:
                    help="dated future inst (basis_arb; e.g. BTC-USDT-250627)")
     p.add_argument("--orderbook-instrument-id", default=None,
                    help="ob_imbalance backtest target instrument (e.g. BTC-USDT-SWAP)")
+    p.add_argument("--option-underlying", default=None,
+                   help="option_vol_selling backtest underlying (e.g. BTC-USD)")
     return p.parse_args()
 
 
@@ -753,6 +759,87 @@ async def _run_ob_imbalance(args: argparse.Namespace) -> None:
 
 
 # ---------------------------------------------------------------------------
+# option_vol_selling：short straddle + delta hedge via captured option summary
+# ---------------------------------------------------------------------------
+
+
+async def _run_option_vol_selling(args: argparse.Namespace) -> None:
+    """Backtest option_vol_selling via captured option summary snapshots.
+
+    Requires a pre-captured option summary catalog at
+    ${catalog}/option_summary/<underlying>/...
+    Run scripts/capture_option_summary.py to populate.
+    """
+    if not args.option_underlying or not args.perp_instrument_id:
+        raise SystemExit(
+            "option_vol_selling 需要 --option-underlying 和 --perp-instrument-id"
+        )
+    catalog_path = Path(args.catalog).resolve()
+    summary_dir = catalog_path / "option_summary" / args.option_underlying
+    if not summary_dir.exists():
+        raise SystemExit(
+            f"option_summary cache missing at {summary_dir}. "
+            f"Run: python scripts/capture_option_summary.py --underlying {args.option_underlying}"
+        )
+
+    if not args.reuse_data:
+        print(f"[1/4] downloading perp bars for {args.perp_instrument_id}...")
+    else:
+        print("[1/4] reusing catalog (--reuse-data)")
+
+    async with OKXRestClient(OKXSettings()) as client:
+        if not args.reuse_data:
+            _, bars = await prepare_backtest_catalog(
+                client, args.perp_instrument_id, args.signal_bar,
+                total=args.total_bars, catalog_path=str(catalog_path),
+            )
+            print(f"        {args.perp_instrument_id}: {len(bars)} bars")
+
+    print("[2/4] building backtest config...")
+    from nautilus_trader.backtest.config import BacktestDataConfig
+    from nautilus_trader.config import ImportableStrategyConfig
+    from nautilus_trader.model.data import Bar
+
+    perp_nt_id = f"{args.perp_instrument_id}.{OKX_VENUE}"
+    perp_bar_type = make_bar_type(args.perp_instrument_id, args.signal_bar)
+    data_configs = [BacktestDataConfig(
+        catalog_path=str(catalog_path),
+        data_cls=Bar.fully_qualified_name(),
+        instrument_id=perp_nt_id,
+        bar_types=[str(perp_bar_type)],
+    )]
+
+    venue = build_okx_venue_config(
+        starting_balance_usdt=args.equity,
+        leverage=args.leverage,
+        enable_fees=args.taker_fee_bps > 0,
+        **({"taker_fee_bps": args.taker_fee_bps, "maker_fee_bps": args.maker_fee_bps}
+           if args.taker_fee_bps > 0 else {}),
+    )
+
+    strategy_path, config_path = SUPPORTED_STRATEGIES["option_vol_selling"]
+    strategy_config = ImportableStrategyConfig(
+        strategy_path=strategy_path,
+        config_path=config_path,
+        config={
+            "underlying": args.option_underlying,
+            "perp_instrument_id": perp_nt_id,
+            "perp_bar_type": str(perp_bar_type),
+            "option_summary_parquet_path": str(catalog_path),
+            "account_equity_usdt": args.equity,
+        },
+    )
+    print(f"        underlying={args.option_underlying} perp={perp_nt_id}")
+    print("[3/4] running backtest...")
+    summary = _run_and_maybe_plot(
+        args, venue=venue, data=data_configs, strategies=[strategy_config],
+        plot_title=f"option_vol_selling — {args.option_underlying}",
+    )
+    print("\n=== RESULT ===")
+    print(summary)
+
+
+# ---------------------------------------------------------------------------
 # Dispatch
 # ---------------------------------------------------------------------------
 
@@ -764,6 +851,7 @@ _RUNNERS = {
     "funding_skew_momentum": _run_funding_skew_momentum,
     "basis_arb": _run_basis_arb,
     "ob_imbalance": _run_ob_imbalance,
+    "option_vol_selling": _run_option_vol_selling,
 }
 
 
