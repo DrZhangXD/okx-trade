@@ -67,3 +67,78 @@ async def download_historical_funding_rates(
         ts_ms=[r.funding_time for r in sorted_rates],
         rates=[float(r.funding_rate) for r in sorted_rates],
     )
+
+
+from datetime import datetime, timezone
+from pathlib import Path
+
+import pyarrow as pa
+import pyarrow.compute
+import pyarrow.parquet as pq
+
+
+_FUNDING_SCHEMA = pa.schema([
+    pa.field("ts_ms", pa.int64()),
+    pa.field("funding_rate", pa.float64()),
+])
+
+
+def _partition_key(ts_ms: int) -> str:
+    """Bucket a timestamp into YYYYMM partition key (UTC)."""
+    return datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc).strftime("%Y%m")
+
+
+def write_funding_parquet(
+    panel: FundingPanel,
+    *,
+    catalog_path: Path,
+) -> list[Path]:
+    """Write panel to ``${catalog_path}/funding/<inst_id>/<YYYYMM>.parquet``.
+
+    Splits by month so partial refresh is cheap. Overwrites existing month files.
+    Returns the list of files written.
+    """
+    base = catalog_path / "funding" / panel.inst_id
+    base.mkdir(parents=True, exist_ok=True)
+
+    buckets: dict[str, tuple[list[int], list[float]]] = {}
+    for ts, rate in zip(panel.ts_ms, panel.rates, strict=True):
+        key = _partition_key(ts)
+        if key not in buckets:
+            buckets[key] = ([], [])
+        buckets[key][0].append(ts)
+        buckets[key][1].append(rate)
+
+    written: list[Path] = []
+    for key, (ts_list, rate_list) in buckets.items():
+        table = pa.Table.from_arrays(
+            [pa.array(ts_list, type=pa.int64()), pa.array(rate_list, type=pa.float64())],
+            schema=_FUNDING_SCHEMA,
+        )
+        path = base / f"{key}.parquet"
+        pq.write_table(table, path, compression="snappy")
+        written.append(path)
+    return written
+
+
+def read_funding_parquet(
+    inst_id: str,
+    *,
+    catalog_path: Path,
+) -> FundingPanel:
+    """Read all monthly parquet files for ``inst_id`` and return a merged panel."""
+    base = catalog_path / "funding" / inst_id
+    if not base.exists():
+        raise FileNotFoundError(f"no funding cache at {base}")
+    files = sorted(base.glob("*.parquet"))
+    if not files:
+        raise FileNotFoundError(f"no parquet files in {base}")
+    tables = [pq.read_table(f) for f in files]
+    merged = pa.concat_tables(tables)
+    sort_idx = pyarrow.compute.sort_indices(merged, sort_keys=[("ts_ms", "ascending")])
+    sorted_table = merged.take(sort_idx)
+    return FundingPanel(
+        inst_id=inst_id,
+        ts_ms=sorted_table["ts_ms"].to_pylist(),
+        rates=sorted_table["funding_rate"].to_pylist(),
+    )

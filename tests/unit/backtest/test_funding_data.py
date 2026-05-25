@@ -58,3 +58,21 @@ async def test_download_historical_funding_rates_calls_extended_and_sorts():
 def test_funding_panel_rejects_unsorted_timestamps():
     with pytest.raises(ValueError, match="sorted ascending"):
         FundingPanel(inst_id="BTC-USDT-SWAP", ts_ms=[2, 1], rates=[0.0001, 0.0002])
+
+
+def test_funding_panel_parquet_roundtrip(tmp_path):
+    from okx_trade.backtest.funding_data import write_funding_parquet, read_funding_parquet
+
+    panel = FundingPanel(
+        inst_id="BTC-USDT-SWAP",
+        ts_ms=[1_700_000_000_000, 1_700_028_800_000, 1_700_057_600_000],
+        rates=[0.0001, 0.0002, 0.00015],
+    )
+    written_paths = write_funding_parquet(panel, catalog_path=tmp_path)
+    assert len(written_paths) >= 1
+    assert all(p.suffix == ".parquet" for p in written_paths)
+    assert all(p.exists() for p in written_paths)
+
+    loaded = read_funding_parquet(panel.inst_id, catalog_path=tmp_path)
+    assert loaded.ts_ms == panel.ts_ms
+    assert loaded.rates == panel.rates
