@@ -284,6 +284,17 @@ async def _run_funding_carry(args: argparse.Namespace) -> None:
             perp_inst = parse_okx_instrument(okx_perp, ts_init=0)
             write_instrument_to_catalog(catalog_path, perp_inst)
             print(f"        spot={len(spot_bars)} bars, perp instrument registered in catalog")
+
+            # Download funding rate history for the perp (writes to catalog/funding/<inst_id>/<YYYYMM>.parquet)
+            # The strategy will auto-load via on_start's read_funding_parquet() call.
+            from okx_trade.backtest.data_loader import prepare_funding_panel
+            funding_panel = await prepare_funding_panel(
+                client, args.perp_instrument_id,
+                total=args.funding_total,
+                catalog_path=catalog_path,
+                reuse_cache=args.reuse_data,
+            )
+            print(f"        funding panel: {len(funding_panel.ts_ms)} samples")
     else:
         print("[1/4] reusing catalog (--reuse-data)")
 
@@ -329,6 +340,7 @@ async def _run_funding_carry(args: argparse.Namespace) -> None:
             "exit_apr_threshold": args.exit_apr_threshold,
             "max_position_pct": args.max_position_pct,
             "account_equity_usdt": args.equity,
+            "funding_panel_parquet_path": str(catalog_path),
         },
     )
 
