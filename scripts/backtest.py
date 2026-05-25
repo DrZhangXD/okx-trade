@@ -51,6 +51,14 @@ SUPPORTED_STRATEGIES = {
         "okx_trade.strategies.funding_carry:FundingCarryStrategy",
         "okx_trade.strategies.funding_carry:FundingCarryConfig",
     ),
+    "funding_cross_section": (
+        "okx_trade.strategies.funding_cross_section:FundingXSStrategy",
+        "okx_trade.strategies.funding_cross_section:FundingXSConfig",
+    ),
+    "funding_skew_momentum": (
+        "okx_trade.strategies.funding_skew_momentum:FundingSkewStrategy",
+        "okx_trade.strategies.funding_skew_momentum:FundingSkewConfig",
+    ),
 }
 
 
@@ -361,6 +369,177 @@ async def _run_funding_carry(args: argparse.Namespace) -> None:
 
 
 # ---------------------------------------------------------------------------
+# funding_cross_section：多标的 funding 横截面套利
+# ---------------------------------------------------------------------------
+
+
+async def _run_funding_cross_section(args: argparse.Namespace) -> None:
+    if not args.instrument_ids:
+        raise SystemExit("funding_cross_section 需要 --instrument-ids (逗号分隔)")
+    inst_id_list = [s.strip() for s in args.instrument_ids.split(",") if s.strip()]
+    if len(inst_id_list) < 2:
+        raise SystemExit(f"funding_cross_section 至少需要 2 个标的，得到 {len(inst_id_list)}")
+
+    catalog_path = Path(args.catalog).resolve()
+    catalog_path.mkdir(parents=True, exist_ok=True)
+
+    from okx_trade.backtest.data_loader import prepare_funding_panel
+
+    if not args.reuse_data:
+        print(f"[1/4] downloading bars + funding panels for {len(inst_id_list)} insts...")
+    else:
+        print("[1/4] reusing catalog (--reuse-data)")
+
+    async with OKXRestClient(OKXSettings()) as client:
+        for inst_id in inst_id_list:
+            if not args.reuse_data:
+                _, bars = await prepare_backtest_catalog(
+                    client, inst_id, args.signal_bar,
+                    total=args.total_bars, catalog_path=str(catalog_path),
+                )
+                print(f"        {inst_id}: {len(bars)} bars")
+            # Always ensure funding panel is cached (function handles cache-or-download)
+            panel = await prepare_funding_panel(
+                client, inst_id, total=args.funding_total,
+                catalog_path=catalog_path, reuse_cache=args.reuse_data,
+            )
+            if not args.reuse_data:
+                print(f"        {inst_id}: funding={len(panel.ts_ms)} samples")
+
+    print("[2/4] building backtest config...")
+    from nautilus_trader.backtest.config import BacktestDataConfig
+    from nautilus_trader.config import ImportableStrategyConfig
+    from nautilus_trader.model.data import Bar
+
+    nt_instrument_ids = [f"{s}.{OKX_VENUE}" for s in inst_id_list]
+    bar_types = [make_bar_type(s, args.signal_bar) for s in inst_id_list]
+
+    data_configs = [
+        BacktestDataConfig(
+            catalog_path=str(catalog_path),
+            data_cls=Bar.fully_qualified_name(),
+            instrument_id=instrument_id,
+            bar_types=[str(bar_type)],
+        )
+        for instrument_id, bar_type in zip(nt_instrument_ids, bar_types)
+    ]
+
+    # Build bar_type_template using the same trick as xs_momentum
+    sample_bar_str = str(bar_types[0])
+    template_suffix = sample_bar_str.split(".OKX-", 1)[1]
+    bar_type_template = "{inst}-" + template_suffix
+
+    venue = build_okx_venue_config(
+        starting_balance_usdt=args.equity,
+        leverage=args.leverage,
+        enable_fees=args.taker_fee_bps > 0,
+        **({"taker_fee_bps": args.taker_fee_bps, "maker_fee_bps": args.maker_fee_bps}
+           if args.taker_fee_bps > 0 else {}),
+    )
+
+    strategy_path, config_path = SUPPORTED_STRATEGIES["funding_cross_section"]
+    strategy_config = ImportableStrategyConfig(
+        strategy_path=strategy_path,
+        config_path=config_path,
+        config={
+            "instrument_ids": tuple(nt_instrument_ids),
+            "beta_bar_type_template": bar_type_template,
+            "account_equity_usdt": args.equity,
+            "funding_panel_parquet_path": str(catalog_path),
+        },
+    )
+
+    print(f"        funding_panel_parquet_path={catalog_path}")
+    print("[3/4] running backtest...")
+    summary = _run_and_maybe_plot(
+        args, venue=venue, data=data_configs, strategies=[strategy_config],
+        plot_title=f"funding_cross_section — {','.join(inst_id_list)}",
+    )
+    print("\n=== RESULT ===")
+    print(summary)
+
+
+# ---------------------------------------------------------------------------
+# funding_skew_momentum：单标的 funding rate 极端拥挤反向交易
+# ---------------------------------------------------------------------------
+
+
+async def _run_funding_skew_momentum(args: argparse.Namespace) -> None:
+    inst_id = args.symbol or (
+        args.instrument_ids.split(",")[0].strip() if args.instrument_ids else None
+    )
+    if not inst_id:
+        raise SystemExit("funding_skew_momentum 需要 --symbol 或 --instrument-ids (取第一个)")
+
+    catalog_path = Path(args.catalog).resolve()
+    catalog_path.mkdir(parents=True, exist_ok=True)
+
+    from okx_trade.backtest.data_loader import prepare_funding_panel
+
+    if not args.reuse_data:
+        print(f"[1/4] downloading bars + funding panel for {inst_id}...")
+    else:
+        print("[1/4] reusing catalog (--reuse-data)")
+
+    async with OKXRestClient(OKXSettings()) as client:
+        if not args.reuse_data:
+            _, bars = await prepare_backtest_catalog(
+                client, inst_id, args.signal_bar,
+                total=args.total_bars, catalog_path=str(catalog_path),
+            )
+            print(f"        {inst_id}: {len(bars)} bars")
+        panel = await prepare_funding_panel(
+            client, inst_id, total=args.funding_total,
+            catalog_path=catalog_path, reuse_cache=args.reuse_data,
+        )
+        if not args.reuse_data:
+            print(f"        funding panel: {len(panel.ts_ms)} samples")
+
+    print("[2/4] building backtest config...")
+    from nautilus_trader.backtest.config import BacktestDataConfig
+    from nautilus_trader.config import ImportableStrategyConfig
+    from nautilus_trader.model.data import Bar
+
+    nt_inst_id = f"{inst_id}.{OKX_VENUE}"
+    bar_type = make_bar_type(inst_id, args.signal_bar)
+
+    data_configs = [BacktestDataConfig(
+        catalog_path=str(catalog_path),
+        data_cls=Bar.fully_qualified_name(),
+        instrument_id=nt_inst_id,
+        bar_types=[str(bar_type)],
+    )]
+
+    venue = build_okx_venue_config(
+        starting_balance_usdt=args.equity,
+        leverage=args.leverage,
+        enable_fees=args.taker_fee_bps > 0,
+        **({"taker_fee_bps": args.taker_fee_bps, "maker_fee_bps": args.maker_fee_bps}
+           if args.taker_fee_bps > 0 else {}),
+    )
+
+    strategy_path, config_path = SUPPORTED_STRATEGIES["funding_skew_momentum"]
+    strategy_config = ImportableStrategyConfig(
+        strategy_path=strategy_path,
+        config_path=config_path,
+        config={
+            "instrument_id": nt_inst_id,
+            "bar_type": str(bar_type),
+            "account_equity_usdt": args.equity,
+            "funding_panel_parquet_path": str(catalog_path),
+        },
+    )
+
+    print("[3/4] running backtest...")
+    summary = _run_and_maybe_plot(
+        args, venue=venue, data=data_configs, strategies=[strategy_config],
+        plot_title=f"funding_skew_momentum — {inst_id}",
+    )
+    print("\n=== RESULT ===")
+    print(summary)
+
+
+# ---------------------------------------------------------------------------
 # Dispatch
 # ---------------------------------------------------------------------------
 
@@ -368,6 +547,8 @@ async def _run_funding_carry(args: argparse.Namespace) -> None:
 _RUNNERS = {
     "xs_momentum": _run_xs_momentum,
     "funding_carry": _run_funding_carry,
+    "funding_cross_section": _run_funding_cross_section,
+    "funding_skew_momentum": _run_funding_skew_momentum,
 }
 
 
