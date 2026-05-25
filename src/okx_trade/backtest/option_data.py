@@ -110,3 +110,34 @@ def read_option_parquet(
     sort_idx = pa.compute.sort_indices(merged, sort_keys=[("ts_ms", "ascending")])
     sorted_table = merged.take(sort_idx)
     return [OptionSummarySnapshot(**r) for r in sorted_table.to_pylist()]
+
+
+class OptionSummaryPanel:
+    """In-memory lookup over captured option summary snapshots."""
+
+    def __init__(self, snapshots: list[OptionSummarySnapshot]) -> None:
+        by_inst: dict[str, list[OptionSummarySnapshot]] = defaultdict(list)
+        for s in snapshots:
+            by_inst[s.inst_id].append(s)
+        self._by_inst: dict[str, list[OptionSummarySnapshot]] = {}
+        for inst_id, snaps in by_inst.items():
+            self._by_inst[inst_id] = sorted(snaps, key=lambda s: s.ts_ms)
+
+    def snapshot_at_or_before(
+        self, inst_id: str, ts_ms: int,
+    ) -> OptionSummarySnapshot | None:
+        snaps = self._by_inst.get(inst_id)
+        if not snaps or ts_ms < snaps[0].ts_ms:
+            return None
+        ts_list = [s.ts_ms for s in snaps]
+        idx = bisect_right(ts_list, ts_ms) - 1
+        return snaps[idx]
+
+    def chain_at_or_before(self, ts_ms: int) -> list[OptionSummarySnapshot]:
+        """All instruments' snapshots at or before ``ts_ms``."""
+        out: list[OptionSummarySnapshot] = []
+        for inst_id in self._by_inst:
+            s = self.snapshot_at_or_before(inst_id, ts_ms)
+            if s is not None:
+                out.append(s)
+        return out
