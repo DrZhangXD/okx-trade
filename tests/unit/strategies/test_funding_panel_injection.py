@@ -52,3 +52,28 @@ def test_funding_cross_section_accepts_multi_inst_panels():
     strat.feed_funding_panel(panels)
     assert strat._funding_source_kind == "panel"
     assert set(strat._funding_panels) == set(panels)
+
+
+def test_funding_skew_momentum_panel_preloads_history_window():
+    pytest.importorskip("nautilus_trader")
+    from okx_trade.strategies.funding_skew_momentum import (
+        FundingSkewStrategy as FundingSkewMomentumStrategy,
+        FundingSkewConfig as FundingSkewMomentumConfig,
+    )
+    # NB: actual class names are FundingSkewConfig / FundingSkewStrategy (single-instrument).
+    # instrument_id (singular) + bar_type (not bar_type_template).
+    cfg = FundingSkewMomentumConfig(
+        instrument_id="BTC-USDT-SWAP.OKX",
+        bar_type="BTC-USDT-SWAP.OKX-1-HOUR-LAST-EXTERNAL",
+    )
+    strat = FundingSkewMomentumStrategy(cfg)
+    # 100 funding samples — strategy needs 90 minimum for z-score
+    ts_ms = [1_700_000_000_000 + i * 8 * 3_600_000 for i in range(100)]
+    rates = [0.0001 + (i % 5) * 0.00001 for i in range(100)]
+    panel = FundingPanel(inst_id="BTC-USDT-SWAP", ts_ms=ts_ms, rates=rates)
+    strat.feed_funding_panel({"BTC-USDT-SWAP": panel})
+    # The strategy's internal history deque should be pre-populated from the panel
+    # _funding_history is a plain deque (single-instrument strategy), not a dict
+    history_deque = strat._funding_history
+    assert history_deque is not None
+    assert len(history_deque) == 90  # capped at maxlen=90
