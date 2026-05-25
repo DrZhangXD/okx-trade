@@ -89,3 +89,28 @@ def read_orderbook_parquet(
     ]
 
 
+from collections.abc import Iterator
+
+
+class OrderbookReplayStream:
+    """Iterator over orderbook frames in timestamp order with windowed drain.
+
+    Used by the replay runner to fire ``process_orderbook(book)`` for every
+    frame whose ts_ms falls within the bar's window before the bar fires.
+    """
+
+    def __init__(self, frames: list[OrderbookFrame]) -> None:
+        self._frames = sorted(frames, key=lambda f: f.ts_ms)
+        self._cursor = 0
+
+    def drain_until(self, ts_ms_exclusive: int) -> Iterator[OrderbookFrame]:
+        """Yield all frames with ts_ms < ``ts_ms_exclusive``, advance cursor."""
+        while self._cursor < len(self._frames) and self._frames[self._cursor].ts_ms < ts_ms_exclusive:
+            yield self._frames[self._cursor]
+            self._cursor += 1
+
+    def __len__(self) -> int:
+        return len(self._frames)
+
+    def remaining(self) -> int:
+        return len(self._frames) - self._cursor

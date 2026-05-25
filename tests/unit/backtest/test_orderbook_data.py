@@ -27,3 +27,20 @@ def test_orderbook_frame_parquet_roundtrip(tmp_path):
     assert loaded[0].ts_ms == frames[0].ts_ms
     assert loaded[0].bids == frames[0].bids
     assert loaded[1].asks == frames[1].asks
+
+
+def test_orderbook_replay_stream_yields_frames_within_window(tmp_path):
+    from okx_trade.backtest.orderbook_data import OrderbookReplayStream
+
+    frames = [
+        OrderbookFrame("BTC-USDT-SWAP", 1_000, [[1.0, 1.0]], [[2.0, 1.0]]),
+        OrderbookFrame("BTC-USDT-SWAP", 2_500, [[1.1, 1.0]], [[2.1, 1.0]]),
+        OrderbookFrame("BTC-USDT-SWAP", 3_999, [[1.2, 1.0]], [[2.2, 1.0]]),
+        OrderbookFrame("BTC-USDT-SWAP", 5_000, [[1.3, 1.0]], [[2.3, 1.0]]),
+    ]
+    stream = OrderbookReplayStream(frames)
+    # Drain frames with ts_ms in [-inf, 4000)
+    in_window = list(stream.drain_until(4_000))
+    assert [f.ts_ms for f in in_window] == [1_000, 2_500, 3_999]
+    # Next drain continues from cursor
+    assert [f.ts_ms for f in stream.drain_until(10_000)] == [5_000]
