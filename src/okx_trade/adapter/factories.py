@@ -97,7 +97,12 @@ class OKXLiveDataClientFactory(LiveDataClientFactory):
         # → ``load_all_async()`` 把 SWAP+SPOT instruments 灌进 NT cache。
         # 没这一步策略 cache.instrument(...) 永远是 None，导致下单被拦截。
         provider_cfg = InstrumentProviderConfig(load_all=config.load_instruments)
-        provider = OKXInstrumentProvider(client=rest, clock=clock, config=provider_cfg)
+        provider = OKXInstrumentProvider(
+            client=rest,
+            clock=clock,
+            config=provider_cfg,
+            option_ulys=config.option_ulys,
+        )
 
         client = OKXLiveDataClient(
             loop=loop,

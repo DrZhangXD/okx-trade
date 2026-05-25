@@ -169,6 +169,13 @@ execution:
   pos_side_mode: long_short
   td_mode: cross                      # cross / isolated；现货自动 fallback 到 cash
 
+# Data loading options
+# data:
+#   # When option strategies are enabled, restrict option loading to these
+#   # underlyings to avoid loading ~500 contracts at startup. Required for
+#   # option_vol_selling — set to ["BTC-USD"] (or whatever the strategy uses).
+#   option_ulys: ["BTC-USD"]
+
 # OKX 凭证（生产时通过 env 注入；这里留 stub 以便 yaml 自包含）
 okx_credentials:
   api_key: null

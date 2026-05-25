@@ -43,7 +43,7 @@ from __future__ import annotations
 import asyncio
 import math
 import time
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from ..pricing.options import vol_premium
 from ..risk import RiskConfig, RiskIntent, apply_risk_manager, build_risk_manager
@@ -128,6 +128,11 @@ if _NT_AVAILABLE:
         check_interval_sec: int = 3600
         account_equity_usdt: float = 10000.0
         risk_config: RiskConfig | None = None
+        option_summary_parquet_path: str | None = None
+        """Optional: catalog root containing option_summary/<underlying>/<YYYYMMDD>.parquet.
+        When set, on_start loads via read_option_parquet() + builds an
+        OptionSummaryPanel, and option chain lookups route through the panel
+        instead of REST. Used for backtest only."""
 
 
     class OptionVolStrategy(Strategy):  # type: ignore[misc]
@@ -171,8 +176,29 @@ if _NT_AVAILABLE:
             self._rest = None  # type: ignore[var-annotated]
             self._rest_settings = None  # type: ignore[var-annotated]
             self._check_task: asyncio.Task | None = None
+            self._option_panel: Any = None
+            self._option_source_kind: str = "rest"
+
+        def feed_option_snapshots(self, panel: Any) -> None:
+            """Inject pre-captured OptionSummaryPanel for backtest."""
+            self._option_panel = panel
+            self._option_source_kind = "panel"
 
         def on_start(self) -> None:
+            if self.config.option_summary_parquet_path:
+                from pathlib import Path
+                from ..backtest.option_data import OptionSummaryPanel, read_option_parquet
+                try:
+                    snaps = read_option_parquet(
+                        self.config.underlying,
+                        catalog_path=Path(self.config.option_summary_parquet_path),
+                    )
+                    self.feed_option_snapshots(OptionSummaryPanel(snaps))
+                    self.log.info(
+                        f"loaded {len(snaps)} option snapshots for {self.config.underlying}"
+                    )
+                except FileNotFoundError as exc:
+                    self.log.warning(f"option panel auto-load failed: {exc}")
             self.subscribe_bars(self._perp_bar_type)
             from ..config import OKXSettings
             self._rest_settings = OKXSettings()
@@ -238,14 +264,43 @@ if _NT_AVAILABLE:
                     last_day=self._last_equity_day,
                 )
 
+        async def _fetch_option_chain(self) -> list:
+            """Return option chain summaries from panel or REST.
+
+            Panel items (OptionSummarySnapshot) use ``mark_iv``; REST items
+            (OptionSummary) use ``mark_vol``.  This helper wraps panel snapshots
+            in a thin adapter so the rest of the strategy can always access
+            ``.mark_vol``.
+            """
+            if self._option_source_kind == "panel" and self._option_panel is not None:
+                if self._last_check_ts_ns <= 0:
+                    return []
+                ts_ms = int(self._last_check_ts_ns // 1_000_000)
+                raw = self._option_panel.chain_at_or_before(ts_ms)
+
+                class _SnapAdapter:
+                    """Thin wrapper: exposes .mark_vol and .delta to match OptionSummary API."""
+                    __slots__ = ("inst_id", "mark_vol", "delta", "gamma", "vega", "theta")
+
+                    def __init__(self, snap: Any) -> None:
+                        self.inst_id = snap.inst_id
+                        self.mark_vol = snap.mark_iv   # rename: panel uses mark_iv
+                        self.delta = snap.delta
+                        self.gamma = snap.gamma
+                        self.vega = snap.vega
+                        self.theta = snap.theta
+
+                return [_SnapAdapter(s) for s in raw]
+
+            if self._rest is None:
+                from ..rest.client import OKXRestClient
+                self._rest = OKXRestClient(self._rest_settings)
+                await self._rest.__aenter__()
+            return await self._rest.public.get_option_summary(self.config.underlying)
+
         async def _check_options_async(self) -> None:
             try:
-                if self._rest is None:
-                    from ..rest.client import OKXRestClient
-                    self._rest = OKXRestClient(self._rest_settings)
-                    await self._rest.__aenter__()
-
-                summaries = await self._rest.public.get_option_summary(self.config.underlying)
+                summaries = await self._fetch_option_chain()
                 if not summaries:
                     return
 

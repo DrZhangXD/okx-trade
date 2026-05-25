@@ -19,7 +19,7 @@
 | [`FundingXSStrategy`](../src/okx_trade/strategies/funding_cross_section.py) | neutral β-hedged | 8h cycle | **M6+** | ✅ true | 多空 funding 横截面 + β hedge (2026-05-19 启用)<br>✅ backtestable via `scripts/backtest.py --strategy funding_cross_section` (2026-05-25, Plan 1) |
 | [`FundingSkewStrategy`](../src/okx_trade/strategies/funding_skew_momentum.py) | reversal | ~30min poll | **M6+** | ✅ true | funding ±2σ 反向 (2026-05-19 启用)<br>✅ backtestable via `scripts/backtest.py --strategy funding_skew_momentum` (2026-05-25, Plan 1) |
 | [`StatArbStrategy`](../src/okx_trade/strategies/stat_arb_pairs.py) | mean-reverting | 1H bar | **M6+** | ✅ true | BTC-ETH 协整套利。2026-05-20 加 REST warmup (lookback_bars=1440 即时填齐) |
-| [`OptionVolStrategy`](../src/okx_trade/strategies/option_vol_selling.py) | vol carry | 1h check | **M6+** | ❌ false | BTC short straddle + delta hedge。启用前需 live_node 动态注入 `option_ulys=["BTC-USD"]` filter |
+| [`OptionVolStrategy`](../src/okx_trade/strategies/option_vol_selling.py) | vol carry | 1h check | **M6+** | ❌ false | BTC short straddle + delta hedge。启用前需 live_node 动态注入 `option_ulys=["BTC-USD"]` filter<br>✅ backtestable via scripts/backtest.py --strategy option_vol_selling (2026-05-25, Plan 3; requires capture_option_summary.py + live needs data.option_ulys yaml) |
 | [`MLFusionStrategy`](../src/okx_trade/strategies/ml_fusion.py) | meta | 每 4h | **M6+** | ❌ false | XGBoost 多空均匀腿。启用前需 `pip install xgboost` + 写 retrain 脚本 |
 | [`RangeBreakoutStrategy`](../src/okx_trade/strategies/range_breakout.py) | breakout | 1H signal × 1D range | M5.X **重建 2026-05-20** | ❌ false | 5/18 下线（alpha 弱论据来自 phantom 数据），5/20 重建并加上今天的架构修复。enable 后 14 天 paper（**2026-05-22 从 7 天延长**，因低波动期 0 fills）：真实日 PnL > -$50 + 与 xs_momentum 相关 < 0.7 |
 | [`FactorPortfolioStrategy`](../src/okx_trade/strategies/factor_portfolio.py) | meta | bar-driven (4h default) | **P1** | ✅ true | Generic factor synthesizer; reads configs/factor_portfolio.yaml populated by research lab (2026-05-19 启用) |
@@ -145,6 +145,25 @@ backtest. Frames are stored at `${catalog}/books5/<inst_id>/<YYYYMMDD>.parquet`
 (lz4-compressed). The strategy's `on_start` auto-loads via the
 `orderbook_parquet_path` config field, and `on_bar` drains frames through
 `process_orderbook()` before invoking normal bar logic.
+
+### Plan 3: option_vol_selling (2026-05-25)
+
+`option_vol_selling` backtest requires capturing option summary snapshots first
+(OKX has no historical option REST endpoint):
+````bash
+# Step 1: capture (long-running)
+python scripts/capture_option_summary.py --underlying BTC-USD \
+    --interval-sec 60 --duration-hours 168
+
+# Step 2: backtest (also needs perp bars for delta hedge)
+python scripts/backtest.py --strategy option_vol_selling \
+    --option-underlying BTC-USD --perp-instrument-id BTC-USDT-SWAP \
+    --signal-bar 1H --total-bars 500 --reuse-data
+````
+
+Plan 3 also added a `data.option_ulys: ["BTC-USD"]` field in `configs/live.yaml`
+that restricts OPTION instrument loading at startup (avoids loading ~500
+contracts; required for option_vol_selling to start in reasonable time on live).
 
 ---
 

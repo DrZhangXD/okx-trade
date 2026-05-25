@@ -30,6 +30,9 @@ class OKXDataClientConfig(LiveDataClientConfig):
     is_demo: bool = True
     http_proxy: str | None = None
     load_instruments: bool = True
+    option_ulys: list[str] | None = None
+    """Restrict OPTION loading to these underlyings (e.g. ["BTC-USD"]).
+    None = load all (~500 contracts; causes long startup)."""
 
 
 class OKXExecClientConfig(LiveExecClientConfig):
