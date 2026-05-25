@@ -95,8 +95,13 @@ strategies:
     enabled: false
     config: configs/strategies/ml_fusion.yaml
   range_breakout:
-    # 2026-05-20 重建并 enable，开始 7 天 paper 验证（截止 2026-05-27 早上）。
-    # 验收标准（写在 docs/strategy_roadmap.md "重建" 段）：
+    # 2026-05-20 重建并 enable，开始 paper 验证。
+    # 2026-05-22 update: 原 7 天窗口走完 2 天 0 fills（低波动期，1H 没有
+    # 出现「收破日 K 区间 → 收回区间内」的连续两根模式）。诊断确认策略
+    # 加载正常、equity 分配正常，只是入场条件未触发。窗口从 7 天延长到
+    # 14 天，新 deadline **2026-06-03**。如仍 0 fills，再考虑放宽阈值
+    # 或下线（见 docs/strategy_roadmap.md "重建" 段的 2026-05-22 备注）。
+    # 验收标准：
     #   - 真实日 PnL > -$50/天 (truth dashboard)
     #   - 与 xs_momentum 日 PnL 相关系数 < 0.7
     #   - 无 margin leak / pending order 异常 (journal 监控)

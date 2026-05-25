@@ -21,7 +21,7 @@
 | [`StatArbStrategy`](../src/okx_trade/strategies/stat_arb_pairs.py) | mean-reverting | 1H bar | **M6+** | ✅ true | BTC-ETH 协整套利。2026-05-20 加 REST warmup (lookback_bars=1440 即时填齐) |
 | [`OptionVolStrategy`](../src/okx_trade/strategies/option_vol_selling.py) | vol carry | 1h check | **M6+** | ❌ false | BTC short straddle + delta hedge。启用前需 live_node 动态注入 `option_ulys=["BTC-USD"]` filter |
 | [`MLFusionStrategy`](../src/okx_trade/strategies/ml_fusion.py) | meta | 每 4h | **M6+** | ❌ false | XGBoost 多空均匀腿。启用前需 `pip install xgboost` + 写 retrain 脚本 |
-| [`RangeBreakoutStrategy`](../src/okx_trade/strategies/range_breakout.py) | breakout | 1H signal × 1D range | M5.X **重建 2026-05-20** | ❌ false | 5/18 下线（alpha 弱论据来自 phantom 数据），5/20 重建并加上今天的架构修复。enable 后 7 天 paper：真实日 PnL > -$50 + 与 xs_momentum 相关 < 0.7 |
+| [`RangeBreakoutStrategy`](../src/okx_trade/strategies/range_breakout.py) | breakout | 1H signal × 1D range | M5.X **重建 2026-05-20** | ❌ false | 5/18 下线（alpha 弱论据来自 phantom 数据），5/20 重建并加上今天的架构修复。enable 后 14 天 paper（**2026-05-22 从 7 天延长**，因低波动期 0 fills）：真实日 PnL > -$50 + 与 xs_momentum 相关 < 0.7 |
 | [`FactorPortfolioStrategy`](../src/okx_trade/strategies/factor_portfolio.py) | meta | bar-driven (4h default) | **P1** | ✅ true | Generic factor synthesizer; reads configs/factor_portfolio.yaml populated by research lab (2026-05-19 启用) |
 
 ---
@@ -118,12 +118,14 @@
 **重建动作**: `git checkout 47f0225^ -- src/.../range_breakout.py configs/.../range_breakout.yaml tests/.../test_strategy_range_breakout.py` 还原 3 个文件，
 应用今天的 `record_strategy_trade DD push 移除`，重注册 `live_node._strategy_registry`，`live.yaml` 默认 `enabled: false`。
 
-**重启动验证标准**（用户 enable 后 7 天）：
+**重启动验证标准**（用户 enable 后 14 天）：
 1. truth dashboard 真实日 PnL > -$50/天 → 保持
 2. 与 `xs_momentum` 日 PnL 相关系数 < 0.7（用 `pnl/stats.compute_daily_returns` 算）
 3. 不再出现 margin leak / pending order 异常（journal 监控）
 
 任一不达标则按数据再次下线（这次会有 OKX bills 真实数据支撑）。
+
+**2026-05-22 窗口延长**：原 7 天窗口（截止 5/27）走完 2 天 0 fills。诊断结论：策略加载正常、equity 分配正常，但当前 BTC 处于 mean_reverting 低波动期，1H 没有出现「收破日 K 区间 → 收回区间内」的连续两根模式。延长到 14 天（截止 **2026-06-03**），给市场更多时间产生触发条件；如仍 0 fills，再考虑放宽阈值或下线。
 
 ---
 
