@@ -21,7 +21,7 @@ from typing import Protocol
 
 from ..enums import InstType
 from .compute import compute_factor
-from .data import fetch_panel
+from .data import _cache_key, fetch_panel
 from .grade import FactorGrade, GradeThresholds, grade_factor
 from .panel import FactorPanel
 from .registry import get_factor, list_factors
@@ -602,6 +602,42 @@ def _bar_to_minutes(bar: str) -> int:
     raise ValueError(f"unsupported bar: {bar!r}")
 
 
+async def ensure_panel_cached(
+    *,
+    rest_client,
+    inst_ids: list[str],
+    bar: str,
+    start_ms: int,
+    end_ms: int,
+    include: tuple[str, ...] = ("close", "volume_usdt", "funding_rate", "open_interest"),
+    cache_dir: Path,
+) -> Path:
+    """Return path to cached panel parquet; fetch + write if missing.
+
+    Cache hit (file exists with size > 0) short-circuits — no REST call.
+    Cache miss invokes ``fetch_panel`` which writes the parquet, then verifies
+    the file is present and raises ``RuntimeError`` if not.
+    """
+    cache_dir = Path(cache_dir)
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    key = _cache_key(list(inst_ids), bar, start_ms, end_ms, tuple(include))
+    cache_path = cache_dir / f"panel_{key}.parquet"
+    if cache_path.exists() and cache_path.stat().st_size > 0:
+        return cache_path
+    await fetch_panel(
+        rest_client=rest_client,
+        inst_ids=list(inst_ids),
+        start_ms=start_ms,
+        end_ms=end_ms,
+        bar=bar,
+        include=tuple(include),
+        cache_dir=cache_dir,
+    )
+    if not cache_path.exists():
+        raise RuntimeError(f"fetch_panel did not produce expected cache at {cache_path}")
+    return cache_path
+
+
 def _persist_grade(store: FactorStore, grade: FactorGrade) -> None:
     """FactorGrade → GradeRecord (drops ic_decay list field) → sqlite insert."""
     rec = GradeRecord(
@@ -637,6 +673,7 @@ __all__ = [
     "cmd_fetch",
     "cmd_grade_all",
     "cmd_wf_grade",
+    "ensure_panel_cached",
     "parse_horizon_to_bars",
     "parse_ymd_to_ms",
     "resolve_universe",
