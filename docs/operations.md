@@ -217,6 +217,51 @@ ws_resubscribed count=1
 
 ---
 
+### 2.10 factor_portfolio 回测 one-pager
+
+完整的离线回测三步走（首次跑会拉网络数据 ~5 分钟；后续 reuse 缓存只需几秒）：
+
+**1. 确认 factor 已 approve**
+
+```bash
+python -m okx_trade.research grade-all     # 看每个 factor 的 IC / Sharpe / pnl
+cat configs/factor_portfolio.yaml          # 确认 factor_weights 非空
+```
+
+如果 `factor_weights: []`，先 approve 至少一个 factor：
+
+```bash
+python -m okx_trade.research approve basis_z_30d 0.4
+```
+
+**2. 预热 panel 缓存（可选）**
+
+```bash
+python scripts/factor_panel_warm.py \
+    --yaml configs/factor_portfolio.yaml \
+    --bar 1H --total-bars 2000
+```
+
+写入 `./data/research_panel/panel_<sha1>.parquet`。
+注意：`scripts/backtest.py --strategy factor_portfolio` 自带 pre-warm，所以这一步通常可跳过 —— 只在想用 `python -m okx_trade.research analyze` 做单独研究时手动跑。
+
+**3. 跑回测**
+
+```bash
+python scripts/backtest.py --strategy factor_portfolio \
+    --signal-bar 1H --total-bars 2000 --warmup-days 30 \
+    --taker-fee-bps 5 --maker-fee-bps 2
+```
+
+输出包含 `nt_pnl_pct`（已实现 PnL）与 `pnl_pct` / `sharpe_ratio` / `max_drawdown_pct`（含未平仓的 mark-to-market）。两套数字都要看 —— Plan 5 同时报告以避免单维度误判。
+
+常见错误：
+- `factor_portfolio yaml not found` → `--factor-yaml` 路径错。
+- `empty factor_weights` → 见上文 step 1。
+- panel 拉取卡死 → 看 OKX REST rate-limit；缩小 `--total-bars` 重试。
+
+---
+
 ## 三、Cron / Observation 报告
 
 VPS 上的 `sudo crontab` 维护：
