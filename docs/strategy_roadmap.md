@@ -11,13 +11,13 @@
 
 | 策略 | 类型 | 频率 | 上线批次 | 默认 enabled | 备注 |
 |---|---|---|---|---|---|
-| [`FundingCarryStrategy`](../src/okx_trade/strategies/funding_carry.py) | neutral | 8h cycle | M2 | ✅ true | 2026-05-20 entry 8%→15%（5/19+5/20 实测亏 $-8,953，8% 不够覆盖 4-leg 摩擦） |
+| [`FundingCarryStrategy`](../src/okx_trade/strategies/funding_carry.py) | neutral | 8h cycle | M2 | ✅ true | 2026-05-20 entry 8%→15%（5/19+5/20 实测亏 $-8,953，8% 不够覆盖 4-leg 摩擦）<br>✅ backtestable via `scripts/backtest.py --strategy funding_carry` (2026-05-25, Plan 1) |
 | [`XSMomentumStrategy`](../src/okx_trade/strategies/xs_momentum.py) | momentum | 每日 UTC 0 | M4 | ✅ true | regime gate 已接入 |
 | [`LiqReversalStrategy`](../src/okx_trade/strategies/liq_reversal.py) | reversal | event-driven | M4 | ✅ true | regime gate 已接入 |
-| [`BasisArbStrategy`](../src/okx_trade/strategies/basis_arb.py) | neutral | 1h check | M5.X | ❌ false | 5/19 -$7,297 单日真亏（futures 短腿被强平 hedge 破裂），需修 margin 隔离才能重启（todo #8） |
+| [`BasisArbStrategy`](../src/okx_trade/strategies/basis_arb.py) | neutral | 1h check | M5.X | ❌ false | 5/19 -$7,297 单日真亏（futures 短腿被强平 hedge 破裂），需修 margin 隔离才能重启（todo #8）<br>✅ backtestable via `scripts/backtest.py --strategy basis_arb` (2026-05-25, Plan 1) |
 | [`OBImbalanceStrategy`](../src/okx_trade/strategies/ob_imbalance.py) | reversal | 中频 30s–5min | M5.X | ✅ true | books5 WS 订阅 |
-| [`FundingXSStrategy`](../src/okx_trade/strategies/funding_cross_section.py) | neutral β-hedged | 8h cycle | **M6+** | ✅ true | 多空 funding 横截面 + β hedge (2026-05-19 启用) |
-| [`FundingSkewStrategy`](../src/okx_trade/strategies/funding_skew_momentum.py) | reversal | ~30min poll | **M6+** | ✅ true | funding ±2σ 反向 (2026-05-19 启用) |
+| [`FundingXSStrategy`](../src/okx_trade/strategies/funding_cross_section.py) | neutral β-hedged | 8h cycle | **M6+** | ✅ true | 多空 funding 横截面 + β hedge (2026-05-19 启用)<br>✅ backtestable via `scripts/backtest.py --strategy funding_cross_section` (2026-05-25, Plan 1) |
+| [`FundingSkewStrategy`](../src/okx_trade/strategies/funding_skew_momentum.py) | reversal | ~30min poll | **M6+** | ✅ true | funding ±2σ 反向 (2026-05-19 启用)<br>✅ backtestable via `scripts/backtest.py --strategy funding_skew_momentum` (2026-05-25, Plan 1) |
 | [`StatArbStrategy`](../src/okx_trade/strategies/stat_arb_pairs.py) | mean-reverting | 1H bar | **M6+** | ✅ true | BTC-ETH 协整套利。2026-05-20 加 REST warmup (lookback_bars=1440 即时填齐) |
 | [`OptionVolStrategy`](../src/okx_trade/strategies/option_vol_selling.py) | vol carry | 1h check | **M6+** | ❌ false | BTC short straddle + delta hedge。启用前需 live_node 动态注入 `option_ulys=["BTC-USD"]` filter |
 | [`MLFusionStrategy`](../src/okx_trade/strategies/ml_fusion.py) | meta | 每 4h | **M6+** | ❌ false | XGBoost 多空均匀腿。启用前需 `pip install xgboost` + 写 retrain 脚本 |
@@ -96,6 +96,34 @@
 
 "online" = 构造 `OKXRestClient(OKXSettings())`，需要 `.env` 里 OKX 凭证（即使是 demo）。
 所有 online 子命令首次跑会缓存到 `var/factor_research/panel/*.parquet`，再次跑同参数零网络。
+
+---
+
+## Backtest Capability (2026-05-25, Plan 1 landed)
+
+All 4 funding-aware strategies (`funding_carry`, `funding_cross_section`, `funding_skew_momentum`,
+`basis_arb`) can now be backtested end-to-end via `scripts/backtest.py`. The backtest path:
+
+1. `prepare_funding_panel()` downloads and caches historical funding rates as
+   `${catalog}/funding/<inst_id>/<YYYYMM>.parquet`.
+2. The strategy's `Config` accepts `funding_panel_parquet_path`; `on_start` auto-loads via
+   `read_funding_parquet()` and calls `feed_funding_panel()`.
+3. NT BacktestNode runs as usual; strategy reads the panel during normal bar callbacks.
+
+Quick smoke:
+```bash
+python scripts/backtest.py --strategy funding_carry \
+    --spot-instrument-id BTC-USDT --perp-instrument-id BTC-USDT-SWAP \
+    --signal-bar 1H --total-bars 500 --reuse-data
+
+python scripts/backtest.py --strategy funding_cross_section \
+    --instrument-ids BTC-USDT-SWAP,ETH-USDT-SWAP,SOL-USDT-SWAP \
+    --signal-bar 1D --total-bars 200 --reuse-data
+```
+
+`basis_arb` backtest uses NT's single-MARGIN-account model, which understates the
+margin-isolation tail risk seen on real OKX. Plan 6 (separate roadmap) will add
+a cross-account simulator for production-grade `basis_arb` backtesting.
 
 ---
 
