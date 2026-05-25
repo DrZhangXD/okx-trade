@@ -41,10 +41,12 @@ class OKXInstrumentProvider(InstrumentProvider):
         client: OKXRestClient,
         clock: LiveClock,
         config: InstrumentProviderConfig | None = None,
+        option_ulys: list[str] | None = None,
     ) -> None:
         super().__init__(config=config)
         self._client = client
         self._clock = clock
+        self._option_ulys = option_ulys
 
     async def load_all_async(self, filters: dict[str, Any] | None = None) -> None:
         """拉 SWAP + SPOT + FUTURES 全集到 cache。
@@ -55,7 +57,12 @@ class OKXInstrumentProvider(InstrumentProvider):
         - ``inst_ids``: ``set[str]``，仅保留特定 instId（如 ``{"BTC-USDT-SWAP"}``）
         - ``option_ulys``: ``list[str]``，期权标的过滤（如 ``["BTC-USD", "ETH-USD"]``），
           仅当 ``InstType.OPTION`` 在 ``inst_types`` 时生效。每个 uly 单独 REST 调用。
+
+        构造时传入的 ``option_ulys`` 会自动注入到 filters（调用方不传时）。
         """
+        if self._option_ulys and (filters is None or "option_ulys" not in filters):
+            filters = dict(filters or {})
+            filters["option_ulys"] = self._option_ulys
         filters = filters or {}
         inst_types: list[InstType] = filters.get(
             "inst_types", [InstType.SWAP, InstType.SPOT, InstType.FUTURES]

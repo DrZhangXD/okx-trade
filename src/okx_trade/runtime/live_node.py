@@ -460,6 +460,7 @@ def _build_trading_node(live_cfg: dict[str, Any]) -> Any:
                 passphrase=creds.get("passphrase"),
                 is_demo=is_paper,
                 http_proxy=creds.get("http_proxy"),
+                option_ulys=live_cfg.get("data", {}).get("option_ulys"),  # restrict OPTION loading
             ),
         },
         exec_clients={
