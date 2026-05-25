@@ -74,6 +74,15 @@ def _parse_args() -> argparse.Namespace:
 
 
 async def _main(args: argparse.Namespace) -> None:
+    # Validate YYMMDD suffix BEFORE any REST round-trip so malformed inst ids
+    # fail fast without burning bandwidth.
+    _suffix = args.futures_inst.split("-")[-1]
+    if len(_suffix) != 6 or not _suffix.isdigit():
+        raise SystemExit(
+            f"--futures-inst {args.futures_inst!r} expected YYMMDD-suffixed "
+            "(e.g. BTC-USDT-250627)"
+        )
+
     catalog = Path(args.catalog).resolve()
     catalog.mkdir(parents=True, exist_ok=True)
 
