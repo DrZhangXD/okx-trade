@@ -22,7 +22,7 @@
 | [`OptionVolStrategy`](../src/okx_trade/strategies/option_vol_selling.py) | vol carry | 1h check | **M6+** | ❌ false | BTC short straddle + delta hedge。启用前需 live_node 动态注入 `option_ulys=["BTC-USD"]` filter<br>✅ backtestable via scripts/backtest.py --strategy option_vol_selling (2026-05-25, Plan 3; requires capture_option_summary.py + live needs data.option_ulys yaml) |
 | [`MLFusionStrategy`](../src/okx_trade/strategies/ml_fusion.py) | meta | 每 4h | **M6+** | ❌ false | XGBoost 多空均匀腿。启用前需 `pip install xgboost` + 写 retrain 脚本 |
 | [`RangeBreakoutStrategy`](../src/okx_trade/strategies/range_breakout.py) | breakout | 1H signal × 1D range | M5.X **重建 2026-05-20** | ❌ false | 5/18 下线（alpha 弱论据来自 phantom 数据），5/20 重建并加上今天的架构修复。enable 后 14 天 paper（**2026-05-22 从 7 天延长**，因低波动期 0 fills）：真实日 PnL > -$50 + 与 xs_momentum 相关 < 0.7 |
-| [`FactorPortfolioStrategy`](../src/okx_trade/strategies/factor_portfolio.py) | meta | bar-driven (4h default) | **P1** | ✅ true | Generic factor synthesizer; reads configs/factor_portfolio.yaml populated by research lab (2026-05-19 启用) |
+| [`FactorPortfolioStrategy`](../src/okx_trade/strategies/factor_portfolio.py) | meta | bar-driven (4h default) | **P1** | ✅ true | Generic factor synthesizer; reads configs/factor_portfolio.yaml populated by research lab (2026-05-19 启用)<br>✅ backtestable via `scripts/backtest.py --strategy factor_portfolio` (2026-05-25, Plan 5; auto-warms panel cache) |
 
 ---
 
