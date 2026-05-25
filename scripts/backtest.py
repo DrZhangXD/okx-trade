@@ -75,6 +75,10 @@ SUPPORTED_STRATEGIES = {
         "okx_trade.strategies.factor_portfolio:FactorPortfolioStrategy",
         "okx_trade.strategies.factor_portfolio:FactorPortfolioConfig",
     ),
+    "ml_fusion": (
+        "okx_trade.strategies.ml_fusion:MLFusionStrategy",
+        "okx_trade.strategies.ml_fusion:MLFusionConfig",
+    ),
 }
 
 
@@ -133,6 +137,10 @@ def _parse_args() -> argparse.Namespace:
                    help="ob_imbalance backtest target instrument (e.g. BTC-USDT-SWAP)")
     p.add_argument("--option-underlying", default=None,
                    help="option_vol_selling backtest underlying (e.g. BTC-USD)")
+    # ml_fusion
+    p.add_argument("--ml-model-path", default="var/ml_fusion_model.pkl",
+                   help="ml_fusion: path to pre-trained xgb pickle (default: "
+                        "var/ml_fusion_model.pkl). Train with scripts/ml_fusion_retrain.py.")
     # factor_portfolio
     p.add_argument("--factor-yaml", default="configs/factor_portfolio.yaml",
                    help="factor_portfolio.yaml path (default: configs/factor_portfolio.yaml)")
@@ -925,6 +933,111 @@ async def _run_factor_portfolio(args: argparse.Namespace) -> None:
 
 
 # ---------------------------------------------------------------------------
+# ml_fusion: pre-trained XGBoost meta-strategy
+# ---------------------------------------------------------------------------
+
+
+async def _run_ml_fusion(args: argparse.Namespace) -> None:
+    """Backtest ml_fusion. Requires a pre-trained XGBoost model (.pkl).
+
+    Funding history for each inst is downloaded once via ``prepare_funding_panel``
+    (writes parquet under ``${catalog}/funding/``); the strategy auto-loads it in
+    ``on_start`` via ``funding_panel_parquet_path`` (Plan 1 pattern). The model
+    is loaded by the strategy from ``model_path`` config field.
+    """
+    if not args.instrument_ids:
+        raise SystemExit("ml_fusion 需要 --instrument-ids（逗号分隔）")
+    inst_id_list = [s.strip() for s in args.instrument_ids.split(",") if s.strip()]
+    if len(inst_id_list) < 2:
+        raise SystemExit(f"ml_fusion 至少需要 2 个标的，得到 {len(inst_id_list)}")
+
+    model_path = Path(args.ml_model_path)
+    if not model_path.exists():
+        raise SystemExit(
+            f"ml_fusion model not found at {model_path}. "
+            f"Train first: python scripts/ml_fusion_retrain.py "
+            f"--instrument-ids {args.instrument_ids}"
+        )
+
+    catalog_path = Path(args.catalog).resolve()
+    catalog_path.mkdir(parents=True, exist_ok=True)
+    fee_kwargs = {
+        "taker_fee_bps": args.taker_fee_bps,
+        "maker_fee_bps": args.maker_fee_bps,
+    } if args.taker_fee_bps > 0 else {}
+
+    if not args.reuse_data:
+        print(f"[1/3] downloading {args.total_bars} × {args.signal_bar} bars + funding for "
+              f"{len(inst_id_list)} instruments...")
+        from okx_trade.backtest.data_loader import prepare_funding_panel
+        async with OKXRestClient(OKXSettings()) as client:
+            for inst_id in inst_id_list:
+                _, bars = await prepare_backtest_catalog(
+                    client, inst_id, args.signal_bar,
+                    total=args.total_bars, catalog_path=str(catalog_path),
+                    **fee_kwargs,
+                )
+                panel = await prepare_funding_panel(
+                    client, inst_id, total=args.funding_total,
+                    catalog_path=catalog_path,
+                )
+                print(f"        {inst_id}: {len(bars)} bars, "
+                      f"{len(panel.ts_ms)} funding samples")
+    else:
+        print("[1/3] reusing catalog (--reuse-data)")
+
+    print("[2/3] building backtest config...")
+    from nautilus_trader.backtest.config import BacktestDataConfig
+    from nautilus_trader.config import ImportableStrategyConfig
+    from nautilus_trader.model.data import Bar
+
+    nt_instrument_ids = [f"{s}.{OKX_VENUE}" for s in inst_id_list]
+    bar_types = [make_bar_type(s, args.signal_bar) for s in inst_id_list]
+    data_configs = [
+        BacktestDataConfig(
+            catalog_path=str(catalog_path),
+            data_cls=Bar.fully_qualified_name(),
+            instrument_id=instrument_id,
+            bar_types=[str(bar_type)],
+        )
+        for instrument_id, bar_type in zip(nt_instrument_ids, bar_types)
+    ]
+
+    venue = build_okx_venue_config(
+        starting_balance_usdt=args.equity,
+        leverage=args.leverage,
+        enable_fees=args.taker_fee_bps > 0,
+        **fee_kwargs,
+    )
+
+    sample_bar_str = str(bar_types[0])
+    template_suffix = sample_bar_str.split(".OKX-", 1)[1]
+    bar_type_template = "{inst}-" + template_suffix
+
+    strategy_path, config_path = SUPPORTED_STRATEGIES["ml_fusion"]
+    strategy_config = ImportableStrategyConfig(
+        strategy_path=strategy_path,
+        config_path=config_path,
+        config={
+            "instrument_ids": list(nt_instrument_ids),
+            "bar_type_template": bar_type_template,
+            "model_path": str(model_path),
+            "account_equity_usdt": args.equity,
+            "funding_panel_parquet_path": str(catalog_path),
+        },
+    )
+
+    print(f"        universe={len(nt_instrument_ids)} model={model_path}")
+    print("[3/3] running backtest...")
+    summary = _run_and_maybe_plot(
+        args, venue=venue, data=data_configs, strategies=[strategy_config],
+        plot_title=f"ml_fusion — {','.join(inst_id_list)}",
+    )
+    print("\n=== RESULT ===")
+    print(summary)
+
+
+# ---------------------------------------------------------------------------
 # Dispatch
 # ---------------------------------------------------------------------------
 
@@ -938,6 +1051,7 @@ _RUNNERS = {
     "ob_imbalance": _run_ob_imbalance,
     "option_vol_selling": _run_option_vol_selling,
     "factor_portfolio": _run_factor_portfolio,
+    "ml_fusion": _run_ml_fusion,
 }
 
 
