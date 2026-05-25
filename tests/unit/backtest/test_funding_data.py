@@ -76,3 +76,39 @@ def test_funding_panel_parquet_roundtrip(tmp_path):
     loaded = read_funding_parquet(panel.inst_id, catalog_path=tmp_path)
     assert loaded.ts_ms == panel.ts_ms
     assert loaded.rates == panel.rates
+
+
+@pytest.mark.asyncio
+async def test_prepare_funding_panel_uses_cache_when_present(tmp_path):
+    from okx_trade.backtest.data_loader import prepare_funding_panel
+    from okx_trade.backtest.funding_data import FundingPanel, write_funding_parquet
+
+    cached = FundingPanel(
+        inst_id="BTC-USDT-SWAP",
+        ts_ms=[1_700_000_000_000],
+        rates=[0.0001],
+    )
+    write_funding_parquet(cached, catalog_path=tmp_path)
+
+    rest = AsyncMock()  # should NOT be called
+    panel = await prepare_funding_panel(
+        rest, "BTC-USDT-SWAP", total=100, catalog_path=tmp_path, reuse_cache=True,
+    )
+    assert panel.ts_ms == cached.ts_ms
+    rest.public.get_funding_rate_history_extended.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_prepare_funding_panel_downloads_when_no_cache(tmp_path):
+    from okx_trade.backtest.data_loader import prepare_funding_panel
+
+    rest = AsyncMock()
+    rest.public.get_funding_rate_history_extended = AsyncMock(
+        return_value=[_make_fr(1_700_000_000_000, "0.0001")],
+    )
+    panel = await prepare_funding_panel(
+        rest, "BTC-USDT-SWAP", total=100, catalog_path=tmp_path, reuse_cache=True,
+    )
+    assert panel.ts_ms == [1_700_000_000_000]
+    # Should have written cache to disk
+    assert (tmp_path / "funding" / "BTC-USDT-SWAP").exists()

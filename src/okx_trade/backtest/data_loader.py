@@ -140,10 +140,41 @@ async def prepare_backtest_catalog(
     return nt_inst, bars
 
 
+from .funding_data import (
+    FundingPanel,
+    download_historical_funding_rates,
+    read_funding_parquet,
+    write_funding_parquet,
+)
+
+
+async def prepare_funding_panel(
+    client: "OKXRestClient",
+    inst_id: str,
+    *,
+    total: int = 1095,
+    catalog_path: Path,
+    reuse_cache: bool = True,
+) -> FundingPanel:
+    """One-stop: read parquet cache, else download via REST and write cache.
+
+    Mirrors ``prepare_backtest_catalog`` ergonomics. Always returns a sorted panel.
+    """
+    if reuse_cache:
+        try:
+            return read_funding_parquet(inst_id, catalog_path=catalog_path)
+        except FileNotFoundError:
+            pass
+    panel = await download_historical_funding_rates(client, inst_id, total=total)
+    write_funding_parquet(panel, catalog_path=catalog_path)
+    return panel
+
+
 __all__ = [
     "bars_to_nt_bars",
     "download_historical_bars",
     "prepare_backtest_catalog",
+    "prepare_funding_panel",
     "write_bars_to_catalog",
     "write_instrument_to_catalog",
 ]
