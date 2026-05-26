@@ -233,7 +233,9 @@ NT 重启后多个策略需要数天-数十天的 live 数据累计才能产出�
 
 DI 在 `runtime/live_node.py` `build_live_context` 里构造服务 + 注入到每个 `OkxStrategyBase` 子类（同 `account_drawdown_tracker` 路径）。`live.yaml` 加 top-level `volatility_filter:` block。
 
-FundingXS 已迁完（Phase 1b）：原 `_set_lever_cache` / `_get_account_pos_mode` / `_set_leverage_cached` / `_closes_1m_by_inst` / `_is_backtest_context` 全删，换成 service 调用，行为等价。Phase 1c-1f 其他 9 个策略按业务优先级逐个 opt-in（独立 PR，每个翻 yaml flag）。
+FundingXS 已迁完（Phase 1b）：原 `_set_lever_cache` / `_get_account_pos_mode` / `_set_leverage_cached` / `_closes_1m_by_inst` / `_is_backtest_context` 全删，换成 service 调用，行为等价。
+
+**Phase 1c 完整 rollout（同日 later）**：6 个其他活跃策略全部接入 `OkxStrategyBase`，yaml `enable_isolated_margin: true` 翻起 → funding_carry (lever=5) / funding_skew_momentum (lever=5) / xs_momentum (lever=3) / stat_arb_pairs (lever=3, batch_ensure_leverage 两阶段) / basis_arb (lever=3, futures-leg only) / factor_portfolio (lever=3)。`liq_reversal` / `ob_imbalance` 明确不接入（wick 是 alpha / 微秒级延迟），`range_breakout` 已 retired，`ml_fusion` xgboost 未装。第一次 position-open 时各策略 lazily 调 `set-leverage`。
 
 ### 11. OKX positions reconcile 按 inst_id 推 instType（2026-05-26）
 

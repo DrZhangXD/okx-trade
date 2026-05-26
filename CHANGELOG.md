@@ -8,6 +8,18 @@
 
 ## [Unreleased] — Paper trading 观察期
 
+### Rolled out (Phase 1c — opt-in all active strategies, 2026-05-26 final)
+
+- **`feat(strategies)`** ([82aafe8](https://github.com/DrZhangXD/okx-trade/commit/82aafe8) merge) — 6 个活跃策略全部接入 `OkxStrategyBase` + `submit_isolated_order` / `batch_ensure_leverage`：
+  - `funding_carry` (lever=5, perp 腿)：spot 腿 cash 路径不变；perp 走 isolated + pre-validate
+  - `funding_skew_momentum` (lever=5)：单腿 SWAP
+  - `xs_momentum` (lever=3)：单 funnel `_submit_delta` → isolated（含 reduce-only，Option B）
+  - `stat_arb_pairs` (lever=3)：两腿 `batch_ensure_leverage` 两阶段提交
+  - `basis_arb` (lever=3, futures 腿)：与现有 `td_mode_override` 共存；spot 腿 cash 不变
+  - `factor_portfolio` (lever=3)：单腿 `_open_leg` async
+- **`config`** ([05b2838](https://github.com/DrZhangXD/okx-trade/commit/05b2838)) — 6 个 strategy yaml 翻 `enable_isolated_margin: true`。明确不接入的：`liq_reversal` / `ob_imbalance`（wick = alpha / 亚秒延迟敏感）+ `ml_fusion`（xgboost 未装）+ `range_breakout`（retired）。
+- Phase 1 全部就位：当任意接入策略下次 open 位时 lazily 调 `set-leverage` + 加 `td_mode:isolated` tag。FundingXS 自 Phase 1b 起已在跑此路径。
+
 ### Added / Refactored (Phase 1 — shared isolated-margin services, 2026-05-26 later)
 
 - **`feat(risk)`** ([f738830](https://github.com/DrZhangXD/okx-trade/commit/f738830) merge) — 抽 FundingXS 的 isolated margin + outlier guard 成共享 service，让其他 9 策略可 opt-in。
