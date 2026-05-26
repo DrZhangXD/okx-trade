@@ -47,3 +47,28 @@ class VolatilityFilter:
     def buffer_size(self, inst_id: str) -> int:
         """Diagnostic: number of bars accumulated. 0 if not yet fed."""
         return len(self._closes.get(inst_id, ()))
+
+    def allow(self, inst_id: str) -> tuple[bool, str]:
+        """Decide if a new leg on ``inst_id`` should be allowed by the
+        outlier guard.
+
+        Returns:
+            ``(True, "disabled")`` if config.enable is False.
+            ``(True, "warmup")`` if buffer has < warmup_min entries.
+            ``(True, "no_baseline")`` if baseline std == 0 (flat history).
+            ``(True, "ok")`` if recent vol within ratio_threshold of baseline.
+            ``(False, "vol_ratio=R>T")`` otherwise.
+        """
+        if not self._cfg.enable:
+            return True, "disabled"
+        from ..strategies._isolated_helpers import outlier_check
+        closes = self._closes.get(inst_id)
+        if closes is None:
+            return True, "warmup"
+        return outlier_check(
+            closes=list(closes),
+            window=self._cfg.window_min,
+            baseline=self._cfg.baseline_min,
+            warmup=self._cfg.warmup_min,
+            ratio_threshold=self._cfg.ratio_threshold,
+        )

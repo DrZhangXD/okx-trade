@@ -1,6 +1,7 @@
 """Unit tests for VolatilityFilter (2026-05-26 Phase 1)."""
 from __future__ import annotations
 
+import numpy as np
 import pytest
 
 from okx_trade.risk.volatility_filter import (
@@ -62,3 +63,69 @@ class TestFeedBar:
         for px in [100.0, 101.0, 102.0, 103.0, 104.0, 105.0, 106.0]:
             f.feed_bar("BTC-USDT-SWAP", px)
         assert f.buffer_size("BTC-USDT-SWAP") == 5
+
+
+class TestAllow:
+    def test_disabled_always_allows(self) -> None:
+        f = VolatilityFilter(
+            VolatilityFilterConfig(enable=False), log=_make_null_log(),
+        )
+        ok, reason = f.allow("BTC-USDT-SWAP")
+        assert ok is True
+        assert reason == "disabled"
+
+    def test_warmup_when_insufficient_data(self) -> None:
+        f = VolatilityFilter(
+            VolatilityFilterConfig(enable=True, warmup_min=1440),
+            log=_make_null_log(),
+        )
+        for px in [100.0, 100.1, 99.9]:
+            f.feed_bar("BTC-USDT-SWAP", px)
+        ok, reason = f.allow("BTC-USDT-SWAP")
+        assert ok is True
+        assert reason == "warmup"
+
+    def test_calm_market_allows(self) -> None:
+        f = VolatilityFilter(
+            VolatilityFilterConfig(enable=True), log=_make_null_log(),
+        )
+        rng = np.random.default_rng(seed=42)
+        rets = rng.normal(0.0, 0.001, 1500)
+        prices = 100.0 * np.exp(np.cumsum(rets))
+        for px in prices:
+            f.feed_bar("BTC-USDT-SWAP", float(px))
+        ok, reason = f.allow("BTC-USDT-SWAP")
+        assert ok is True
+        assert reason == "ok"
+
+    def test_wicky_market_rejects(self) -> None:
+        f = VolatilityFilter(
+            VolatilityFilterConfig(enable=True), log=_make_null_log(),
+        )
+        rng = np.random.default_rng(seed=7)
+        calm = rng.normal(0.0, 0.001, 1440)
+        wick = rng.normal(0.0, 0.02, 60)
+        prices = 100.0 * np.exp(np.cumsum(np.concatenate([calm, wick])))
+        for px in prices:
+            f.feed_bar("BTC-USDT-SWAP", float(px))
+        ok, reason = f.allow("BTC-USDT-SWAP")
+        assert ok is False
+        assert "vol_ratio" in reason
+
+    def test_flat_baseline_no_baseline(self) -> None:
+        f = VolatilityFilter(
+            VolatilityFilterConfig(enable=True), log=_make_null_log(),
+        )
+        for _ in range(1500):
+            f.feed_bar("BTC-USDT-SWAP", 100.0)
+        ok, reason = f.allow("BTC-USDT-SWAP")
+        assert ok is True
+        assert reason == "no_baseline"
+
+    def test_unknown_inst_allows_as_warmup(self) -> None:
+        f = VolatilityFilter(
+            VolatilityFilterConfig(enable=True), log=_make_null_log(),
+        )
+        ok, reason = f.allow("NEVER-FED-SWAP")
+        assert ok is True
+        assert reason == "warmup"
