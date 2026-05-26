@@ -55,6 +55,8 @@ try:
     from nautilus_trader.trading.config import StrategyConfig
     from nautilus_trader.trading.strategy import Strategy
 
+    from ._okx_base import OkxStrategyBase
+
     _NT_AVAILABLE = True
 except ImportError:  # pragma: no cover
     _NT_AVAILABLE = False
@@ -128,6 +130,24 @@ if _NT_AVAILABLE:
         # collateral is untouched, and no other strategy's margin is bled.
         # Set to "cross" to revert to account-wide pooling.
         td_mode_override: str = "isolated"
+        # 2026-05-26 Phase 1c: isolated margin opt-in (futures leg only;
+        # spot leg stays cash. Existing td_mode_override is preserved.)
+        #
+        # Interaction with td_mode_override:
+        #   - enable_isolated_margin=False (default): existing path. The
+        #     td_mode_override tag on the futures order is the only signal;
+        #     the OKX adapter consumes it. Leverage is NOT pre-validated.
+        #   - enable_isolated_margin=True: the futures leg is routed via
+        #     OkxStrategyBase.submit_isolated_order, which pre-validates
+        #     set-leverage and ALSO attaches a td_mode:isolated tag. If
+        #     td_mode_override is "isolated" this just duplicates the tag
+        #     (harmless; adapter dedupes). If td_mode_override is "cross"
+        #     and enable_isolated_margin=True, isolated wins (the helper's
+        #     tag takes precedence). Recommended pairing is to keep
+        #     td_mode_override="isolated" and flip enable_isolated_margin
+        #     on for accounts where leverage pre-validation is desired.
+        enable_isolated_margin: bool = False
+        isolated_lever: int = 3
         funding_panel_parquet_path: str | None = None
         """Optional: parquet catalog root (the directory that contains a
         ``funding/<inst_id>/<YYYYMM>.parquet`` subtree). When set, on_start
@@ -139,7 +159,7 @@ if _NT_AVAILABLE:
         load for context. Only used when funding_panel_parquet_path is set."""
 
 
-    class BasisArbStrategy(Strategy):  # type: ignore[misc]
+    class BasisArbStrategy(OkxStrategyBase):  # type: ignore[misc]
         """期现套利：定时拉 spot + futures ticker，命中 basis 阈值开/平 carry 组合。
 
         状态机：``IDLE`` ↔ ``LONG_CARRY``（spot 多 + futures 空）。
@@ -301,13 +321,13 @@ if _NT_AVAILABLE:
                     f"action={action.value} pos={self._has_position}"
                 )
                 if action == BasisAction.ENTER:
-                    self._enter_carry(spot_px, futures_px)
+                    await self._enter_carry(spot_px, futures_px)
                 elif action == BasisAction.EXIT:
-                    self._exit_carry()
+                    await self._exit_carry()
             except Exception as exc:
                 self.log.error(f"basis check failed: {exc}")
 
-        def _enter_carry(self, spot_px: float, futures_px: float) -> None:
+        async def _enter_carry(self, spot_px: float, futures_px: float) -> None:
             spot_inst = self.cache.instrument(self.spot_id)
             futures_inst = self.cache.instrument(self.futures_id)
             if spot_inst is None or futures_inst is None or spot_px <= 0:
@@ -368,8 +388,53 @@ if _NT_AVAILABLE:
                 time_in_force=TimeInForce.IOC,
                 tags=self._futures_tags,
             )
+
+            # 2026-05-26 Phase 1c: isolated-margin opt-in for the FUTURES leg
+            # only. Spot leg always goes through cash mode (adapter
+            # resolve_td_mode auto-derives cash for SPOT inst_ids).
+            #
+            # Atomic-pair semantics: if the futures leg's set-leverage
+            # pre-check fails in isolated mode, abort BEFORE submitting the
+            # spot leg so we never end up with a one-sided (non-delta-neutral)
+            # position.
+            if (self.config.enable_isolated_margin
+                    and self._iso_service is not None
+                    and not self._iso_service.is_backtest()):
+                pos_mode = await self._iso_service.get_pos_mode()
+                if pos_mode == "long_short_mode":
+                    # carry 永远 SELL futures → SHORT
+                    from ..enums import PosSide
+                    pos_side = PosSide.SHORT
+                else:
+                    pos_side = None  # net_mode: account.py auto-fills NET
+                futures_inst_okx = self.futures_id.value.split(".")[0]
+                ok, err = await self._iso_service.ensure_leverage(
+                    futures_inst_okx, self.config.isolated_lever, pos_side,
+                )
+                if not ok:
+                    self.log.warning(
+                        f"basis_arb skip enter inst={futures_inst_okx} "
+                        f"(set_leverage failed: {err}); neither leg submitted"
+                    )
+                    return
+
+            # Spot leg: plain cash-mode submit (adapter auto-derives td_mode=cash).
             self.submit_order(spot_order)
-            self.submit_order(futures_order)
+            # Futures leg: isolated-aware helper. When enable_isolated_margin
+            # is False, the helper falls through to plain submit_order and the
+            # existing td_mode_override tag carries the per-strategy override.
+            # When True, ensure_leverage above is a cache hit so the helper
+            # just tags + submits.
+            submitted = await self.submit_isolated_order(
+                futures_order, lever=self.config.isolated_lever,
+            )
+            if not submitted:
+                # Pre-check above already passed; defensive log only. Spot leg
+                # is already submitted; record state so _exit_carry can close.
+                self.log.error(
+                    "basis_arb: futures submit_isolated_order returned False "
+                    "after pre-check passed; spot leg already submitted"
+                )
 
             self._has_position = True
             self._spot_qty = spot_qty
@@ -382,7 +447,7 @@ if _NT_AVAILABLE:
                 f"futures={futures_contracts}@{futures_px:.4f}"
             )
 
-        def _exit_carry(self) -> None:
+        async def _exit_carry(self) -> None:
             if not self._has_position:
                 return
             spot_inst = self.cache.instrument(self.spot_id)
@@ -419,8 +484,13 @@ if _NT_AVAILABLE:
                 reduce_only=True,
                 tags=self._futures_tags,
             )
+            # 2026-05-26 Phase 1c: spot reduce-only goes through cash mode
+            # (auto-derived by adapter); futures reduce-only goes through the
+            # isolated helper which cache-hits ensure_leverage from enter.
             self.submit_order(spot_close)
-            self.submit_order(futures_close)
+            await self.submit_isolated_order(
+                futures_close, lever=self.config.isolated_lever,
+            )
             self.log.info(
                 f"EXIT carry: spot={self._spot_qty} futures={self._futures_contracts}"
             )
