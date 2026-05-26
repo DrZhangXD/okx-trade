@@ -103,3 +103,51 @@ class IsolatedMarginService:
             )
         self._pos_mode = "net_mode"
         return self._pos_mode
+
+    async def ensure_leverage(
+        self,
+        inst_id: str,
+        lever: float,
+        pos_side: PosSide | None,
+    ) -> tuple[bool, str | None]:
+        """Idempotent OKX ``set-leverage`` for one (inst, posSide).
+
+        Args:
+            inst_id: OKX format ("BTC-USDT-SWAP") or NT format with ".OKX"
+                suffix (service strips internally).
+            lever: target leverage; rounded to int for OKX.
+            pos_side: ``PosSide.LONG``/``PosSide.SHORT`` in long_short_mode;
+                ``None`` in net_mode (``account.py`` auto-fills
+                ``PosSide.NET`` for the isolated case).
+
+        Returns:
+            ``(True, None)`` on success or cache hit;
+            ``(False, error_msg)`` on REST failure — caller skips the leg.
+        """
+        ps_key = pos_side.value if pos_side is not None else "net"
+        inst_id_okx = inst_id.split(".")[0]
+        cache_key = (inst_id_okx, ps_key)
+        cached = self._lever_cache.get(cache_key)
+        if cached is not None and abs(cached - lever) < 0.01:
+            return True, None
+        rest = await self._ensure_rest_client()
+        try:
+            await rest.account.set_leverage(
+                inst_id=inst_id_okx,
+                leverage=int(round(lever)),
+                mgn_mode=TdMode.ISOLATED,
+                pos_side=pos_side,
+            )
+            self._lever_cache[cache_key] = lever
+            self._log.info(
+                f"iso_margin set leverage inst={inst_id_okx} "
+                f"mgnMode=isolated posSide={ps_key} lever={int(round(lever))}"
+            )
+            return True, None
+        except Exception as exc:
+            err_msg = str(exc)
+            self._log.warning(
+                f"iso_margin set_leverage failed inst={inst_id_okx} "
+                f"posSide={ps_key} lever={lever}: {err_msg}"
+            )
+            return False, err_msg

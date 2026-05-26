@@ -144,6 +144,104 @@ class TestGetPosMode:
         assert result == "net_mode"
 
 
+class TestEnsureLeverage:
+    @pytest.fixture
+    def service_with_mock_rest(self):
+        from okx_trade.config import OKXSettings
+        svc = IsolatedMarginService(OKXSettings(), log=_make_null_log())
+        captured = {"calls": []}
+
+        class _MockAccount:
+            async def set_leverage(self_inner, *, inst_id, leverage, mgn_mode, pos_side):
+                captured["calls"].append({
+                    "inst_id": inst_id, "leverage": leverage,
+                    "mgn_mode": mgn_mode, "pos_side": pos_side,
+                })
+
+        class _MockRest:
+            account = _MockAccount()
+
+        svc._rest = _MockRest()
+        return svc, captured
+
+    @pytest.mark.asyncio
+    async def test_first_call_invokes_rest(self, service_with_mock_rest) -> None:
+        from okx_trade.enums import PosSide, TdMode
+        svc, captured = service_with_mock_rest
+        ok, err = await svc.ensure_leverage("BTC-USDT-SWAP", 5.0, PosSide.LONG)
+        assert ok is True
+        assert err is None
+        assert len(captured["calls"]) == 1
+        c = captured["calls"][0]
+        assert c["inst_id"] == "BTC-USDT-SWAP"
+        assert c["leverage"] == 5
+        assert c["mgn_mode"] == TdMode.ISOLATED
+        assert c["pos_side"] == PosSide.LONG
+
+    @pytest.mark.asyncio
+    async def test_strips_okx_venue_suffix(self, service_with_mock_rest) -> None:
+        from okx_trade.enums import PosSide
+        svc, captured = service_with_mock_rest
+        await svc.ensure_leverage("DOT-USDT-SWAP.OKX", 3.0, PosSide.SHORT)
+        assert captured["calls"][0]["inst_id"] == "DOT-USDT-SWAP"
+
+    @pytest.mark.asyncio
+    async def test_cache_hit_skips_rest(self, service_with_mock_rest) -> None:
+        from okx_trade.enums import PosSide
+        svc, captured = service_with_mock_rest
+        await svc.ensure_leverage("BTC-USDT-SWAP", 5.0, PosSide.LONG)
+        await svc.ensure_leverage("BTC-USDT-SWAP", 5.0, PosSide.LONG)
+        assert len(captured["calls"]) == 1
+
+    @pytest.mark.asyncio
+    async def test_different_pos_side_separate_cache(self, service_with_mock_rest) -> None:
+        from okx_trade.enums import PosSide
+        svc, captured = service_with_mock_rest
+        await svc.ensure_leverage("BTC-USDT-SWAP", 5.0, PosSide.LONG)
+        await svc.ensure_leverage("BTC-USDT-SWAP", 5.0, PosSide.SHORT)
+        assert len(captured["calls"]) == 2
+
+    @pytest.mark.asyncio
+    async def test_changed_lever_re_invokes(self, service_with_mock_rest) -> None:
+        from okx_trade.enums import PosSide
+        svc, captured = service_with_mock_rest
+        await svc.ensure_leverage("BTC-USDT-SWAP", 5.0, PosSide.LONG)
+        await svc.ensure_leverage("BTC-USDT-SWAP", 8.0, PosSide.LONG)
+        assert len(captured["calls"]) == 2
+        assert captured["calls"][0]["leverage"] == 5
+        assert captured["calls"][1]["leverage"] == 8
+
+    @pytest.mark.asyncio
+    async def test_none_pos_side_uses_net_cache_key(self, service_with_mock_rest) -> None:
+        svc, captured = service_with_mock_rest
+        await svc.ensure_leverage("BTC-USDT-SWAP", 5.0, None)
+        await svc.ensure_leverage("BTC-USDT-SWAP", 5.0, None)
+        assert len(captured["calls"]) == 1
+        # PosSide passed to account.set_leverage is None (account.py auto-fills NET)
+        assert captured["calls"][0]["pos_side"] is None
+
+    @pytest.mark.asyncio
+    async def test_rest_failure_returns_false_with_err(self) -> None:
+        from okx_trade.config import OKXSettings
+        from okx_trade.enums import PosSide
+        svc = IsolatedMarginService(OKXSettings(), log=_make_null_log())
+
+        class _MockAccount:
+            async def set_leverage(self_inner, **kw):
+                raise RuntimeError("OKX 51001: instId mismatch")
+
+        class _MockRest:
+            account = _MockAccount()
+
+        svc._rest = _MockRest()
+        ok, err = await svc.ensure_leverage("BAD-USDT", 5.0, PosSide.LONG)
+        assert ok is False
+        assert err is not None
+        assert "51001" in err
+        # Failed call should NOT populate cache
+        assert ("BAD-USDT", "long") not in svc._lever_cache
+
+
 def _make_null_log():
     class _Null:
         def info(self, *_a, **_kw): pass
