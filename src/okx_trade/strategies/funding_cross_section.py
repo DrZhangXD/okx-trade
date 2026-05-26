@@ -300,8 +300,11 @@ if _NT_AVAILABLE:
                 from ..rest.client import OKXRestClient
                 self._rest = OKXRestClient(self._rest_settings)
                 await self._rest.__aenter__()
-            # inst_value like "DOT-USDT-SWAP" → underlying "DOT-USDT"
-            underlying = inst_value.replace("-SWAP", "")
+            # NT InstrumentId.value is "DOT-USDT-SWAP.OKX"; OKX REST wants
+            # bare "DOT-USDT-SWAP" (no venue suffix). Strip then derive
+            # underlying spot "DOT-USDT" by removing "-SWAP".
+            inst_id_okx = inst_value.split(".")[0]
+            underlying = inst_id_okx.replace("-SWAP", "")
             try:
                 idx_data, mark_data = await asyncio.gather(
                     self._rest.transport.request(
@@ -310,7 +313,7 @@ if _NT_AVAILABLE:
                     ),
                     self._rest.transport.request(
                         "GET", "/api/v5/public/mark-price",
-                        params={"instType": "SWAP", "instId": inst_value},
+                        params={"instType": "SWAP", "instId": inst_id_okx},
                         private=False, group=None,
                     ),
                     return_exceptions=False,
@@ -860,7 +863,10 @@ if _NT_AVAILABLE:
             the leg this round).
             """
             ps_key = pos_side.value if pos_side is not None else "net"
-            cache_key = (inst_value, ps_key)
+            # NT InstrumentId.value is "DOT-USDT-SWAP.OKX"; OKX REST wants
+            # bare "DOT-USDT-SWAP" (no venue suffix). Strip before sending.
+            inst_id_okx = inst_value.split(".")[0]
+            cache_key = (inst_id_okx, ps_key)
             cached = self._set_lever_cache.get(cache_key)
             if cached is not None and abs(cached - lever) < 0.01:
                 return True
@@ -871,20 +877,20 @@ if _NT_AVAILABLE:
             try:
                 from ..enums import TdMode
                 await self._rest.account.set_leverage(
-                    inst_id=inst_value,
+                    inst_id=inst_id_okx,
                     leverage=int(round(lever)),
                     mgn_mode=TdMode.ISOLATED,
                     pos_side=pos_side,
                 )
                 self._set_lever_cache[cache_key] = lever
                 self.log.info(
-                    f"funding_xs set leverage inst={inst_value} "
+                    f"funding_xs set leverage inst={inst_id_okx} "
                     f"mgnMode=isolated posSide={ps_key} lever={int(round(lever))}"
                 )
                 return True
             except Exception as exc:
                 self.log.warning(
-                    f"funding_xs set_leverage failed inst={inst_value} "
+                    f"funding_xs set_leverage failed inst={inst_id_okx} "
                     f"posSide={ps_key} lever={lever}: {exc}"
                 )
                 return False
