@@ -155,3 +155,73 @@ class TestOutlierCheck:
         )
         assert ok is True
         assert reason == "no_baseline"
+
+
+# ---------------------------------------------------------------------------
+# _set_leverage_cached behavior (mocked)
+# ---------------------------------------------------------------------------
+class TestSetLeverageCache:
+    """Test the cache logic via a minimal mock — we don't spin up a real
+    strategy because that requires NT TradingNode. We bind the unbound
+    method to a mock object that has the required state shape."""
+
+    @pytest.fixture
+    def fake_strategy(self):
+        class _Mock:
+            def __init__(self):
+                self._set_lever_cache: dict = {}
+                self.calls: list = []
+                self.log = type("L", (), {
+                    "info": lambda *_, **__: None,
+                    "warning": lambda *_, **__: None,
+                })()
+                outer = self
+
+                class _Acct:
+                    async def set_leverage(self_inner, *, inst_id, leverage, mgn_mode, pos_side):
+                        outer.calls.append((inst_id, leverage, pos_side))
+
+                class _Rest:
+                    account = _Acct()
+                self._rest = _Rest()
+
+        from okx_trade.strategies.funding_cross_section import FundingXSStrategy
+        m = _Mock()
+        m._set_leverage_cached = FundingXSStrategy._set_leverage_cached.__get__(m)
+        return m
+
+    @pytest.mark.asyncio
+    async def test_first_call_invokes_rest_with_pos_side(self, fake_strategy) -> None:
+        from okx_trade.enums import PosSide
+        ok = await fake_strategy._set_leverage_cached("DOT-USDT-SWAP", 5.0, PosSide.LONG)
+        assert ok is True
+        assert len(fake_strategy.calls) == 1
+        assert fake_strategy.calls[0][0] == "DOT-USDT-SWAP"
+        assert fake_strategy.calls[0][1] == 5
+        assert fake_strategy.calls[0][2] == PosSide.LONG
+
+    @pytest.mark.asyncio
+    async def test_same_lever_same_side_skips_rest(self, fake_strategy) -> None:
+        from okx_trade.enums import PosSide
+        await fake_strategy._set_leverage_cached("DOT-USDT-SWAP", 5.0, PosSide.LONG)
+        await fake_strategy._set_leverage_cached("DOT-USDT-SWAP", 5.0, PosSide.LONG)
+        assert len(fake_strategy.calls) == 1  # second call hit cache
+
+    @pytest.mark.asyncio
+    async def test_same_lever_different_side_invokes_again(self, fake_strategy) -> None:
+        from okx_trade.enums import PosSide
+        await fake_strategy._set_leverage_cached("DOT-USDT-SWAP", 5.0, PosSide.LONG)
+        await fake_strategy._set_leverage_cached("DOT-USDT-SWAP", 5.0, PosSide.SHORT)
+        # Different posSide → separate cache entries
+        assert len(fake_strategy.calls) == 2
+        sides = {c[2] for c in fake_strategy.calls}
+        assert PosSide.LONG in sides and PosSide.SHORT in sides
+
+    @pytest.mark.asyncio
+    async def test_changed_lever_re_invokes(self, fake_strategy) -> None:
+        from okx_trade.enums import PosSide
+        await fake_strategy._set_leverage_cached("DOT-USDT-SWAP", 5.0, PosSide.LONG)
+        await fake_strategy._set_leverage_cached("DOT-USDT-SWAP", 8.0, PosSide.LONG)
+        assert len(fake_strategy.calls) == 2
+        assert fake_strategy.calls[0][1] == 5
+        assert fake_strategy.calls[1][1] == 8

@@ -165,6 +165,10 @@ if _NT_AVAILABLE:
             self._funding_panels: dict[str, "FundingPanel"] = {}
             self._funding_source_kind: str = "rest"  # "rest" (live) | "panel" (backtest)
 
+            # 2026-05-26: isolated margin support
+            self._set_lever_cache: dict[tuple[str, str], float] = {}  # (inst, posSide) → lever
+            self._account_pos_mode: str | None = None  # cached from OKX /account/config
+
         def on_start(self) -> None:
             # Backtest: auto-load funding panels for all configured insts
             if self.config.funding_panel_parquet_path:
@@ -506,6 +510,78 @@ if _NT_AVAILABLE:
             )
 
             self._positions.pop(inst_value, None)
+
+        async def _get_account_pos_mode(self) -> str:
+            """Cached fetch of OKX account-level posMode. Values: 'net_mode',
+            'long_short_mode'. Cached once per strategy lifetime — switching
+            mode mid-session would require a restart anyway.
+            """
+            if self._account_pos_mode is not None:
+                return self._account_pos_mode
+            if self._rest is None:
+                from ..rest.client import OKXRestClient
+                self._rest = OKXRestClient(self._rest_settings)
+                await self._rest.__aenter__()
+            try:
+                data = await self._rest.transport.request(
+                    "GET", "/api/v5/account/config",
+                    private=True, group=None,
+                )
+                if data and isinstance(data, list) and data[0]:
+                    mode = data[0].get("posMode") or "net_mode"
+                    self._account_pos_mode = str(mode)
+                    self.log.info(f"funding_xs cached account posMode={mode}")
+                    return self._account_pos_mode
+            except Exception as exc:
+                self.log.warning(f"funding_xs _get_account_pos_mode failed: {exc}; defaulting to net_mode")
+            self._account_pos_mode = "net_mode"
+            return self._account_pos_mode
+
+        async def _set_leverage_cached(
+            self, inst_value: str, lever: float, pos_side,
+        ) -> bool:
+            """Idempotent: call OKX set-leverage only if (inst, posSide, lever) changed.
+
+            Args:
+                inst_value: e.g. "DOT-USDT-SWAP".
+                lever: target leverage (rounded to int for OKX).
+                pos_side: PosSide enum or None. In net_mode, callers pass None
+                    and account.py auto-fills posSide=net. In long_short_mode,
+                    callers must pass PosSide.LONG or PosSide.SHORT.
+
+            Returns ``True`` if leverage is in the desired state (set or
+            already cached); ``False`` on REST failure (caller should skip
+            the leg this round).
+            """
+            ps_key = pos_side.value if pos_side is not None else "net"
+            cache_key = (inst_value, ps_key)
+            cached = self._set_lever_cache.get(cache_key)
+            if cached is not None and abs(cached - lever) < 0.01:
+                return True
+            if self._rest is None:
+                from ..rest.client import OKXRestClient
+                self._rest = OKXRestClient(self._rest_settings)
+                await self._rest.__aenter__()
+            try:
+                from ..enums import TdMode
+                await self._rest.account.set_leverage(
+                    inst_id=inst_value,
+                    leverage=int(round(lever)),
+                    mgn_mode=TdMode.ISOLATED,
+                    pos_side=pos_side,
+                )
+                self._set_lever_cache[cache_key] = lever
+                self.log.info(
+                    f"funding_xs set leverage inst={inst_value} "
+                    f"mgnMode=isolated posSide={ps_key} lever={int(round(lever))}"
+                )
+                return True
+            except Exception as exc:
+                self.log.warning(
+                    f"funding_xs set_leverage failed inst={inst_value} "
+                    f"posSide={ps_key} lever={lever}: {exc}"
+                )
+                return False
 
         def on_order_rejected(self, event) -> None:  # noqa: ANN001
             # 简化处理：拒了哪条腿、就从 _positions 移除（避免幻仓）
