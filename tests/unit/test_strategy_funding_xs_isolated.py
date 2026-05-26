@@ -13,6 +13,15 @@ from okx_trade.strategies._isolated_helpers import (
 )
 
 
+def _make_null_log():
+    class _Null:
+        def info(self, *_a, **_kw): pass
+        def warning(self, *_a, **_kw): pass
+        def error(self, *_a, **_kw): pass
+        def debug(self, *_a, **_kw): pass
+    return _Null()
+
+
 # ---------------------------------------------------------------------------
 # compute_leverage
 # ---------------------------------------------------------------------------
@@ -158,73 +167,10 @@ class TestOutlierCheck:
 
 
 # ---------------------------------------------------------------------------
-# _set_leverage_cached behavior (mocked)
+# Note: TestSetLeverageCache was removed in P2-Task 14 — set-leverage cache
+# behavior now lives on IsolatedMarginService and is covered by
+# tests/unit/test_risk_isolated_margin_service.py.
 # ---------------------------------------------------------------------------
-class TestSetLeverageCache:
-    """Test the cache logic via a minimal mock — we don't spin up a real
-    strategy because that requires NT TradingNode. We bind the unbound
-    method to a mock object that has the required state shape."""
-
-    @pytest.fixture
-    def fake_strategy(self):
-        class _Mock:
-            def __init__(self):
-                self._set_lever_cache: dict = {}
-                self.calls: list = []
-                self.log = type("L", (), {
-                    "info": lambda *_, **__: None,
-                    "warning": lambda *_, **__: None,
-                })()
-                outer = self
-
-                class _Acct:
-                    async def set_leverage(self_inner, *, inst_id, leverage, mgn_mode, pos_side):
-                        outer.calls.append((inst_id, leverage, pos_side))
-
-                class _Rest:
-                    account = _Acct()
-                self._rest = _Rest()
-
-        from okx_trade.strategies.funding_cross_section import FundingXSStrategy
-        m = _Mock()
-        m._set_leverage_cached = FundingXSStrategy._set_leverage_cached.__get__(m)
-        return m
-
-    @pytest.mark.asyncio
-    async def test_first_call_invokes_rest_with_pos_side(self, fake_strategy) -> None:
-        from okx_trade.enums import PosSide
-        ok = await fake_strategy._set_leverage_cached("DOT-USDT-SWAP", 5.0, PosSide.LONG)
-        assert ok is True
-        assert len(fake_strategy.calls) == 1
-        assert fake_strategy.calls[0][0] == "DOT-USDT-SWAP"
-        assert fake_strategy.calls[0][1] == 5
-        assert fake_strategy.calls[0][2] == PosSide.LONG
-
-    @pytest.mark.asyncio
-    async def test_same_lever_same_side_skips_rest(self, fake_strategy) -> None:
-        from okx_trade.enums import PosSide
-        await fake_strategy._set_leverage_cached("DOT-USDT-SWAP", 5.0, PosSide.LONG)
-        await fake_strategy._set_leverage_cached("DOT-USDT-SWAP", 5.0, PosSide.LONG)
-        assert len(fake_strategy.calls) == 1  # second call hit cache
-
-    @pytest.mark.asyncio
-    async def test_same_lever_different_side_invokes_again(self, fake_strategy) -> None:
-        from okx_trade.enums import PosSide
-        await fake_strategy._set_leverage_cached("DOT-USDT-SWAP", 5.0, PosSide.LONG)
-        await fake_strategy._set_leverage_cached("DOT-USDT-SWAP", 5.0, PosSide.SHORT)
-        # Different posSide → separate cache entries
-        assert len(fake_strategy.calls) == 2
-        sides = {c[2] for c in fake_strategy.calls}
-        assert PosSide.LONG in sides and PosSide.SHORT in sides
-
-    @pytest.mark.asyncio
-    async def test_changed_lever_re_invokes(self, fake_strategy) -> None:
-        from okx_trade.enums import PosSide
-        await fake_strategy._set_leverage_cached("DOT-USDT-SWAP", 5.0, PosSide.LONG)
-        await fake_strategy._set_leverage_cached("DOT-USDT-SWAP", 8.0, PosSide.LONG)
-        assert len(fake_strategy.calls) == 2
-        assert fake_strategy.calls[0][1] == 5
-        assert fake_strategy.calls[1][1] == 8
 
 
 # ---------------------------------------------------------------------------
@@ -261,7 +207,7 @@ class TestComputeTargetsOutlierGuard:
 # ---------------------------------------------------------------------------
 class TestComputeTargetsIntegration:
     """End-to-end check that ``_compute_target_positions`` actually fires the
-    outlier guard when fed a populated ``_closes_1m_by_inst`` deque.
+    outlier guard when fed via the shared ``VolatilityFilter`` service.
 
     Before the wire-up fix, the guard read from ``_closes_by_inst`` (1D,
     capped at ~32 entries), which is always < warmup=1440 → ``(True,
@@ -272,7 +218,10 @@ class TestComputeTargetsIntegration:
     def mock_strategy(self):
         """Construct a minimal mock that exposes only the attributes
         ``_compute_target_positions`` reads — no real NT runtime."""
-        from collections import deque
+        from okx_trade.risk.volatility_filter import (
+            VolatilityFilter,
+            VolatilityFilterConfig,
+        )
 
         class _MockConfig:
             top_n = 1
@@ -347,11 +296,26 @@ class TestComputeTargetsIntegration:
             calm_iid: [calm_closes_1m[-1]],
             wick_iid: [wicky_closes_1m[-1]],
         }
-        # 1m cache: feeds outlier_check.
-        m._closes_1m_by_inst = {
-            calm_iid: deque(calm_closes_1m, maxlen=2000),
-            wick_iid: deque(wicky_closes_1m, maxlen=2000),
-        }
+        # 1m cache: feeds the shared VolatilityFilter service. The filter is
+        # keyed by OKX inst_id (no ``.OKX`` venue suffix), matching what the
+        # strategy passes from ``inst_value.split(".")[0]``.
+        vol_filter = VolatilityFilter(
+            VolatilityFilterConfig(
+                enable=True,
+                window_min=60,
+                baseline_min=1440,
+                warmup_min=1440,
+                ratio_threshold=3.0,
+                buffer_max=2000,
+            ),
+            log=_make_null_log(),
+        )
+        for px in calm_closes_1m:
+            vol_filter.feed_bar(calm_iid.split(".")[0], px)
+        for px in wicky_closes_1m:
+            vol_filter.feed_bar(wick_iid.split(".")[0], px)
+        m._vol_filter = vol_filter
+
         m._allocated_equity_usdt = 10000.0
         m._inst_ids = []  # not read by _compute_target_positions
 
@@ -361,6 +325,11 @@ class TestComputeTargetsIntegration:
         # Bind _returns staticmethod so _compute_target_positions can call it.
         from okx_trade.strategies.funding_cross_section import FundingXSStrategy
         m._returns = FundingXSStrategy._returns
+
+        # Bind vol_filter_allow from OkxStrategyBase so _compute_target_positions
+        # can route the guard through the shared service.
+        from okx_trade.strategies._okx_base import OkxStrategyBase
+        m.vol_filter_allow = OkxStrategyBase.vol_filter_allow.__get__(m)
 
         return m
 
@@ -402,21 +371,14 @@ class TestComputeTargetsIntegration:
 
         Pre-fix, the guard was wired to ``_closes_by_inst`` (1D, len ≤ 32),
         so it always returned ``(True, "warmup")``. We assert that with a
-        full 1500-bar 1m history, the guard reaches its decision branches
-        (not ``warmup``) for at least one leg.
+        full 1500-bar 1m history, the shared VolatilityFilter reaches its
+        decision branches (not ``warmup``) for the wicky leg.
         """
-        from okx_trade.strategies._isolated_helpers import outlier_check
-
-        # Same data the fixture would feed. If this returns "warmup", the
-        # wire-up is wrong (we'd be looking at 1D instead of 1m).
-        wick_closes = list(mock_strategy._closes_1m_by_inst["WICK-USDT-SWAP.OKX"])
-        ok, reason = outlier_check(
-            closes=wick_closes,
-            window=mock_strategy.config.outlier_window_min,
-            baseline=mock_strategy.config.outlier_baseline_min,
-            warmup=mock_strategy.config.outlier_warmup_min,
-            ratio_threshold=mock_strategy.config.outlier_vol_ratio,
-        )
+        # Route through the same path the strategy uses: vol_filter_allow,
+        # which delegates to VolatilityFilter.allow → outlier_check. If the
+        # filter buffer is too small (wire-up wrong), this comes back
+        # "warmup" and the assertion fails.
+        ok, reason = mock_strategy.vol_filter_allow("WICK-USDT-SWAP")
         assert reason != "warmup", (
             "Outlier guard returned 'warmup' even with 1500 1m bars — "
             "wire-up is wrong, still reading from a too-small cache."
@@ -442,16 +404,19 @@ def test_leg_target_dataclass_construction() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Fix 1: partial-rebalance abort guard
+# Partial-rebalance abort guard (post-migration: service-mocked)
 # ---------------------------------------------------------------------------
 class TestPartialRebalanceAbort:
-    """Verify _execute_diff aborts the open-phase if any leg's
-    set-leverage fails, to avoid directional residual."""
+    """Verify _execute_diff aborts open-phase if service.batch_ensure_leverage
+    returns all_ok=False."""
 
     @pytest.mark.asyncio
-    async def test_set_leverage_failure_aborts_all_opens(self) -> None:
-        from okx_trade.strategies.funding_cross_section import FundingXSStrategy, _LegTarget
+    async def test_partial_failure_aborts_all_opens(self) -> None:
+        from okx_trade.strategies.funding_cross_section import (
+            FundingXSStrategy, _LegTarget,
+        )
         from okx_trade.enums import PosSide
+        from okx_trade.risk.isolated_margin_service import BatchEnsureResult
 
         class _MockLog:
             def __init__(self): self.warnings = []
@@ -462,114 +427,50 @@ class TestPartialRebalanceAbort:
             margin_mode = "isolated"
             enable_dynamic_lever = True
 
+        class _MockService:
+            calls: list = []
+            def is_backtest(self): return False
+            async def get_pos_mode(self): return "long_short_mode"
+            async def batch_ensure_leverage(self, items):
+                self.calls.append(items)
+                # First leg succeeds, second fails — emulate partial failure
+                return BatchEnsureResult(
+                    all_ok=False,
+                    failed=[("B-USDT-SWAP", "51001 broken")],
+                )
+
+        async def fake_open_leg(inst_value, leg):
+            pytest.fail(f"_open_leg should not be called on abort; got {inst_value}")
+
         m = type("Mock", (), {})()
         m.config = _MockConfig()
         m.log = _MockLog()
         m._positions = {}
-        m._set_lever_cache = {}
-        m._rest_settings = type("S", (), {"api_key": "real-key"})()  # NOT backtest
-        m._account_pos_mode = "long_short_mode"
-
-        # Mock _set_leverage_cached: first call (LONG) succeeds, second (SHORT) fails
-        call_count = {"n": 0}
-        async def fake_set_lever(inst_value, lever, pos_side):
-            call_count["n"] += 1
-            return call_count["n"] == 1  # only first succeeds
-
-        async def fake_open_leg(inst_value, leg):
-            pytest.fail(f"_open_leg should not be called when set-leverage aborts; got {inst_value}")
-
-        async def fake_get_pos_mode():
-            return "long_short_mode"
-
-        def fake_is_backtest():
-            return False
-
-        m._set_leverage_cached = fake_set_lever
+        m._iso_service = _MockService()
         m._open_leg = fake_open_leg
-        m._get_account_pos_mode = fake_get_pos_mode
-        m._is_backtest_context = fake_is_backtest
         m._close_leg = lambda *_a, **_kw: None
-
-        # Bind _execute_diff
         m._execute_diff = FundingXSStrategy._execute_diff.__get__(m)
 
         target = {
-            "A-USDT-SWAP": _LegTarget(direction="long",  contracts=1.0, lever=5.0, edge_score=1.0, pos_side=PosSide.LONG),
-            "B-USDT-SWAP": _LegTarget(direction="short", contracts=1.0, lever=5.0, edge_score=1.0, pos_side=PosSide.SHORT),
+            "A-USDT-SWAP": _LegTarget(
+                direction="long", contracts=1.0, lever=5.0, edge_score=1.0,
+                pos_side=PosSide.LONG,
+            ),
+            "B-USDT-SWAP": _LegTarget(
+                direction="short", contracts=1.0, lever=5.0, edge_score=1.0,
+                pos_side=PosSide.SHORT,
+            ),
         }
-
         await m._execute_diff(target)
 
-        # No _open_leg call should have happened (would've called pytest.fail)
         assert any("ABORT" in w for w in m.log.warnings)
-        assert call_count["n"] == 2  # tried both, second failed → abort
+        # batch_ensure_leverage was called once with both items
+        assert len(m._iso_service.calls) == 1
+        assert len(m._iso_service.calls[0]) == 2
 
 
 # ---------------------------------------------------------------------------
-# Fix 2: unknown posMode loud WARN
+# Note: TestUnknownPosModeWarn and TestBacktestFallback were removed in
+# P2-Task 14. Those behaviors now live on IsolatedMarginService.get_pos_mode
+# and .is_backtest, covered by tests/unit/test_risk_isolated_margin_service.py.
 # ---------------------------------------------------------------------------
-class TestUnknownPosModeWarn:
-    """Verify _get_account_pos_mode logs a loud WARN on unexpected posMode values."""
-
-    @pytest.mark.asyncio
-    async def test_unknown_pos_mode_logs_warn(self) -> None:
-        from okx_trade.strategies.funding_cross_section import FundingXSStrategy
-
-        class _MockLog:
-            def __init__(self): self.warnings = []; self.infos = []
-            def warning(self, msg): self.warnings.append(msg)
-            def info(self, msg): self.infos.append(msg)
-
-        class _MockTransport:
-            async def request(self, method, path, *, params=None, private=None, group=None):
-                return [{"posMode": "future_unexpected_mode"}]
-
-        class _MockRest:
-            transport = _MockTransport()
-            async def __aenter__(self): return self
-            async def __aexit__(self, *a): pass
-
-        m = type("Mock", (), {})()
-        m._account_pos_mode = None
-        m._rest = _MockRest()
-        m._rest_settings = None
-        m.log = _MockLog()
-        m._get_account_pos_mode = FundingXSStrategy._get_account_pos_mode.__get__(m)
-
-        result = await m._get_account_pos_mode()
-        assert result == "net_mode"
-        assert any("UNEXPECTED posMode" in w for w in m.log.warnings)
-
-
-# ---------------------------------------------------------------------------
-# Backtest fallback: force cross mode + skip set-leverage
-# ---------------------------------------------------------------------------
-class TestBacktestFallback:
-    def test_is_backtest_context_no_api_key(self) -> None:
-        from okx_trade.strategies.funding_cross_section import FundingXSStrategy
-
-        class _Stub:
-            _rest_settings = type("S", (), {"api_key": ""})()  # SecretStr-like empty
-
-        result = FundingXSStrategy._is_backtest_context(_Stub())  # type: ignore
-        assert result is True
-
-    def test_is_backtest_context_with_api_key(self) -> None:
-        from okx_trade.strategies.funding_cross_section import FundingXSStrategy
-
-        class _Stub:
-            _rest_settings = type("S", (), {"api_key": "real-key"})()
-
-        result = FundingXSStrategy._is_backtest_context(_Stub())  # type: ignore
-        assert result is False
-
-    def test_is_backtest_context_rest_settings_none(self) -> None:
-        """Before on_start, _rest_settings may not be set. Safe default: backtest."""
-        from okx_trade.strategies.funding_cross_section import FundingXSStrategy
-
-        class _Stub:
-            _rest_settings = None
-
-        result = FundingXSStrategy._is_backtest_context(_Stub())  # type: ignore
-        assert result is True

@@ -98,6 +98,8 @@ class LiveMonitor:
         regime_refresh_interval_s: int = 86400,
         regime_bootstrap_days: int = 400,
         account_drawdown_tracker: Any = None,
+        iso_service: Any = None,
+        vol_filter: Any = None,
     ) -> None:
         self.handles_by_strategy = handles_by_strategy
         self.sinks = sinks
@@ -134,6 +136,13 @@ class LiveMonitor:
         # is the only writer; per-strategy DrawdownTrackers are no longer fed
         # by alloc_refresh (Phase 0 of 2026-05-20 DD architecture split).
         self._account_drawdown_tracker = account_drawdown_tracker
+        # Isolated-margin policy singleton + 1m vol-filter singleton:
+        # constructed once in build_live_context and DI'd into every
+        # OkxStrategyBase. Held here for future diagnostics surfacing
+        # (e.g. cache size, last outlier ratio per inst) — not used
+        # internally by the monitor poll loop today.
+        self._iso_service = iso_service
+        self._vol_filter = vol_filter
 
     def stop(self) -> None:
         self._stopped.set()

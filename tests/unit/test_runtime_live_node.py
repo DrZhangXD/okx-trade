@@ -184,6 +184,54 @@ def test_okx_equity_provider_returns_none_on_zero_total_eq(monkeypatch: pytest.M
     assert val is None
 
 
+def test_build_live_context_injects_iso_service_and_vol_filter(
+    minimal_live_cfg: dict, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """P2 Task 10 DI wiring: every OkxStrategyBase-derived strategy gets
+    the singleton iso_service + vol_filter, and LiveMonitor holds refs
+    to both. Uses ``build_node=True`` with a stubbed ``_build_trading_node``
+    so NT live engine isn't required.
+
+    Migrated strategies (those inheriting ``OkxStrategyBase``) declare
+    ``_iso_service`` / ``_vol_filter`` class attrs — we assert their
+    instance dicts now hold the singleton refs. Legacy strategies without
+    those attrs are skipped silently by the ``hasattr`` guard.
+    """
+    from okx_trade.risk.isolated_margin_service import IsolatedMarginService
+    from okx_trade.risk.volatility_filter import VolatilityFilter
+    import okx_trade.runtime.live_node as live_node_mod
+
+    class _FakeTrader:
+        def __init__(self) -> None:
+            self.added: list = []
+
+        def add_strategy(self, strategy: object) -> None:
+            self.added.append(strategy)
+
+    class _FakeNode:
+        def __init__(self) -> None:
+            self.trader = _FakeTrader()
+
+    monkeypatch.setattr(live_node_mod, "_build_trading_node", lambda cfg: _FakeNode())
+
+    ctx = build_live_context(minimal_live_cfg, build_node=True)
+
+    assert ctx.monitor is not None
+    assert isinstance(ctx.monitor._iso_service, IsolatedMarginService)
+    assert isinstance(ctx.monitor._vol_filter, VolatilityFilter)
+
+    # At least one of the two enabled strategies (liq_reversal / funding_carry)
+    # must have migrated to OkxStrategyBase — assert ALL strategies that
+    # declared the attr received the *same* singleton ref.
+    migrated = [
+        s for s in ctx.strategies.values() if hasattr(s, "_iso_service")
+    ]
+    if migrated:  # at least one migrated strategy in current registry
+        for s in migrated:
+            assert s._iso_service is ctx.monitor._iso_service
+            assert s._vol_filter is ctx.monitor._vol_filter
+
+
 def test_okx_equity_provider_returns_none_on_exception(monkeypatch: pytest.MonkeyPatch) -> None:
     """Network / auth error → None (monitor keeps last allocation)."""
     class _FakeClient:
