@@ -108,6 +108,30 @@ def _ms_to_nanos(ms: int) -> int:
     return int(ms) * 1_000_000
 
 
+def _infer_positions_inst_type(inst_id: str) -> InstType | None:
+    """Map OKX ``instId`` string → ``InstType`` for the ``/account/positions`` query.
+
+    OKX requires the ``instType`` param to match the ``instId`` when both are
+    given, otherwise returns ``51015 Instrument ID doesn't match instrument
+    type``. Returns ``None`` for SPOT (positions endpoint doesn't track SPOT;
+    NT consumes SPOT balances via ``/account/balance`` → ``AccountBalance``).
+
+    - ``BTC-USDT-SWAP``           → ``SWAP``
+    - ``BTC-USDT-260626``          → ``FUTURES`` (YYMMDD tail, 6 digits)
+    - ``BTC-USD-240628-100000-C``  → ``OPTION`` (5 parts, ends in C/P)
+    - ``BTC-USDT`` / unknown      → ``None`` (SPOT or unrecognized; skip query)
+    """
+    if inst_id.endswith("-SWAP"):
+        return InstType.SWAP
+    tail = inst_id.rsplit("-", 1)[-1]
+    if len(tail) == 6 and tail.isdigit():
+        return InstType.FUTURES
+    parts = inst_id.split("-")
+    if len(parts) == 5 and parts[-1] in ("C", "P"):
+        return InstType.OPTION
+    return None
+
+
 def _build_account_balances(balance: Balance) -> list[AccountBalance]:
     """把 OKX :class:`Balance` 的 ``details[]`` 翻译成 NT ``AccountBalance``。
 
@@ -960,8 +984,17 @@ class OKXLiveExecutionClient(LiveExecutionClient):
     ) -> list[PositionStatusReport]:
         """拉持仓快照。``net`` / ``long_short`` 模式都靠 OKX ``pos`` 字段判定方向。
 
-        现货账户走 ``positions`` 端点会返回空——NT 在 OmsType=NETTING 下不需要现货
-        position report（资产以 AccountBalance 形式表达）。所以这里只查 SWAP。
+        OKX ``/account/positions`` 端点在传 ``instId`` 时**必须**配匹的 ``instType``,
+        否则返 ``51015 Instrument ID doesn't match instrument type``。NT 在 reconcile
+        时按持有的每个 instrument 各调一次本方法，passing 不同 inst_id (SWAP / FUTURES /
+        甚至 SPOT 如 basis_arb 的现货腿)。本方法从 inst_id 字符串格式推导 instType：
+
+        - ``*-SWAP``        → SWAP
+        - ``*-YYMMDD``      → FUTURES
+        - ``*-YYMMDD-K-C/P`` → OPTION
+        - 其他 (e.g. ``BTC-USDT``)  → SPOT (positions 端点不返 SPOT，跳过)
+
+        无 inst_id 的 bulk query (e.g. startup-wide reconcile) 退回查 SWAP。
         """
         if self._rest is None:
             log.warning("okx.exec_client.report_rest_not_connected")
@@ -973,14 +1006,33 @@ class OKXLiveExecutionClient(LiveExecutionClient):
             from_instrument_id(command.instrument_id) if command.instrument_id else None
         )
 
+        if inst_id_filter is not None:
+            derived = _infer_positions_inst_type(inst_id_filter)
+            if derived is None:
+                # SPOT or unknown — positions endpoint returns nothing here.
+                # SPOT balances live on /account/balance and NT tracks them
+                # via AccountBalance updates, not PositionStatusReport.
+                log.debug(
+                    "okx.exec_client.positions_skip_non_derivative",
+                    extra={"inst_id": inst_id_filter},
+                )
+                return []
+            inst_type_param = derived
+        else:
+            inst_type_param = InstType.SWAP
+
         try:
             positions = await self._rest.account.get_positions(
-                inst_type=InstType.SWAP, inst_id=inst_id_filter,
+                inst_type=inst_type_param, inst_id=inst_id_filter,
             )
         except Exception as exc:
             log.warning(
                 "okx.exec_client.positions_failed",
-                extra={"err": str(exc)},
+                extra={
+                    "err": str(exc),
+                    "inst_id": inst_id_filter,
+                    "inst_type": inst_type_param.value,
+                },
             )
             return []
 

@@ -11,11 +11,12 @@ import pytest
 
 from okx_trade.adapter.execution import (
     _build_account_balances,
+    _infer_positions_inst_type,
     parse_td_mode_tag,
     resolve_pos_side,
     resolve_td_mode,
 )
-from okx_trade.enums import PosSide, Side, TdMode
+from okx_trade.enums import InstType, PosSide, Side, TdMode
 from okx_trade.models.account import Balance, BalanceDetail
 
 
@@ -258,3 +259,42 @@ class TestBuildAccountBalances:
         out = _build_account_balances(bal)
         # 至少 USDT 一行要出现
         assert any(ab.currency.code == "USDT" for ab in out)
+
+
+class TestInferPositionsInstType:
+    """2026-05-26: positions API 51015 fix — derive instType per inst_id."""
+
+    @pytest.mark.parametrize("inst_id,expected", [
+        # SWAP
+        ("BTC-USDT-SWAP", InstType.SWAP),
+        ("ETH-USDT-SWAP", InstType.SWAP),
+        ("DOT-USDT-SWAP", InstType.SWAP),
+        # FUTURES (YYMMDD tail, 6 digits)
+        ("BTC-USDT-260626", InstType.FUTURES),
+        ("ETH-USDT-261225", InstType.FUTURES),
+        # OPTION (5 parts, ends in C/P)
+        ("BTC-USD-260626-100000-C", InstType.OPTION),
+        ("BTC-USD-260925-80000-P", InstType.OPTION),
+    ])
+    def test_derivative_inst_types(
+        self, inst_id: str, expected: InstType,
+    ) -> None:
+        assert _infer_positions_inst_type(inst_id) == expected
+
+    @pytest.mark.parametrize("inst_id", [
+        # SPOT — positions endpoint doesn't track these; should return None
+        "BTC-USDT",
+        "ETH-USDT",
+        "SOL-USDC",
+        # Truly unknown — also return None (safe default)
+        "WEIRD-FORMAT",
+        "",
+    ])
+    def test_spot_and_unknown_return_none(self, inst_id: str) -> None:
+        assert _infer_positions_inst_type(inst_id) is None
+
+    def test_short_tail_not_misclassified_as_futures(self) -> None:
+        # Tail "USDT" is 4 chars (not 6) → SPOT, not FUTURES
+        assert _infer_positions_inst_type("BTC-USDT") is None
+        # Tail "USD" is 3 chars → SPOT
+        assert _infer_positions_inst_type("BTC-USD") is None
