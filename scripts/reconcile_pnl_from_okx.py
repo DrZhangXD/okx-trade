@@ -110,31 +110,61 @@ def get_registered_strategies(live_yaml_path: Path) -> list[str]:
         return []
 
 
-async def fetch_bills(begin_ms: int, end_ms: int) -> list[dict]:
-    """分页拉 [begin, end] 窗口 bills。OKX 单页 100，限 200 页（20000 笔）。
-    单日活跃可达 1k-2k 笔（高频策略），原 30 页 cap 在 3+ 天窗口里会被打爆。"""
+async def _fetch_bills_window(client, begin_ms: int, end_ms: int) -> list[dict]:
+    """分页拉单窗口 [begin, end] 的 bills。最多 200 页 × 100 = 20000 笔。
+
+    OKX bills 是新→旧顺序返回；``after=oldest_billId_of_page`` 翻下一页（更旧）。
+    单窗口超过 20k 时只能拿到最新的 20k，最旧的会被丢——所以高频日必须靠
+    上层 ``fetch_bills`` 按日切窗口绕开。
+    """
     out: list[dict] = []
     after: str | None = None
+    for _ in range(200):
+        params: dict[str, str] = {
+            "begin": str(begin_ms),
+            "end":   str(end_ms),
+            "limit": "100",
+        }
+        if after:
+            params["after"] = after
+        data = await client.transport.request(
+            "GET", "/api/v5/account/bills",
+            params=params, private=True, group=None,
+        )
+        if not data:
+            break
+        out.extend(data)
+        if len(data) < 100:
+            break
+        after = data[-1]["billId"]
+    return out
+
+
+async def fetch_bills(begin_ms: int, end_ms: int, chunk_hours: int = 24) -> list[dict]:
+    """切 ``chunk_hours`` 小时窗口逐段拉，绕过单窗口 20k 上限。
+
+    为什么：2026-05-25 单日产生 ~20k bills（stat_arb_pairs 一家就 19,624 fill），
+    7 天窗口一次拉只能拿到最新 20k，早段被截掉，对账时表现为净差几万 USDT
+    与 totalEq 对不上。按日切后每日独立分页，重复 bill 落表靠
+    ``INSERT OR IGNORE`` 幂等。
+
+    Cap-hit 检测：单 chunk 满 20k 时打 WARN，提示需更细 chunk_hours。
+    """
+    chunk_ms = chunk_hours * 3_600_000
     settings = OKXSettings()
+    out: list[dict] = []
     async with OKXRestClient(settings) as client:
-        for _ in range(200):
-            params: dict[str, str] = {
-                "begin": str(begin_ms),
-                "end":   str(end_ms),
-                "limit": "100",
-            }
-            if after:
-                params["after"] = after
-            data = await client.transport.request(
-                "GET", "/api/v5/account/bills",
-                params=params, private=True, group=None,
-            )
-            if not data:
-                break
-            out.extend(data)
-            if len(data) < 100:
-                break
-            after = data[-1]["billId"]
+        cur = begin_ms
+        while cur < end_ms:
+            nxt = min(cur + chunk_ms, end_ms)
+            chunk = await _fetch_bills_window(client, cur, nxt)
+            cur_str = datetime.fromtimestamp(cur / 1000, tz=timezone.utc).strftime("%Y-%m-%d %H:%M")
+            nxt_str = datetime.fromtimestamp(nxt / 1000, tz=timezone.utc).strftime("%H:%M")
+            print(f"  chunk [{cur_str} → {nxt_str} UTC]: {len(chunk)} bills"
+                  + ("  *** HIT 20k CAP — bills may have been dropped, lower --chunk-hours ***"
+                     if len(chunk) >= 20000 else ""))
+            out.extend(chunk)
+            cur = nxt
     return out
 
 
@@ -279,6 +309,9 @@ def main() -> int:
     ap.add_argument("--live-yaml", type=Path, default=Path("configs/live.yaml"))
     ap.add_argument("--report-dir", type=Path, default=Path("var"))
     ap.add_argument("--no-report", action="store_true", help="只写 db，不打印/写报告")
+    ap.add_argument("--chunk-hours", type=int, default=24,
+                    help="按多少小时切窗口分段拉 bills（默认 24h/天）；高频日（>20k/天）"
+                         "降到 12 或 6 避免单 chunk hit 20k cap")
     args = ap.parse_args()
 
     now_ms = int(time.time() * 1000)
@@ -297,8 +330,9 @@ def main() -> int:
     registered = get_registered_strategies(args.live_yaml)
     print(f"registered strategies (yaml order, for clOrdId → sid mapping): {registered}")
 
-    bills = asyncio.run(fetch_bills(begin_ms, end_ms))
-    print(f"fetched {len(bills)} bills from OKX")
+    print(f"fetching bills in {args.chunk_hours}h chunks...")
+    bills = asyncio.run(fetch_bills(begin_ms, end_ms, chunk_hours=args.chunk_hours))
+    print(f"fetched {len(bills)} bills from OKX (deduped on bill_id by INSERT OR IGNORE)")
 
     inserted, remapped, total = upsert_bills(args.db, bills, registered)
     print(f"inserted {inserted}/{total} new rows; re-mapped strategy_id for {remapped} pre-existing rows")
