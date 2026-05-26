@@ -263,6 +263,42 @@ if _NT_AVAILABLE:
             fr = await self._rest.public.get_funding_rate(inst_id_symbol)
             return float(fr.funding_rate)
 
+        async def _fetch_basis(self, inst_value: str) -> float | None:
+            """Pull (perp_mark - spot_index) / spot_index via OKX REST.
+
+            Uses /api/v5/market/index-tickers for the spot index and
+            /api/v5/public/mark-price for the perp mark. Returns ``None``
+            on failure so caller can skip basis-component for that leg.
+            """
+            if self._is_backtest_context():
+                return None
+            if self._rest is None:
+                from ..rest.client import OKXRestClient
+                self._rest = OKXRestClient(self._rest_settings)
+                await self._rest.__aenter__()
+            # inst_value like "DOT-USDT-SWAP" → underlying "DOT-USDT"
+            underlying = inst_value.replace("-SWAP", "")
+            try:
+                idx_data = await self._rest.transport.request(
+                    "GET", "/api/v5/market/index-tickers",
+                    params={"instId": underlying}, private=False, group=None,
+                )
+                mark_data = await self._rest.transport.request(
+                    "GET", "/api/v5/public/mark-price",
+                    params={"instType": "SWAP", "instId": inst_value},
+                    private=False, group=None,
+                )
+                if not idx_data or not mark_data:
+                    return None
+                idx_px = float(idx_data[0].get("idxPx") or 0)
+                mark_px = float(mark_data[0].get("markPx") or 0)
+                if idx_px <= 0 or mark_px <= 0:
+                    return None
+                return (mark_px - idx_px) / idx_px
+            except Exception as exc:
+                self.log.warning(f"funding_xs fetch_basis failed inst={inst_value}: {exc}")
+                return None
+
         async def _warmup_closes_via_rest(self) -> None:
             """One-shot REST fetch of ``beta_window_days + 2`` 1D closes per
             instrument so β-hedge is accurate from the first rebalance.
@@ -365,9 +401,21 @@ if _NT_AVAILABLE:
                         continue
                     self._latest_funding[iid.value] = float(r)
 
-                # 2) 选股 + 计算 β-hedged 仓位
+                # 2) 可选：拉所有 universe 的 basis（perp_mark - spot_index）/ spot_index
+                if self.config.lever_edge_combine_basis:
+                    basis_tasks = [
+                        self._fetch_basis(iid.value) for iid in self._inst_ids
+                    ]
+                    basis_values = await asyncio.gather(*basis_tasks, return_exceptions=True)
+                    self._latest_basis = {}
+                    for iid, b in zip(self._inst_ids, basis_values):
+                        if isinstance(b, Exception) or b is None:
+                            continue
+                        self._latest_basis[iid.value] = float(b)
+
+                # 3) 选股 + 计算 β-hedged 仓位
                 target_positions = self._compute_target_positions()
-                # 3) diff 当前持仓 vs target
+                # 4) diff 当前持仓 vs target
                 await self._execute_diff(target_positions)
                 self.log.info(
                     f"funding_xs rebalanced: open_legs={len(self._positions)} "
