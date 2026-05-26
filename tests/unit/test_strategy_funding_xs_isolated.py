@@ -254,3 +254,20 @@ class TestComputeTargetsOutlierGuard:
                                     warmup=1440, ratio_threshold=3.0)
         assert ok is False
         assert "vol_ratio" in reason
+
+
+# ---------------------------------------------------------------------------
+# _LegTarget dataclass smoke test
+# ---------------------------------------------------------------------------
+def test_leg_target_dataclass_construction() -> None:
+    from okx_trade.enums import PosSide
+    from okx_trade.strategies.funding_cross_section import _LegTarget
+    lt = _LegTarget(
+        direction="short", contracts=10.0, lever=5.0, edge_score=1.5,
+        pos_side=PosSide.SHORT,
+    )
+    assert lt.direction == "short"
+    assert lt.contracts == 10.0
+    assert lt.lever == 5.0
+    assert lt.edge_score == 1.5
+    assert lt.pos_side == PosSide.SHORT

@@ -33,15 +33,36 @@ from __future__ import annotations
 
 import asyncio
 import time
+from dataclasses import dataclass
 from decimal import Decimal
 from typing import TYPE_CHECKING
 
 from ..risk import RiskConfig, RiskIntent, apply_risk_manager, build_risk_manager
 from ..risk.stats import rolling_beta
 from .base import effective_equity_usdt
-from ._isolated_helpers import outlier_check
+from ._isolated_helpers import (
+    compute_edge_score,
+    compute_leverage,
+    outlier_check,
+)
 from .pnl_hook import read_account_total_equity_usdt, record_strategy_equity_daily, record_strategy_trade
 from .qty import safe_make_qty
+
+
+@dataclass(slots=True, frozen=True)
+class _LegTarget:
+    """Per-leg planned position (output of _compute_target_positions).
+
+    pos_side semantics: PosSide enum value (.LONG / .SHORT) for long_short
+    account posMode; ignored in net mode. Caller uses this to call OKX
+    set-leverage with the right side. direction is independent ("long"/
+    "short") and is what we use for order side derivation.
+    """
+    direction: str
+    contracts: float
+    lever: float
+    edge_score: float
+    pos_side: object  # PosSide enum, kept generic to avoid import at module scope
 
 if TYPE_CHECKING:
     from nautilus_trader.model.data import Bar
@@ -63,6 +84,7 @@ except ImportError:  # pragma: no cover
 
 
 if _NT_AVAILABLE:
+    from ..enums import PosSide
 
     class FundingXSConfig(StrategyConfig, frozen=True):  # type: ignore[misc]
         """Funding Cross-Section NT Strategy 配置。
@@ -169,6 +191,7 @@ if _NT_AVAILABLE:
             # 2026-05-26: isolated margin support
             self._set_lever_cache: dict[tuple[str, str], float] = {}  # (inst, posSide) → lever
             self._account_pos_mode: str | None = None  # cached from OKX /account/config
+            self._latest_basis: dict[str, float] = {}  # populated in P-Task 10
 
         def on_start(self) -> None:
             # Backtest: auto-load funding panels for all configured insts
@@ -353,11 +376,11 @@ if _NT_AVAILABLE:
             except Exception as exc:
                 self.log.error(f"funding_xs rebalance failed: {exc}")
 
-        def _compute_target_positions(self) -> dict[str, tuple[str, float]]:
+        def _compute_target_positions(self) -> dict[str, _LegTarget]:
             """选 top_n 最负 funding 做多 + bot_n 最正 funding 做空，β-hedge 后返回。
 
             Returns:
-                ``{inst_id: (direction, contracts)}``。空 dict = 全平。
+                ``{inst_id: _LegTarget}``。空 dict = 全平。
             """
             if not self._latest_funding:
                 return {}
@@ -366,7 +389,7 @@ if _NT_AVAILABLE:
             long_legs = [iid for iid, _ in ranked[:self.config.top_n]]
             # 空腿：funding 最正 bot_n
             short_legs = [iid for iid, _ in ranked[-self.config.bot_n:]]
-            target: dict[str, tuple[str, float]] = {}
+            target: dict[str, _LegTarget] = {}
 
             equity = effective_equity_usdt(
                 self._allocated_equity_usdt, self.config.account_equity_usdt,
@@ -422,7 +445,48 @@ if _NT_AVAILABLE:
                     contracts = (int(raw_contracts / lot_sz) * lot_sz) if lot_sz > 0 else raw_contracts
                     if contracts <= 0:
                         continue
-                    target[inst_value] = (direction, contracts)
+                    # 2026-05-26: dynamic leverage from funding (+ optional basis) z-score
+                    if self.config.enable_dynamic_lever:
+                        basis = (
+                            self._latest_basis.get(inst_value)
+                            if self.config.lever_edge_combine_basis else None
+                        )
+                        basis_universe = (
+                            list(self._latest_basis.values())
+                            if (self.config.lever_edge_combine_basis and self._latest_basis) else None
+                        )
+                        edge_score = compute_edge_score(
+                            funding_rate=self._latest_funding[inst_value],
+                            funding_universe=list(self._latest_funding.values()),
+                            basis=basis,
+                            basis_universe=basis_universe,
+                            direction=direction,
+                            combine_basis=self.config.lever_edge_combine_basis,
+                        )
+                        lever = compute_leverage(
+                            edge_score,
+                            base=self.config.lever_base,
+                            slope=self.config.lever_slope,
+                            lo=self.config.lever_min,
+                            hi=self.config.lever_max,
+                        )
+                    else:
+                        edge_score = 0.0
+                        lever = self.config.lever_max
+
+                    # pos_side: in net_mode account, None (account.py auto-fills net);
+                    # in long_short_mode, derive from leg direction.
+                    pos_side_value = (
+                        PosSide.LONG if direction == "long" else PosSide.SHORT
+                    )
+
+                    target[inst_value] = _LegTarget(
+                        direction=direction,
+                        contracts=contracts,
+                        lever=lever,
+                        edge_score=edge_score,
+                        pos_side=pos_side_value,
+                    )
             return target
 
         @staticmethod
@@ -431,22 +495,22 @@ if _NT_AVAILABLE:
                 return []
             return [(closes[i] / closes[i - 1]) - 1.0 for i in range(1, len(closes))]
 
-        def _execute_diff(self, target: dict[str, tuple[str, float]]) -> None:
+        def _execute_diff(self, target: dict[str, _LegTarget]) -> None:
             """把当前 self._positions diff 到 target，平多余腿、开新腿、调整 size。"""
             current = dict(self._positions)
             # 平：当前持有但不在 target，或方向变了
             for inst_value, (cur_dir, cur_qty) in current.items():
-                if inst_value not in target or target[inst_value][0] != cur_dir:
+                if inst_value not in target or target[inst_value].direction != cur_dir:
                     self._close_leg(inst_value, cur_dir, cur_qty)
             # 开 / 调：target 里有但当前没有，或 size 变了
-            for inst_value, (tgt_dir, tgt_qty) in target.items():
+            for inst_value, leg in target.items():
                 cur = self._positions.get(inst_value)
                 if cur is None:
-                    self._open_leg(inst_value, tgt_dir, tgt_qty)
-                elif cur[0] == tgt_dir and abs(cur[1] - tgt_qty) > 1e-6:
+                    self._open_leg(inst_value, leg.direction, leg.contracts)
+                elif cur[0] == leg.direction and abs(cur[1] - leg.contracts) > 1e-6:
                     # 同方向但 size 变 → 简化：先平后开（避免增仓 / 减仓两套 path）
                     self._close_leg(inst_value, cur[0], cur[1])
-                    self._open_leg(inst_value, tgt_dir, tgt_qty)
+                    self._open_leg(inst_value, leg.direction, leg.contracts)
 
         def _open_leg(self, inst_value: str, direction: str, contracts: float) -> None:
             inst_id = InstrumentId.from_str(inst_value)
