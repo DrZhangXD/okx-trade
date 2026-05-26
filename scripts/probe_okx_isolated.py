@@ -36,10 +36,10 @@ async def main() -> int:
 
         # Step 1: determine correct posSide for set-leverage
         # OKX set-leverage isolated rules:
-        #   posMode=net      → posSide=net (or omit — behaviour varies by acct)
-        #   posMode=long_short → posSide=long AND posSide=short (two calls)
-        if pos_mode == "long_short":
-            sides_to_try = [PosSide.LONG, PosSide.SHORT]
+        #   posMode=net_mode       → posSide=net (or omit — behaviour varies)
+        #   posMode=long_short_mode → posSide=long AND posSide=short (two calls)
+        if pos_mode and "long_short" in pos_mode:
+            sides_to_try: list[PosSide | None] = [PosSide.LONG, PosSide.SHORT]
         else:
             # net mode: account.py auto-defaults to posSide=net
             sides_to_try = [None]  # None → auto-net via account.py
