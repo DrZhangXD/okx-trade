@@ -128,6 +128,16 @@ risk_defaults:
   correlation_window: 30
   correlation_threshold: 0.7
 
+# 2026-05-26 Phase 1: 全局 volatility filter（所有 opt-in 策略共享同一份 buffer）
+# 任一策略订阅 1m bar 后 feed_bar 投喂，service.allow() 在入场前过滤异常 vol。
+volatility_filter:
+  enable: true
+  window_min: 60        # 近 1h vol
+  baseline_min: 1440    # 24h baseline
+  warmup_min: 1440      # 至少 24h 数据才生效
+  ratio_threshold: 3.0  # recent_vol / baseline_vol > 3 → reject
+  buffer_max: 2000      # 每 inst 最多保 ~33h 1m bars
+
 # M5.X Regime detector（共享单例，由 monitor 每日喂 BTC 1d candle）
 regime:
   impl: rule                # rule | hmm（hmm 需 pip install hmmlearn）
