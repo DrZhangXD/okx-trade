@@ -86,6 +86,7 @@ except ImportError:  # pragma: no cover
 
 if _NT_AVAILABLE:
     from ..enums import PosSide
+    from ._okx_base import OkxStrategyBase
 
     class FundingXSConfig(StrategyConfig, frozen=True):  # type: ignore[misc]
         """Funding Cross-Section NT Strategy 配置。
@@ -151,7 +152,7 @@ if _NT_AVAILABLE:
         outlier_warmup_min: int = 1440
 
 
-    class FundingXSStrategy(Strategy):  # type: ignore[misc]
+    class FundingXSStrategy(OkxStrategyBase):  # type: ignore[misc]
         """每个 funding cycle 重平 funding 横截面对冲组合。
 
         状态：
@@ -208,9 +209,9 @@ if _NT_AVAILABLE:
             self._funding_panels: dict[str, "FundingPanel"] = {}
             self._funding_source_kind: str = "rest"  # "rest" (live) | "panel" (backtest)
 
-            # 2026-05-26: isolated margin support
-            self._set_lever_cache: dict[tuple[str, str], float] = {}  # (inst, posSide) → lever
-            self._account_pos_mode: str | None = None  # cached from OKX /account/config
+            # 2026-05-26: isolated margin support — (inst, posSide)→lever cache
+            # and posMode caching moved into IsolatedMarginService (DI via
+            # build_live_context); see ``_iso_service`` on OkxStrategyBase.
             self._latest_basis: dict[str, float] = {}  # populated in P-Task 10
 
         def on_start(self) -> None:
@@ -294,7 +295,7 @@ if _NT_AVAILABLE:
             /api/v5/public/mark-price for the perp mark. Returns ``None``
             on failure so caller can skip basis-component for that leg.
             """
-            if self._is_backtest_context():
+            if self._iso_service is None or self._iso_service.is_backtest():
                 return None
             if self._rest is None:
                 from ..rest.client import OKXRestClient
@@ -656,39 +657,41 @@ if _NT_AVAILABLE:
             if not to_open:
                 return
 
-            # Phase 3: pre-validate set-leverage for all to-open legs.
-            # This is the partial-rebalance guard: if any leg can't have its
-            # leverage set, abort the whole open-phase to avoid directional
-            # residual (e.g., LONG opens but matching SHORT fails → unbalanced
-            # book until next funding window).
+            # Phase 3: pre-validate set-leverage for all to-open legs via the
+            # shared IsolatedMarginService. Partial-rebalance guard: if any
+            # leg can't have its leverage set, abort the whole open-phase to
+            # avoid directional residual (e.g., LONG opens but matching SHORT
+            # fails → unbalanced book until next funding window).
             use_isolated = (
                 self.config.margin_mode == "isolated"
                 and self.config.enable_dynamic_lever
-                and not self._is_backtest_context()
+                and self._iso_service is not None
+                and not self._iso_service.is_backtest()
             )
             if use_isolated:
-                pos_mode = await self._get_account_pos_mode()
-                set_lever_results: list[tuple[str, _LegTarget, bool]] = []
-                for inst_value, leg in to_open:
-                    pos_side_arg = leg.pos_side if pos_mode == "long_short_mode" else None
-                    ok = await self._set_leverage_cached(inst_value, leg.lever, pos_side_arg)
-                    set_lever_results.append((inst_value, leg, ok))
-                if not all(r[2] for r in set_lever_results):
-                    failed = [r[0] for r in set_lever_results if not r[2]]
+                pos_mode = await self._iso_service.get_pos_mode()
+                items = [
+                    (
+                        inst_value,
+                        leg.lever,
+                        leg.pos_side if pos_mode == "long_short_mode" else None,
+                    )
+                    for inst_value, leg in to_open
+                ]
+                result = await self._iso_service.batch_ensure_leverage(items)
+                if not result.all_ok:
                     self.log.warning(
                         f"funding_xs ABORT rebalance: set-leverage failed for "
-                        f"{failed}; skipping all opens this round to avoid "
-                        f"directional residual (next rebalance retries)"
+                        f"{[f[0] for f in result.failed]}; skipping all opens "
+                        f"this round to avoid directional residual"
                     )
                     return
-                to_open_validated = [(iv, leg) for iv, leg, _ in set_lever_results]
-            else:
-                to_open_validated = to_open
+            to_open_validated = to_open  # all passed pre-validation (or use_isolated False)
 
             # Phase 4: submit orders for all validated legs.
-            # Note: _open_leg's internal _set_leverage_cached call is a NO-OP
-            # here because the cache was already populated in Phase 3 above —
-            # same (inst, posSide) key hits the cache and returns True without REST.
+            # Note: _open_leg's internal ensure_leverage call is a NO-OP here
+            # because the service cache was already populated in Phase 3 —
+            # same (inst, posSide) key hits the cache and returns ok without REST.
             for inst_value, leg in to_open_validated:
                 await self._open_leg(inst_value, leg)
 
@@ -716,21 +719,25 @@ if _NT_AVAILABLE:
                 return
             contracts = adjusted
 
-            # 2026-05-26: isolated margin path (live only)
+            # 2026-05-26: isolated margin path (live only) via IsolatedMarginService.
             use_isolated = (
                 self.config.margin_mode == "isolated"
                 and self.config.enable_dynamic_lever
-                and not self._is_backtest_context()
+                and self._iso_service is not None
+                and not self._iso_service.is_backtest()
             )
             if use_isolated:
-                pos_mode = await self._get_account_pos_mode()
+                pos_mode = await self._iso_service.get_pos_mode()
                 # In long_short_mode, pass leg.pos_side (PosSide.LONG/SHORT).
                 # In net_mode, pass None (account.py auto-fills PosSide.NET).
                 pos_side_arg = leg.pos_side if pos_mode == "long_short_mode" else None
-                ok = await self._set_leverage_cached(inst_value, leg.lever, pos_side_arg)
+                ok, err = await self._iso_service.ensure_leverage(
+                    inst_value, leg.lever, pos_side_arg,
+                )
                 if not ok:
                     self.log.warning(
-                        f"funding_xs skip leg inst={inst_value} (set_leverage failed)"
+                        f"funding_xs skip leg inst={inst_value} "
+                        f"(set_leverage failed: {err})"
                     )
                     return
 
@@ -793,107 +800,6 @@ if _NT_AVAILABLE:
             )
 
             self._positions.pop(inst_value, None)
-
-        def _is_backtest_context(self) -> bool:
-            """Detect whether we're in NT backtest engine (synchronous, no
-            live REST client). Used to skip set-leverage and fall back to
-            cross mode in backtest, since NT's MarginAccount doesn't model
-            isolated correctly.
-
-            Cheap heuristic: live mode has ``self._rest_settings`` populated
-            with real credentials; backtest fixture passes empty/dummy
-            settings. We check whether the settings look usable.
-            """
-            try:
-                return not bool(getattr(self._rest_settings, "api_key", None))
-            except Exception:
-                return True  # safe default: assume backtest on any error
-
-        async def _get_account_pos_mode(self) -> str:
-            """Cached fetch of OKX account-level posMode. Values: 'net_mode',
-            'long_short_mode'. Cached once per strategy lifetime — switching
-            mode mid-session would require a restart anyway.
-            """
-            if self._account_pos_mode is not None:
-                return self._account_pos_mode
-            if self._rest is None:
-                from ..rest.client import OKXRestClient
-                self._rest = OKXRestClient(self._rest_settings)
-                await self._rest.__aenter__()
-            try:
-                data = await self._rest.transport.request(
-                    "GET", "/api/v5/account/config",
-                    private=True, group=None,
-                )
-                if data and isinstance(data, list) and data[0]:
-                    mode = data[0].get("posMode")
-                    if mode in ("net_mode", "long_short_mode"):
-                        self._account_pos_mode = str(mode)
-                        self.log.info(f"funding_xs cached account posMode={mode}")
-                        return self._account_pos_mode
-                    # Unknown posMode value — log loudly so it's visible in alerts
-                    self.log.warning(
-                        f"funding_xs UNEXPECTED posMode={mode!r} from OKX "
-                        f"/account/config (expected net_mode or long_short_mode); "
-                        f"falling back to net_mode — set-leverage may fail on "
-                        f"long_short account"
-                    )
-            except Exception as exc:
-                self.log.warning(
-                    f"funding_xs _get_account_pos_mode failed: {exc}; "
-                    f"falling back to net_mode"
-                )
-            self._account_pos_mode = "net_mode"
-            return self._account_pos_mode
-
-        async def _set_leverage_cached(
-            self, inst_value: str, lever: float, pos_side,
-        ) -> bool:
-            """Idempotent: call OKX set-leverage only if (inst, posSide, lever) changed.
-
-            Args:
-                inst_value: e.g. "DOT-USDT-SWAP".
-                lever: target leverage (rounded to int for OKX).
-                pos_side: PosSide enum or None. In net_mode, callers pass None
-                    and account.py auto-fills posSide=net. In long_short_mode,
-                    callers must pass PosSide.LONG or PosSide.SHORT.
-
-            Returns ``True`` if leverage is in the desired state (set or
-            already cached); ``False`` on REST failure (caller should skip
-            the leg this round).
-            """
-            ps_key = pos_side.value if pos_side is not None else "net"
-            # NT InstrumentId.value is "DOT-USDT-SWAP.OKX"; OKX REST wants
-            # bare "DOT-USDT-SWAP" (no venue suffix). Strip before sending.
-            inst_id_okx = inst_value.split(".")[0]
-            cache_key = (inst_id_okx, ps_key)
-            cached = self._set_lever_cache.get(cache_key)
-            if cached is not None and abs(cached - lever) < 0.01:
-                return True
-            if self._rest is None:
-                from ..rest.client import OKXRestClient
-                self._rest = OKXRestClient(self._rest_settings)
-                await self._rest.__aenter__()
-            try:
-                from ..enums import TdMode
-                await self._rest.account.set_leverage(
-                    inst_id=inst_id_okx,
-                    leverage=int(round(lever)),
-                    mgn_mode=TdMode.ISOLATED,
-                    pos_side=pos_side,
-                )
-                self._set_lever_cache[cache_key] = lever
-                self.log.info(
-                    f"funding_xs set leverage inst={inst_id_okx} "
-                    f"mgnMode=isolated posSide={ps_key} lever={int(round(lever))}"
-                )
-                return True
-            except Exception as exc:
-                self.log.warning(
-                    f"funding_xs set_leverage failed inst={inst_id_okx} "
-                    f"posSide={ps_key} lever={lever}: {exc}"
-                )
-                return False
 
         def on_order_rejected(self, event) -> None:  # noqa: ANN001
             # 简化处理：拒了哪条腿、就从 _positions 移除（避免幻仓）
