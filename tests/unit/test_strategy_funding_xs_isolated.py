@@ -257,6 +257,174 @@ class TestComputeTargetsOutlierGuard:
 
 
 # ---------------------------------------------------------------------------
+# Integration: _compute_target_positions wired to 1m outlier-guard cache
+# ---------------------------------------------------------------------------
+class TestComputeTargetsIntegration:
+    """End-to-end check that ``_compute_target_positions`` actually fires the
+    outlier guard when fed a populated ``_closes_1m_by_inst`` deque.
+
+    Before the wire-up fix, the guard read from ``_closes_by_inst`` (1D,
+    capped at ~32 entries), which is always < warmup=1440 → ``(True,
+    "warmup")`` → Layer 3 was inert. This test pins the new behavior.
+    """
+
+    @pytest.fixture
+    def mock_strategy(self):
+        """Construct a minimal mock that exposes only the attributes
+        ``_compute_target_positions`` reads — no real NT runtime."""
+        from collections import deque
+
+        class _MockConfig:
+            top_n = 1
+            bot_n = 1
+            enable_outlier_guard = True
+            outlier_vol_ratio = 3.0
+            outlier_window_min = 60
+            outlier_baseline_min = 1440
+            outlier_warmup_min = 1440
+            enable_beta_hedge = False
+            enable_dynamic_lever = False
+            lever_max = 10.0
+            lever_min = 2.0
+            lever_base = 2.0
+            lever_slope = 3.0
+            max_position_pct = 0.40
+            account_equity_usdt = 10000.0
+            lever_edge_combine_basis = False
+
+        class _MockLog:
+            def __init__(self):
+                self.warnings: list[str] = []
+                self.infos: list[str] = []
+
+            def warning(self, msg):
+                self.warnings.append(msg)
+
+            def info(self, msg):
+                self.infos.append(msg)
+
+            def error(self, msg):
+                self.infos.append(msg)
+
+        class _MockInst:
+            multiplier = 1.0
+            size_increment = 0.1
+
+        class _MockCache:
+            def instrument(self, _inst_id):
+                return _MockInst()
+
+        # Two legs with deterministic close histories.
+        rng_calm = np.random.default_rng(seed=11)
+        calm_rets = rng_calm.normal(0.0, 0.001, 1500)
+        calm_closes_1m = (100.0 * np.exp(np.cumsum(calm_rets))).tolist()
+
+        rng_wick = np.random.default_rng(seed=23)
+        wicky_base = rng_wick.normal(0.0, 0.001, 1440)
+        wicky_spike = rng_wick.normal(0.0, 0.02, 60)  # 20x normal vol
+        wicky_closes_1m = (
+            100.0 * np.exp(np.cumsum(np.concatenate([wicky_base, wicky_spike])))
+        ).tolist()
+
+        m = type("MockStrategy", (), {})()
+        m.config = _MockConfig()
+        m.log = _MockLog()
+        m.cache = _MockCache()
+        # ranked ascending by funding rate:
+        #   CALM = +0.005 (highest → short leg under bot_n=1)
+        #   WICK = -0.005 (lowest  → long  leg under top_n=1)
+        # Keys must be parseable as NT InstrumentId ("<sym>.<venue>").
+        calm_iid = "CALM-USDT-SWAP.OKX"
+        wick_iid = "WICK-USDT-SWAP.OKX"
+        m._latest_funding = {
+            calm_iid: 0.005,
+            wick_iid: -0.005,
+        }
+        m._latest_basis = {}
+        # 1D cache: only need last close for price → contracts conversion.
+        # β-hedge is disabled, so we don't need a long history.
+        m._closes_by_inst = {
+            calm_iid: [calm_closes_1m[-1]],
+            wick_iid: [wicky_closes_1m[-1]],
+        }
+        # 1m cache: feeds outlier_check.
+        m._closes_1m_by_inst = {
+            calm_iid: deque(calm_closes_1m, maxlen=2000),
+            wick_iid: deque(wicky_closes_1m, maxlen=2000),
+        }
+        m._allocated_equity_usdt = 10000.0
+        m._inst_ids = []  # not read by _compute_target_positions
+
+        # Stub _beta_ref_id with a minimal namespace (only ``.value`` is read).
+        m._beta_ref_id = type("Iid", (), {"value": "BTC-USDT-SWAP.OKX"})()
+
+        # Bind _returns staticmethod so _compute_target_positions can call it.
+        from okx_trade.strategies.funding_cross_section import FundingXSStrategy
+        m._returns = FundingXSStrategy._returns
+
+        return m
+
+    def test_wicky_leg_is_rejected_by_outlier_guard(self, mock_strategy) -> None:
+        from okx_trade.strategies.funding_cross_section import FundingXSStrategy
+
+        bound = FundingXSStrategy._compute_target_positions.__get__(mock_strategy)
+        target = bound()
+
+        # WICK is the long candidate (lowest funding). Its 1m history has a
+        # 20x-vol spike in the last 60 bars → outlier guard must reject.
+        assert "WICK-USDT-SWAP.OKX" not in target
+        assert any(
+            "OUTLIER_SKIP" in w and "WICK-USDT-SWAP.OKX" in w
+            for w in mock_strategy.log.warnings
+        ), f"expected OUTLIER_SKIP for WICK, got warnings={mock_strategy.log.warnings}"
+
+    def test_calm_leg_passes_outlier_guard(self, mock_strategy) -> None:
+        from okx_trade.strategies.funding_cross_section import FundingXSStrategy
+
+        bound = FundingXSStrategy._compute_target_positions.__get__(mock_strategy)
+        target = bound()
+
+        # CALM (calm 1m series) should pass the guard — and since β-hedge is
+        # off and the mock cache returns a usable instrument, it should make
+        # it into the target dict as the short leg (highest funding).
+        assert "CALM-USDT-SWAP.OKX" in target
+        leg = target["CALM-USDT-SWAP.OKX"]
+        assert leg.direction == "short"
+        assert leg.contracts > 0
+        # No OUTLIER_SKIP for CALM
+        assert not any(
+            "OUTLIER_SKIP" in w and "CALM-USDT-SWAP.OKX" in w
+            for w in mock_strategy.log.warnings
+        )
+
+    def test_outlier_guard_is_now_actually_firing(self, mock_strategy) -> None:
+        """Regression: confirm Layer 3 is no longer structurally inert.
+
+        Pre-fix, the guard was wired to ``_closes_by_inst`` (1D, len ≤ 32),
+        so it always returned ``(True, "warmup")``. We assert that with a
+        full 1500-bar 1m history, the guard reaches its decision branches
+        (not ``warmup``) for at least one leg.
+        """
+        from okx_trade.strategies._isolated_helpers import outlier_check
+
+        # Same data the fixture would feed. If this returns "warmup", the
+        # wire-up is wrong (we'd be looking at 1D instead of 1m).
+        wick_closes = list(mock_strategy._closes_1m_by_inst["WICK-USDT-SWAP.OKX"])
+        ok, reason = outlier_check(
+            closes=wick_closes,
+            window=mock_strategy.config.outlier_window_min,
+            baseline=mock_strategy.config.outlier_baseline_min,
+            warmup=mock_strategy.config.outlier_warmup_min,
+            ratio_threshold=mock_strategy.config.outlier_vol_ratio,
+        )
+        assert reason != "warmup", (
+            "Outlier guard returned 'warmup' even with 1500 1m bars — "
+            "wire-up is wrong, still reading from a too-small cache."
+        )
+        assert ok is False, "Wicky 20x-vol history should be rejected"
+
+
+# ---------------------------------------------------------------------------
 # _LegTarget dataclass smoke test
 # ---------------------------------------------------------------------------
 def test_leg_target_dataclass_construction() -> None:

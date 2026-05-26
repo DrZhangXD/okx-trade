@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from collections import deque
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import TYPE_CHECKING
@@ -71,7 +72,7 @@ if TYPE_CHECKING:
 
 try:
     from nautilus_trader.model.data import BarType
-    from nautilus_trader.model.enums import OrderSide, TimeInForce
+    from nautilus_trader.model.enums import BarAggregation, OrderSide, TimeInForce
     from nautilus_trader.model.identifiers import InstrumentId
     from nautilus_trader.trading.config import StrategyConfig
     from nautilus_trader.trading.strategy import Strategy
@@ -108,6 +109,10 @@ if _NT_AVAILABLE:
         instrument_ids: list[str]
         beta_reference_id: str = "BTC-USDT-SWAP.OKX"
         beta_bar_type_template: str = "{inst}-1-DAY-LAST-EXTERNAL"
+        # 1m bars per inst feed the Layer-3 outlier guard (recent vol vs baseline).
+        # Without this subscription, _closes_by_inst (1D) never reaches the
+        # 1440-bar warmup the outlier_check defaults assume.
+        vol_bar_type_template: str = "{inst}-1-MINUTE-LAST-EXTERNAL"
         beta_window_days: int = 30
         top_n: int = 3
         bot_n: int = 3
@@ -153,6 +158,7 @@ if _NT_AVAILABLE:
         - ``self._positions: dict[inst_id, ("long"|"short", contracts)]``
         - ``self._last_rebalance_ts_ms``
         - ``self._closes_by_inst``: deque of recent 1D close（用来算 β）
+        - ``self._closes_1m_by_inst``: deque of recent 1m close（喂 Layer-3 outlier guard）
         """
 
         def __init__(self, config: FundingXSConfig) -> None:
@@ -171,7 +177,21 @@ if _NT_AVAILABLE:
                     config.beta_bar_type_template.format(inst=self._beta_ref_id.value)
                 )
 
+            # 1m bar types per inst for outlier_check (Layer 3 guard). Keyed
+            # the same as _bar_types so on_start can iterate uniformly.
+            self._vol_bar_types: dict[InstrumentId, BarType] = {
+                iid: BarType.from_str(
+                    config.vol_bar_type_template.format(inst=iid.value)
+                )
+                for iid in self._inst_ids
+            }
+
             self._closes_by_inst: dict[str, list[float]] = {}
+            # 1m closes for outlier_check. maxlen sized to cover the largest
+            # outlier_baseline_min default (1440) with headroom.
+            self._closes_1m_by_inst: dict[str, deque[float]] = {
+                iid.value: deque(maxlen=2000) for iid in self._inst_ids
+            }
             self._latest_funding: dict[str, float] = {}
             self._positions: dict[str, tuple[str, float]] = {}  # inst_id → (dir, contracts)
             self._last_rebalance_hour: int = -1
@@ -211,6 +231,10 @@ if _NT_AVAILABLE:
                     self.log.info(f"loaded funding panels for {len(panels)} insts")
             for iid, bar_type in self._bar_types.items():
                 self.subscribe_bars(bar_type)
+            # Subscribe 1m bars for outlier guard (skip beta_ref if not a candidate)
+            if self.config.enable_outlier_guard:
+                for iid, bar_type in self._vol_bar_types.items():
+                    self.subscribe_bars(bar_type)
             from ..config import OKXSettings
             self._rest_settings = OKXSettings()
             self.log.info(
@@ -301,16 +325,25 @@ if _NT_AVAILABLE:
 
         async def _warmup_closes_via_rest(self) -> None:
             """One-shot REST fetch of ``beta_window_days + 2`` 1D closes per
-            instrument so β-hedge is accurate from the first rebalance.
+            instrument so β-hedge is accurate from the first rebalance, plus
+            ``outlier_baseline_min + outlier_window_min`` 1m closes per
+            candidate so the outlier guard (Layer 3) is active from day 0.
 
             Without warmup, β computation needs ≥10 1D returns (per
             ``_compute_target_positions``), which means ≥10 days of live bars
-            before any β scaling kicks in. With warmup, β is correct on day 0.
+            before any β scaling kicks in; and the outlier guard would sit at
+            ``(True, "warmup")`` for the first ~24h of live 1m bars. With
+            warmup, both are correct on the first rebalance.
             """
             from ..rest.client import OKXRestClient
 
             n_needed = self.config.beta_window_days + 2
             all_iids = list(self._bar_types.keys())  # 包括 beta_ref
+            # 1m warmup target: cover the largest sliding window outlier_check reads.
+            n_1m_needed = (
+                self.config.outlier_baseline_min + self.config.outlier_window_min + 2
+            )
+            candidate_iids = list(self._inst_ids)  # 1m only needed for legs we may open
             try:
                 async with OKXRestClient(self._rest_settings) as client:
                     fetched: dict[str, list[float]] = {}
@@ -327,6 +360,21 @@ if _NT_AVAILABLE:
                             self.log.warning(
                                 f"funding_xs warmup: {iid.value} fetch failed: {exc}"
                             )
+                    fetched_1m: dict[str, list[float]] = {}
+                    if self.config.enable_outlier_guard:
+                        for iid in candidate_iids:
+                            try:
+                                bare = iid.symbol.value
+                                candles = await client.market.get_candles_extended(
+                                    bare, bar="1m", total=n_1m_needed,
+                                )
+                                fetched_1m[iid.value] = [
+                                    float(c.close) for c in candles if float(c.close) > 0
+                                ]
+                            except Exception as exc:  # noqa: BLE001
+                                self.log.warning(
+                                    f"funding_xs 1m warmup: {iid.value} fetch failed: {exc}"
+                                )
             except Exception as exc:  # noqa: BLE001
                 self.log.warning(f"funding_xs warmup aborted: {exc}")
                 return
@@ -341,12 +389,42 @@ if _NT_AVAILABLE:
                 f"funding_xs warmup loaded: {filled}/{len(all_iids)} instruments "
                 f"closes (~{n_needed} 1D bars each)"
             )
+            filled_1m = 0
+            for inst_value, closes_1m in fetched_1m.items():
+                if closes_1m:
+                    # Reseed the deque (drops anything older / preserves maxlen).
+                    dq = self._closes_1m_by_inst.setdefault(
+                        inst_value, deque(maxlen=2000),
+                    )
+                    dq.clear()
+                    dq.extend(closes_1m)
+                    filled_1m += 1
+            if self.config.enable_outlier_guard:
+                self.log.info(
+                    f"funding_xs 1m warmup loaded: {filled_1m}/{len(candidate_iids)} "
+                    f"instruments (~{n_1m_needed} 1m bars each)"
+                )
 
         def on_bar(self, bar: Bar) -> None:
-            # 缓存收盘价用于 β 回归
             inst_value = bar.bar_type.instrument_id.value
+            spec = bar.bar_type.spec
+            close_px = bar.close.as_double()
+
+            # Dispatch by bar period:
+            #   1m bars → outlier_check cache (separate deque, sized for 1440+ warmup)
+            #   1D bars → β-hedge cache (capped at beta_window_days + 2)
+            # Anything else is logged once and ignored.
+            if spec.aggregation == BarAggregation.MINUTE and spec.step == 1:
+                buf_1m = self._closes_1m_by_inst.setdefault(
+                    inst_value, deque(maxlen=2000),
+                )
+                buf_1m.append(close_px)
+                # 1m bars don't gate rebalance / risk — just cache.
+                return
+
+            # 缓存收盘价用于 β 回归（1D path）
             buf = self._closes_by_inst.setdefault(inst_value, [])
-            buf.append(bar.close.as_double())
+            buf.append(close_px)
             # 只留 beta_window_days + 2 个收盘价
             cap = self.config.beta_window_days + 2
             if len(buf) > cap:
@@ -454,7 +532,7 @@ if _NT_AVAILABLE:
                     # 2026-05-26: outlier guard — skip leg if recent vol abnormal
                     if self.config.enable_outlier_guard:
                         ok, reason = outlier_check(
-                            closes=self._closes_by_inst.get(inst_value, []),
+                            closes=list(self._closes_1m_by_inst.get(inst_value, [])),
                             window=self.config.outlier_window_min,
                             baseline=self.config.outlier_baseline_min,
                             warmup=self.config.outlier_warmup_min,

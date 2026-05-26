@@ -92,6 +92,11 @@ def outlier_check(
     Assumes ``closes`` are 1-minute bar closes for the instrument; both
     ``window`` and ``baseline`` are in bars (= minutes). Default config gives
     window=60 (last 1h), baseline=1440 (last 24h), warmup=1440.
+
+    Caller contract: feed this from a dedicated 1m close buffer (in
+    FundingXSStrategy that's ``_closes_1m_by_inst``). Feeding a 1D buffer
+    here will pin the result at ``(True, "warmup")`` because daily caches
+    are typically sized < warmup, defeating the guard.
     """
     if len(closes) < warmup:
         return True, "warmup"
