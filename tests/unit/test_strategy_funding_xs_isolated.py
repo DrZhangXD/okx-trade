@@ -442,6 +442,107 @@ def test_leg_target_dataclass_construction() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Fix 1: partial-rebalance abort guard
+# ---------------------------------------------------------------------------
+class TestPartialRebalanceAbort:
+    """Verify _execute_diff aborts the open-phase if any leg's
+    set-leverage fails, to avoid directional residual."""
+
+    @pytest.mark.asyncio
+    async def test_set_leverage_failure_aborts_all_opens(self) -> None:
+        from okx_trade.strategies.funding_cross_section import FundingXSStrategy, _LegTarget
+        from okx_trade.enums import PosSide
+
+        class _MockLog:
+            def __init__(self): self.warnings = []
+            def warning(self, msg): self.warnings.append(msg)
+            def info(self, msg): pass
+
+        class _MockConfig:
+            margin_mode = "isolated"
+            enable_dynamic_lever = True
+
+        m = type("Mock", (), {})()
+        m.config = _MockConfig()
+        m.log = _MockLog()
+        m._positions = {}
+        m._set_lever_cache = {}
+        m._rest_settings = type("S", (), {"api_key": "real-key"})()  # NOT backtest
+        m._account_pos_mode = "long_short_mode"
+
+        # Mock _set_leverage_cached: first call (LONG) succeeds, second (SHORT) fails
+        call_count = {"n": 0}
+        async def fake_set_lever(inst_value, lever, pos_side):
+            call_count["n"] += 1
+            return call_count["n"] == 1  # only first succeeds
+
+        async def fake_open_leg(inst_value, leg):
+            pytest.fail(f"_open_leg should not be called when set-leverage aborts; got {inst_value}")
+
+        async def fake_get_pos_mode():
+            return "long_short_mode"
+
+        def fake_is_backtest():
+            return False
+
+        m._set_leverage_cached = fake_set_lever
+        m._open_leg = fake_open_leg
+        m._get_account_pos_mode = fake_get_pos_mode
+        m._is_backtest_context = fake_is_backtest
+        m._close_leg = lambda *_a, **_kw: None
+
+        # Bind _execute_diff
+        m._execute_diff = FundingXSStrategy._execute_diff.__get__(m)
+
+        target = {
+            "A-USDT-SWAP": _LegTarget(direction="long",  contracts=1.0, lever=5.0, edge_score=1.0, pos_side=PosSide.LONG),
+            "B-USDT-SWAP": _LegTarget(direction="short", contracts=1.0, lever=5.0, edge_score=1.0, pos_side=PosSide.SHORT),
+        }
+
+        await m._execute_diff(target)
+
+        # No _open_leg call should have happened (would've called pytest.fail)
+        assert any("ABORT" in w for w in m.log.warnings)
+        assert call_count["n"] == 2  # tried both, second failed → abort
+
+
+# ---------------------------------------------------------------------------
+# Fix 2: unknown posMode loud WARN
+# ---------------------------------------------------------------------------
+class TestUnknownPosModeWarn:
+    """Verify _get_account_pos_mode logs a loud WARN on unexpected posMode values."""
+
+    @pytest.mark.asyncio
+    async def test_unknown_pos_mode_logs_warn(self) -> None:
+        from okx_trade.strategies.funding_cross_section import FundingXSStrategy
+
+        class _MockLog:
+            def __init__(self): self.warnings = []; self.infos = []
+            def warning(self, msg): self.warnings.append(msg)
+            def info(self, msg): self.infos.append(msg)
+
+        class _MockTransport:
+            async def request(self, method, path, *, params=None, private=None, group=None):
+                return [{"posMode": "future_unexpected_mode"}]
+
+        class _MockRest:
+            transport = _MockTransport()
+            async def __aenter__(self): return self
+            async def __aexit__(self, *a): pass
+
+        m = type("Mock", (), {})()
+        m._account_pos_mode = None
+        m._rest = _MockRest()
+        m._rest_settings = None
+        m.log = _MockLog()
+        m._get_account_pos_mode = FundingXSStrategy._get_account_pos_mode.__get__(m)
+
+        result = await m._get_account_pos_mode()
+        assert result == "net_mode"
+        assert any("UNEXPECTED posMode" in w for w in m.log.warnings)
+
+
+# ---------------------------------------------------------------------------
 # Backtest fallback: force cross mode + skip set-leverage
 # ---------------------------------------------------------------------------
 class TestBacktestFallback:

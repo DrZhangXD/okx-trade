@@ -303,14 +303,17 @@ if _NT_AVAILABLE:
             # inst_value like "DOT-USDT-SWAP" → underlying "DOT-USDT"
             underlying = inst_value.replace("-SWAP", "")
             try:
-                idx_data = await self._rest.transport.request(
-                    "GET", "/api/v5/market/index-tickers",
-                    params={"instId": underlying}, private=False, group=None,
-                )
-                mark_data = await self._rest.transport.request(
-                    "GET", "/api/v5/public/mark-price",
-                    params={"instType": "SWAP", "instId": inst_value},
-                    private=False, group=None,
+                idx_data, mark_data = await asyncio.gather(
+                    self._rest.transport.request(
+                        "GET", "/api/v5/market/index-tickers",
+                        params={"instId": underlying}, private=False, group=None,
+                    ),
+                    self._rest.transport.request(
+                        "GET", "/api/v5/public/mark-price",
+                        params={"instType": "SWAP", "instId": inst_value},
+                        private=False, group=None,
+                    ),
+                    return_exceptions=False,
                 )
                 if not idx_data or not mark_data:
                     return None
@@ -622,21 +625,69 @@ if _NT_AVAILABLE:
             return [(closes[i] / closes[i - 1]) - 1.0 for i in range(1, len(closes))]
 
         async def _execute_diff(self, target: dict[str, _LegTarget]) -> None:
-            """把当前 self._positions diff 到 target，平多余腿、开新腿、调整 size。"""
+            """把当前 self._positions diff 到 target，平多余腿、开新腿、调整 size。
+
+            Uses a two-phase open strategy to avoid partial-rebalance directional
+            residual: set-leverage is pre-validated for ALL to-open legs before
+            any order is submitted.  If any leg's set-leverage fails the entire
+            open-phase is aborted for this round (closes still proceed — they are
+            independent and don't need leverage changes).
+            """
             current = dict(self._positions)
-            # 平：当前持有但不在 target，或方向变了
+            # Phase 1: close any legs that need closing — independent of new opens
             for inst_value, (cur_dir, cur_qty) in current.items():
                 if inst_value not in target or target[inst_value].direction != cur_dir:
                     self._close_leg(inst_value, cur_dir, cur_qty)
-            # 开 / 调：target 里有但当前没有，或 size 变了
+
+            # Phase 2: identify which legs need opening
+            to_open: list[tuple[str, _LegTarget]] = []
             for inst_value, leg in target.items():
                 cur = self._positions.get(inst_value)
                 if cur is None:
-                    await self._open_leg(inst_value, leg)
+                    to_open.append((inst_value, leg))
                 elif cur[0] == leg.direction and abs(cur[1] - leg.contracts) > 1e-6:
                     # 同方向但 size 变 → 简化：先平后开（避免增仓 / 减仓两套 path）
                     self._close_leg(inst_value, cur[0], cur[1])
-                    await self._open_leg(inst_value, leg)
+                    to_open.append((inst_value, leg))
+
+            if not to_open:
+                return
+
+            # Phase 3: pre-validate set-leverage for all to-open legs.
+            # This is the partial-rebalance guard: if any leg can't have its
+            # leverage set, abort the whole open-phase to avoid directional
+            # residual (e.g., LONG opens but matching SHORT fails → unbalanced
+            # book until next funding window).
+            use_isolated = (
+                self.config.margin_mode == "isolated"
+                and self.config.enable_dynamic_lever
+                and not self._is_backtest_context()
+            )
+            if use_isolated:
+                pos_mode = await self._get_account_pos_mode()
+                set_lever_results: list[tuple[str, _LegTarget, bool]] = []
+                for inst_value, leg in to_open:
+                    pos_side_arg = leg.pos_side if pos_mode == "long_short_mode" else None
+                    ok = await self._set_leverage_cached(inst_value, leg.lever, pos_side_arg)
+                    set_lever_results.append((inst_value, leg, ok))
+                if not all(r[2] for r in set_lever_results):
+                    failed = [r[0] for r in set_lever_results if not r[2]]
+                    self.log.warning(
+                        f"funding_xs ABORT rebalance: set-leverage failed for "
+                        f"{failed}; skipping all opens this round to avoid "
+                        f"directional residual (next rebalance retries)"
+                    )
+                    return
+                to_open_validated = [(iv, leg) for iv, leg, _ in set_lever_results]
+            else:
+                to_open_validated = to_open
+
+            # Phase 4: submit orders for all validated legs.
+            # Note: _open_leg's internal _set_leverage_cached call is a NO-OP
+            # here because the cache was already populated in Phase 3 above —
+            # same (inst, posSide) key hits the cache and returns True without REST.
+            for inst_value, leg in to_open_validated:
+                await self._open_leg(inst_value, leg)
 
         async def _open_leg(self, inst_value: str, leg: "_LegTarget") -> None:
             inst_id = InstrumentId.from_str(inst_value)
@@ -772,12 +823,23 @@ if _NT_AVAILABLE:
                     private=True, group=None,
                 )
                 if data and isinstance(data, list) and data[0]:
-                    mode = data[0].get("posMode") or "net_mode"
-                    self._account_pos_mode = str(mode)
-                    self.log.info(f"funding_xs cached account posMode={mode}")
-                    return self._account_pos_mode
+                    mode = data[0].get("posMode")
+                    if mode in ("net_mode", "long_short_mode"):
+                        self._account_pos_mode = str(mode)
+                        self.log.info(f"funding_xs cached account posMode={mode}")
+                        return self._account_pos_mode
+                    # Unknown posMode value — log loudly so it's visible in alerts
+                    self.log.warning(
+                        f"funding_xs UNEXPECTED posMode={mode!r} from OKX "
+                        f"/account/config (expected net_mode or long_short_mode); "
+                        f"falling back to net_mode — set-leverage may fail on "
+                        f"long_short account"
+                    )
             except Exception as exc:
-                self.log.warning(f"funding_xs _get_account_pos_mode failed: {exc}; defaulting to net_mode")
+                self.log.warning(
+                    f"funding_xs _get_account_pos_mode failed: {exc}; "
+                    f"falling back to net_mode"
+                )
             self._account_pos_mode = "net_mode"
             return self._account_pos_mode
 
