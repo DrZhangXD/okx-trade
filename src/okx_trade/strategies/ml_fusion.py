@@ -50,6 +50,8 @@ try:
     from nautilus_trader.trading.config import StrategyConfig
     from nautilus_trader.trading.strategy import Strategy
 
+    from ._okx_base import OkxStrategyBase
+
     _NT_AVAILABLE = True
 except ImportError:  # pragma: no cover
     _NT_AVAILABLE = False
@@ -161,9 +163,12 @@ if _NT_AVAILABLE:
         account_equity_usdt: float = 10000.0
         risk_config: RiskConfig | None = None
         funding_panel_parquet_path: str | None = None
+        # 2026-05-26 Phase 1c: isolated margin opt-in
+        enable_isolated_margin: bool = False  # default off, yaml flag flips on
+        isolated_lever: int = 3  # fixed leverage when isolated mode enabled
 
 
-    class MLFusionStrategy(Strategy):  # type: ignore[misc]
+    class MLFusionStrategy(OkxStrategyBase):  # type: ignore[misc]
         """每 4h 算特征 → XGBoost 预测 → top-K 多空腿。
 
         v1 不实现自动重训（实操：周末手动跑 scripts/ml_fusion_retrain.py）。
@@ -267,7 +272,17 @@ if _NT_AVAILABLE:
             if (self._model is not None
                     and now_ms - self._last_predict_ts_ms
                     >= self.config.target_horizon_hours * 3_600_000):
-                self._predict_and_trade(now_ms)
+                # 2026-05-26 Phase 1c: _predict_and_trade is now async
+                # (calls await self._open_leg which awaits set-leverage).
+                # Dispatch from sync on_bar via asyncio.create_task,
+                # mirroring funding_cross_section.on_bar→_rebalance_async.
+                try:
+                    loop = asyncio.get_running_loop()
+                    loop.create_task(self._predict_and_trade(now_ms))
+                except RuntimeError:
+                    self.log.warning(
+                        "ml_fusion: no running loop; skip predict_and_trade"
+                    )
                 self._last_predict_ts_ms = now_ms
 
         def _feed_risk_data(self) -> None:
@@ -301,7 +316,7 @@ if _NT_AVAILABLE:
             history = panel.rates[max(0, idx - 90):idx]
             return current, (history if history else None)
 
-        def _predict_and_trade(self, ts_ms: int) -> None:
+        async def _predict_and_trade(self, ts_ms: int) -> None:
             import numpy as np
 
             btc_closes = list(self._closes.get("BTC-USDT-SWAP.OKX", deque()))
@@ -364,14 +379,14 @@ if _NT_AVAILABLE:
                     self._close_leg(inst_v, reason="REBALANCE", exit_ts_ms=ts_ms)
             for inst_v, direction in target_dirs.items():
                 if inst_v not in self._positions:
-                    self._open_leg(inst_v, direction, ts_ms=ts_ms)
+                    await self._open_leg(inst_v, direction, ts_ms=ts_ms)
             self.log.info(
                 f"ml_fusion predict: scored={len(rows)} → "
                 f"longs={[r[0] for r in longs]} shorts={[r[0] for r in shorts]} "
                 f"open_legs={len(self._positions)}"
             )
 
-        def _open_leg(self, inst_value: str, direction: str, *, ts_ms: int) -> None:
+        async def _open_leg(self, inst_value: str, direction: str, *, ts_ms: int) -> None:
             cfg: MLFusionConfig = self.config  # type: ignore[assignment]
             inst_id = InstrumentId.from_str(inst_value)
             inst = self.cache.instrument(inst_id)
@@ -418,10 +433,19 @@ if _NT_AVAILABLE:
             if qty_obj is None:
                 return
             side = OrderSide.BUY if direction == "long" else OrderSide.SELL
-            self.submit_order(self.order_factory.market(
+            # 2026-05-26 Phase 1c: isolated-margin opt-in. submit_isolated_order
+            # falls back to plain submit_order if enable_isolated_margin=False
+            # or in backtest context.
+            order = self.order_factory.market(
                 instrument_id=inst_id, order_side=side,
                 quantity=qty_obj, time_in_force=TimeInForce.IOC,
-            ))
+            )
+            submitted = await self.submit_isolated_order(
+                order, lever=self.config.isolated_lever,
+            )
+            if not submitted:
+                # set-leverage failed; don't record phantom position
+                return
             self._positions[inst_value] = (direction, contracts, ts_ms)
             self.log.info(f"OPEN {direction} {inst_value} qty={contracts}")
 
