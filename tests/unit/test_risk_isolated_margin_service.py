@@ -60,6 +60,90 @@ class TestIsBacktest:
         assert svc.is_backtest() is False
 
 
+class TestGetPosMode:
+    @pytest.mark.asyncio
+    async def test_first_call_fetches_and_caches(self) -> None:
+        from okx_trade.config import OKXSettings
+        svc = IsolatedMarginService(OKXSettings(), log=_make_null_log())
+
+        class _MockTransport:
+            calls = 0
+            async def request(self, method, path, *, params=None, private=None, group=None):
+                _MockTransport.calls += 1
+                return [{"posMode": "long_short_mode"}]
+
+        class _MockRest:
+            transport = _MockTransport()
+            async def __aenter__(self): return self
+            async def __aexit__(self, *a): pass
+
+        svc._rest = _MockRest()
+        result = await svc.get_pos_mode()
+        assert result == "long_short_mode"
+        assert svc._pos_mode == "long_short_mode"
+        # Second call hits cache, transport.request not called again
+        result2 = await svc.get_pos_mode()
+        assert result2 == "long_short_mode"
+        assert _MockTransport.calls == 1
+
+    @pytest.mark.asyncio
+    async def test_net_mode_returned(self) -> None:
+        from okx_trade.config import OKXSettings
+        svc = IsolatedMarginService(OKXSettings(), log=_make_null_log())
+
+        class _MockTransport:
+            async def request(self, *a, **kw):
+                return [{"posMode": "net_mode"}]
+
+        class _MockRest:
+            transport = _MockTransport()
+
+        svc._rest = _MockRest()
+        result = await svc.get_pos_mode()
+        assert result == "net_mode"
+
+    @pytest.mark.asyncio
+    async def test_unknown_pos_mode_warns_and_falls_back_to_net(self) -> None:
+        from okx_trade.config import OKXSettings
+        class _CapturingLog:
+            def __init__(self): self.warnings = []
+            def info(self, *_a, **_kw): pass
+            def warning(self, msg, **_kw): self.warnings.append(msg)
+            def error(self, *_a, **_kw): pass
+            def debug(self, *_a, **_kw): pass
+
+        log = _CapturingLog()
+        svc = IsolatedMarginService(OKXSettings(), log=log)
+
+        class _MockTransport:
+            async def request(self, *a, **kw):
+                return [{"posMode": "future_unexpected_mode"}]
+
+        class _MockRest:
+            transport = _MockTransport()
+
+        svc._rest = _MockRest()
+        result = await svc.get_pos_mode()
+        assert result == "net_mode"  # safe fallback
+        assert any("UNEXPECTED posMode" in w for w in log.warnings)
+
+    @pytest.mark.asyncio
+    async def test_rest_failure_falls_back_to_net(self) -> None:
+        from okx_trade.config import OKXSettings
+        svc = IsolatedMarginService(OKXSettings(), log=_make_null_log())
+
+        class _MockTransport:
+            async def request(self, *a, **kw):
+                raise RuntimeError("network down")
+
+        class _MockRest:
+            transport = _MockTransport()
+
+        svc._rest = _MockRest()
+        result = await svc.get_pos_mode()
+        assert result == "net_mode"
+
+
 def _make_null_log():
     class _Null:
         def info(self, *_a, **_kw): pass

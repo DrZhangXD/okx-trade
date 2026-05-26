@@ -62,3 +62,44 @@ class IsolatedMarginService:
         except AttributeError:
             value = api_key_attr
         return not bool(value)
+
+    async def _ensure_rest_client(self) -> "OKXRestClient":
+        """Lazy-init the OKXRestClient on first REST need."""
+        if self._rest is None:
+            from ..rest.client import OKXRestClient
+            self._rest = OKXRestClient(self._rest_settings)
+            await self._rest.__aenter__()
+        return self._rest
+
+    async def get_pos_mode(self) -> str:
+        """Cached fetch of OKX account posMode. Returns 'net_mode' or
+        'long_short_mode'. Unexpected values log a strong WARN and fall
+        back to 'net_mode'; REST failures also fall back silently with
+        a WARN. Cached for service lifetime (mode is account-level).
+        """
+        if self._pos_mode is not None:
+            return self._pos_mode
+        rest = await self._ensure_rest_client()
+        try:
+            data = await rest.transport.request(
+                "GET", "/api/v5/account/config",
+                private=True, group=None,
+            )
+            if data and isinstance(data, list) and data[0]:
+                mode = data[0].get("posMode")
+                if mode in ("net_mode", "long_short_mode"):
+                    self._pos_mode = str(mode)
+                    self._log.info(f"iso_margin cached account posMode={mode}")
+                    return self._pos_mode
+                self._log.warning(
+                    f"iso_margin UNEXPECTED posMode={mode!r} from OKX "
+                    f"/account/config (expected net_mode or long_short_mode); "
+                    f"falling back to net_mode — set-leverage may fail on "
+                    f"a long_short account"
+                )
+        except Exception as exc:
+            self._log.warning(
+                f"iso_margin get_pos_mode failed: {exc}; falling back to net_mode"
+            )
+        self._pos_mode = "net_mode"
+        return self._pos_mode
