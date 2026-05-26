@@ -59,15 +59,21 @@ class AccountEndpoints:
     ) -> None:
         """``POST /api/v5/account/set-leverage``。
 
-        - ``mgn_mode=ISOLATED`` 且开启了双向持仓时必须传 ``pos_side``。
+        - ``mgn_mode=ISOLATED``: OKX requires ``posSide`` even in net-position
+          mode.  When ``pos_side`` is ``None`` it is automatically set to
+          ``PosSide.NET``; pass an explicit value for hedge-mode accounts.
         - ``mgn_mode=CROSS`` 不传 ``pos_side``。
         """
+        # OKX requires posSide even in net-position mode when mgnMode=isolated.
+        # Auto-default to PosSide.NET so callers don't have to know this quirk.
+        if mgn_mode == TdMode.ISOLATED and pos_side is None:
+            pos_side = PosSide.NET
         body: dict[str, str] = {
             "instId": inst_id,
             "lever": str(leverage),
             "mgnMode": mgn_mode.value,
         }
-        if pos_side and mgn_mode == TdMode.ISOLATED:
+        if pos_side is not None and mgn_mode == TdMode.ISOLATED:
             body["posSide"] = pos_side.value
         await self._t.request(
             "POST", "/api/v5/account/set-leverage",

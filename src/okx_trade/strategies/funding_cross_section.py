@@ -33,14 +33,36 @@ from __future__ import annotations
 
 import asyncio
 import time
+from dataclasses import dataclass
 from decimal import Decimal
 from typing import TYPE_CHECKING
 
 from ..risk import RiskConfig, RiskIntent, apply_risk_manager, build_risk_manager
 from ..risk.stats import rolling_beta
 from .base import effective_equity_usdt
+from ._isolated_helpers import (
+    compute_edge_score,
+    compute_leverage,
+    outlier_check,
+)
 from .pnl_hook import read_account_total_equity_usdt, record_strategy_equity_daily, record_strategy_trade
 from .qty import safe_make_qty
+
+
+@dataclass(slots=True, frozen=True)
+class _LegTarget:
+    """Per-leg planned position (output of _compute_target_positions).
+
+    pos_side semantics: PosSide enum value (.LONG / .SHORT) for long_short
+    account posMode; ignored in net mode. Caller uses this to call OKX
+    set-leverage with the right side. direction is independent ("long"/
+    "short") and is what we use for order side derivation.
+    """
+    direction: str
+    contracts: float
+    lever: float
+    edge_score: float
+    pos_side: object  # PosSide enum, kept generic to avoid import at module scope
 
 if TYPE_CHECKING:
     from nautilus_trader.model.data import Bar
@@ -62,6 +84,7 @@ except ImportError:  # pragma: no cover
 
 
 if _NT_AVAILABLE:
+    from ..enums import PosSide
 
     class FundingXSConfig(StrategyConfig, frozen=True):  # type: ignore[misc]
         """Funding Cross-Section NT Strategy 配置。
@@ -106,6 +129,22 @@ if _NT_AVAILABLE:
         before any bar subscription. Used for backtest.
         """
 
+        # === 2026-05-26: isolated margin + dynamic leverage ===
+        enable_dynamic_lever: bool = True
+        margin_mode: str = "isolated"   # "isolated" or "cross"; backtest forces "cross"
+        lever_min: float = 2.0
+        lever_max: float = 10.0
+        lever_base: float = 2.0
+        lever_slope: float = 3.0
+        lever_edge_combine_basis: bool = True
+
+        # === 2026-05-26: outlier guard ===
+        enable_outlier_guard: bool = True
+        outlier_vol_ratio: float = 3.0
+        outlier_window_min: int = 60
+        outlier_baseline_min: int = 1440
+        outlier_warmup_min: int = 1440
+
 
     class FundingXSStrategy(Strategy):  # type: ignore[misc]
         """每个 funding cycle 重平 funding 横截面对冲组合。
@@ -148,6 +187,11 @@ if _NT_AVAILABLE:
             self._rest_settings = None  # type: ignore[var-annotated]
             self._funding_panels: dict[str, "FundingPanel"] = {}
             self._funding_source_kind: str = "rest"  # "rest" (live) | "panel" (backtest)
+
+            # 2026-05-26: isolated margin support
+            self._set_lever_cache: dict[tuple[str, str], float] = {}  # (inst, posSide) → lever
+            self._account_pos_mode: str | None = None  # cached from OKX /account/config
+            self._latest_basis: dict[str, float] = {}  # populated in P-Task 10
 
         def on_start(self) -> None:
             # Backtest: auto-load funding panels for all configured insts
@@ -218,6 +262,42 @@ if _NT_AVAILABLE:
             # REST path (live)
             fr = await self._rest.public.get_funding_rate(inst_id_symbol)
             return float(fr.funding_rate)
+
+        async def _fetch_basis(self, inst_value: str) -> float | None:
+            """Pull (perp_mark - spot_index) / spot_index via OKX REST.
+
+            Uses /api/v5/market/index-tickers for the spot index and
+            /api/v5/public/mark-price for the perp mark. Returns ``None``
+            on failure so caller can skip basis-component for that leg.
+            """
+            if self._is_backtest_context():
+                return None
+            if self._rest is None:
+                from ..rest.client import OKXRestClient
+                self._rest = OKXRestClient(self._rest_settings)
+                await self._rest.__aenter__()
+            # inst_value like "DOT-USDT-SWAP" → underlying "DOT-USDT"
+            underlying = inst_value.replace("-SWAP", "")
+            try:
+                idx_data = await self._rest.transport.request(
+                    "GET", "/api/v5/market/index-tickers",
+                    params={"instId": underlying}, private=False, group=None,
+                )
+                mark_data = await self._rest.transport.request(
+                    "GET", "/api/v5/public/mark-price",
+                    params={"instType": "SWAP", "instId": inst_value},
+                    private=False, group=None,
+                )
+                if not idx_data or not mark_data:
+                    return None
+                idx_px = float(idx_data[0].get("idxPx") or 0)
+                mark_px = float(mark_data[0].get("markPx") or 0)
+                if idx_px <= 0 or mark_px <= 0:
+                    return None
+                return (mark_px - idx_px) / idx_px
+            except Exception as exc:
+                self.log.warning(f"funding_xs fetch_basis failed inst={inst_value}: {exc}")
+                return None
 
         async def _warmup_closes_via_rest(self) -> None:
             """One-shot REST fetch of ``beta_window_days + 2`` 1D closes per
@@ -321,10 +401,22 @@ if _NT_AVAILABLE:
                         continue
                     self._latest_funding[iid.value] = float(r)
 
-                # 2) 选股 + 计算 β-hedged 仓位
+                # 2) 可选：拉所有 universe 的 basis（perp_mark - spot_index）/ spot_index
+                if self.config.lever_edge_combine_basis:
+                    basis_tasks = [
+                        self._fetch_basis(iid.value) for iid in self._inst_ids
+                    ]
+                    basis_values = await asyncio.gather(*basis_tasks, return_exceptions=True)
+                    self._latest_basis = {}
+                    for iid, b in zip(self._inst_ids, basis_values):
+                        if isinstance(b, Exception) or b is None:
+                            continue
+                        self._latest_basis[iid.value] = float(b)
+
+                # 3) 选股 + 计算 β-hedged 仓位
                 target_positions = self._compute_target_positions()
-                # 3) diff 当前持仓 vs target
-                self._execute_diff(target_positions)
+                # 4) diff 当前持仓 vs target
+                await self._execute_diff(target_positions)
                 self.log.info(
                     f"funding_xs rebalanced: open_legs={len(self._positions)} "
                     f"funding_count={len(self._latest_funding)}"
@@ -332,11 +424,11 @@ if _NT_AVAILABLE:
             except Exception as exc:
                 self.log.error(f"funding_xs rebalance failed: {exc}")
 
-        def _compute_target_positions(self) -> dict[str, tuple[str, float]]:
+        def _compute_target_positions(self) -> dict[str, _LegTarget]:
             """选 top_n 最负 funding 做多 + bot_n 最正 funding 做空，β-hedge 后返回。
 
             Returns:
-                ``{inst_id: (direction, contracts)}``。空 dict = 全平。
+                ``{inst_id: _LegTarget}``。空 dict = 全平。
             """
             if not self._latest_funding:
                 return {}
@@ -345,7 +437,7 @@ if _NT_AVAILABLE:
             long_legs = [iid for iid, _ in ranked[:self.config.top_n]]
             # 空腿：funding 最正 bot_n
             short_legs = [iid for iid, _ in ranked[-self.config.bot_n:]]
-            target: dict[str, tuple[str, float]] = {}
+            target: dict[str, _LegTarget] = {}
 
             equity = effective_equity_usdt(
                 self._allocated_equity_usdt, self.config.account_equity_usdt,
@@ -359,6 +451,21 @@ if _NT_AVAILABLE:
 
             for direction, legs in (("long", long_legs), ("short", short_legs)):
                 for inst_value in legs:
+                    # 2026-05-26: outlier guard — skip leg if recent vol abnormal
+                    if self.config.enable_outlier_guard:
+                        ok, reason = outlier_check(
+                            closes=self._closes_by_inst.get(inst_value, []),
+                            window=self.config.outlier_window_min,
+                            baseline=self.config.outlier_baseline_min,
+                            warmup=self.config.outlier_warmup_min,
+                            ratio_threshold=self.config.outlier_vol_ratio,
+                        )
+                        if not ok:
+                            self.log.warning(
+                                f"funding_xs OUTLIER_SKIP inst={inst_value} "
+                                f"direction={direction} reason={reason}"
+                            )
+                            continue
                     # β-hedge：调整 size，让 portfolio β ≈ 0
                     size_scale = 1.0
                     if self.config.enable_beta_hedge:
@@ -386,7 +493,48 @@ if _NT_AVAILABLE:
                     contracts = (int(raw_contracts / lot_sz) * lot_sz) if lot_sz > 0 else raw_contracts
                     if contracts <= 0:
                         continue
-                    target[inst_value] = (direction, contracts)
+                    # 2026-05-26: dynamic leverage from funding (+ optional basis) z-score
+                    if self.config.enable_dynamic_lever:
+                        basis = (
+                            self._latest_basis.get(inst_value)
+                            if self.config.lever_edge_combine_basis else None
+                        )
+                        basis_universe = (
+                            list(self._latest_basis.values())
+                            if (self.config.lever_edge_combine_basis and self._latest_basis) else None
+                        )
+                        edge_score = compute_edge_score(
+                            funding_rate=self._latest_funding[inst_value],
+                            funding_universe=list(self._latest_funding.values()),
+                            basis=basis,
+                            basis_universe=basis_universe,
+                            direction=direction,
+                            combine_basis=self.config.lever_edge_combine_basis,
+                        )
+                        lever = compute_leverage(
+                            edge_score,
+                            base=self.config.lever_base,
+                            slope=self.config.lever_slope,
+                            lo=self.config.lever_min,
+                            hi=self.config.lever_max,
+                        )
+                    else:
+                        edge_score = 0.0
+                        lever = self.config.lever_max
+
+                    # pos_side: in net_mode account, None (account.py auto-fills net);
+                    # in long_short_mode, derive from leg direction.
+                    pos_side_value = (
+                        PosSide.LONG if direction == "long" else PosSide.SHORT
+                    )
+
+                    target[inst_value] = _LegTarget(
+                        direction=direction,
+                        contracts=contracts,
+                        lever=lever,
+                        edge_score=edge_score,
+                        pos_side=pos_side_value,
+                    )
             return target
 
         @staticmethod
@@ -395,24 +543,24 @@ if _NT_AVAILABLE:
                 return []
             return [(closes[i] / closes[i - 1]) - 1.0 for i in range(1, len(closes))]
 
-        def _execute_diff(self, target: dict[str, tuple[str, float]]) -> None:
+        async def _execute_diff(self, target: dict[str, _LegTarget]) -> None:
             """把当前 self._positions diff 到 target，平多余腿、开新腿、调整 size。"""
             current = dict(self._positions)
             # 平：当前持有但不在 target，或方向变了
             for inst_value, (cur_dir, cur_qty) in current.items():
-                if inst_value not in target or target[inst_value][0] != cur_dir:
+                if inst_value not in target or target[inst_value].direction != cur_dir:
                     self._close_leg(inst_value, cur_dir, cur_qty)
             # 开 / 调：target 里有但当前没有，或 size 变了
-            for inst_value, (tgt_dir, tgt_qty) in target.items():
+            for inst_value, leg in target.items():
                 cur = self._positions.get(inst_value)
                 if cur is None:
-                    self._open_leg(inst_value, tgt_dir, tgt_qty)
-                elif cur[0] == tgt_dir and abs(cur[1] - tgt_qty) > 1e-6:
+                    await self._open_leg(inst_value, leg)
+                elif cur[0] == leg.direction and abs(cur[1] - leg.contracts) > 1e-6:
                     # 同方向但 size 变 → 简化：先平后开（避免增仓 / 减仓两套 path）
                     self._close_leg(inst_value, cur[0], cur[1])
-                    self._open_leg(inst_value, tgt_dir, tgt_qty)
+                    await self._open_leg(inst_value, leg)
 
-        def _open_leg(self, inst_value: str, direction: str, contracts: float) -> None:
+        async def _open_leg(self, inst_value: str, leg: "_LegTarget") -> None:
             inst_id = InstrumentId.from_str(inst_value)
             inst = self.cache.instrument(inst_id)
             if inst is None:
@@ -422,12 +570,11 @@ if _NT_AVAILABLE:
             )
             last_closes = self._closes_by_inst.get(inst_value, [])
             entry_px = last_closes[-1] if last_closes else 0.0
-            # 用 entry_px 当 stop_price 跑 risk（neutral 策略没有 SL 概念）
             intent = RiskIntent(
                 strategy_id=str(self.id),
                 instrument_id=inst_value,
-                direction=direction,  # type: ignore[arg-type]
-                size=contracts,
+                direction=leg.direction,  # type: ignore[arg-type]
+                size=leg.contracts,
                 entry_price=entry_px,
                 stop_price=entry_px,
                 account_equity_usdt=equity,
@@ -437,17 +584,41 @@ if _NT_AVAILABLE:
                 return
             contracts = adjusted
 
+            # 2026-05-26: isolated margin path (live only)
+            use_isolated = (
+                self.config.margin_mode == "isolated"
+                and self.config.enable_dynamic_lever
+                and not self._is_backtest_context()
+            )
+            if use_isolated:
+                pos_mode = await self._get_account_pos_mode()
+                # In long_short_mode, pass leg.pos_side (PosSide.LONG/SHORT).
+                # In net_mode, pass None (account.py auto-fills PosSide.NET).
+                pos_side_arg = leg.pos_side if pos_mode == "long_short_mode" else None
+                ok = await self._set_leverage_cached(inst_value, leg.lever, pos_side_arg)
+                if not ok:
+                    self.log.warning(
+                        f"funding_xs skip leg inst={inst_value} (set_leverage failed)"
+                    )
+                    return
+
             qty_obj = safe_make_qty(inst, contracts, self.log, ctx=f"open {inst_value}")
             if qty_obj is None:
                 return
-            side = OrderSide.BUY if direction == "long" else OrderSide.SELL
+            side = OrderSide.BUY if leg.direction == "long" else OrderSide.SELL
+            tags = ["td_mode:isolated"] if use_isolated else None
             order = self.order_factory.market(
                 instrument_id=inst_id, order_side=side,
                 quantity=qty_obj, time_in_force=TimeInForce.IOC,
+                tags=tags,
             )
             self.submit_order(order)
-            self._positions[inst_value] = (direction, contracts)
-            self.log.info(f"OPEN {direction} {inst_value} qty={contracts}")
+            self._positions[inst_value] = (leg.direction, contracts)
+            self.log.info(
+                f"OPEN {leg.direction} {inst_value} qty={contracts} "
+                f"lever={leg.lever:.1f} edge={leg.edge_score:+.2f} "
+                f"mode={'isolated' if use_isolated else 'cross'}"
+            )
 
         def _close_leg(self, inst_value: str, direction: str, contracts: float) -> None:
             inst_id = InstrumentId.from_str(inst_value)
@@ -490,6 +661,93 @@ if _NT_AVAILABLE:
             )
 
             self._positions.pop(inst_value, None)
+
+        def _is_backtest_context(self) -> bool:
+            """Detect whether we're in NT backtest engine (synchronous, no
+            live REST client). Used to skip set-leverage and fall back to
+            cross mode in backtest, since NT's MarginAccount doesn't model
+            isolated correctly.
+
+            Cheap heuristic: live mode has ``self._rest_settings`` populated
+            with real credentials; backtest fixture passes empty/dummy
+            settings. We check whether the settings look usable.
+            """
+            try:
+                return not bool(getattr(self._rest_settings, "api_key", None))
+            except Exception:
+                return True  # safe default: assume backtest on any error
+
+        async def _get_account_pos_mode(self) -> str:
+            """Cached fetch of OKX account-level posMode. Values: 'net_mode',
+            'long_short_mode'. Cached once per strategy lifetime — switching
+            mode mid-session would require a restart anyway.
+            """
+            if self._account_pos_mode is not None:
+                return self._account_pos_mode
+            if self._rest is None:
+                from ..rest.client import OKXRestClient
+                self._rest = OKXRestClient(self._rest_settings)
+                await self._rest.__aenter__()
+            try:
+                data = await self._rest.transport.request(
+                    "GET", "/api/v5/account/config",
+                    private=True, group=None,
+                )
+                if data and isinstance(data, list) and data[0]:
+                    mode = data[0].get("posMode") or "net_mode"
+                    self._account_pos_mode = str(mode)
+                    self.log.info(f"funding_xs cached account posMode={mode}")
+                    return self._account_pos_mode
+            except Exception as exc:
+                self.log.warning(f"funding_xs _get_account_pos_mode failed: {exc}; defaulting to net_mode")
+            self._account_pos_mode = "net_mode"
+            return self._account_pos_mode
+
+        async def _set_leverage_cached(
+            self, inst_value: str, lever: float, pos_side,
+        ) -> bool:
+            """Idempotent: call OKX set-leverage only if (inst, posSide, lever) changed.
+
+            Args:
+                inst_value: e.g. "DOT-USDT-SWAP".
+                lever: target leverage (rounded to int for OKX).
+                pos_side: PosSide enum or None. In net_mode, callers pass None
+                    and account.py auto-fills posSide=net. In long_short_mode,
+                    callers must pass PosSide.LONG or PosSide.SHORT.
+
+            Returns ``True`` if leverage is in the desired state (set or
+            already cached); ``False`` on REST failure (caller should skip
+            the leg this round).
+            """
+            ps_key = pos_side.value if pos_side is not None else "net"
+            cache_key = (inst_value, ps_key)
+            cached = self._set_lever_cache.get(cache_key)
+            if cached is not None and abs(cached - lever) < 0.01:
+                return True
+            if self._rest is None:
+                from ..rest.client import OKXRestClient
+                self._rest = OKXRestClient(self._rest_settings)
+                await self._rest.__aenter__()
+            try:
+                from ..enums import TdMode
+                await self._rest.account.set_leverage(
+                    inst_id=inst_value,
+                    leverage=int(round(lever)),
+                    mgn_mode=TdMode.ISOLATED,
+                    pos_side=pos_side,
+                )
+                self._set_lever_cache[cache_key] = lever
+                self.log.info(
+                    f"funding_xs set leverage inst={inst_value} "
+                    f"mgnMode=isolated posSide={ps_key} lever={int(round(lever))}"
+                )
+                return True
+            except Exception as exc:
+                self.log.warning(
+                    f"funding_xs set_leverage failed inst={inst_value} "
+                    f"posSide={ps_key} lever={lever}: {exc}"
+                )
+                return False
 
         def on_order_rejected(self, event) -> None:  # noqa: ANN001
             # 简化处理：拒了哪条腿、就从 _positions 移除（避免幻仓）
