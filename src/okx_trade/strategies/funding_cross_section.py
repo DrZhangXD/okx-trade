@@ -106,6 +106,22 @@ if _NT_AVAILABLE:
         before any bar subscription. Used for backtest.
         """
 
+        # === 2026-05-26: isolated margin + dynamic leverage ===
+        enable_dynamic_lever: bool = True
+        margin_mode: str = "isolated"   # "isolated" or "cross"; backtest forces "cross"
+        lever_min: float = 2.0
+        lever_max: float = 10.0
+        lever_base: float = 2.0
+        lever_slope: float = 3.0
+        lever_edge_combine_basis: bool = True
+
+        # === 2026-05-26: outlier guard ===
+        enable_outlier_guard: bool = True
+        outlier_vol_ratio: float = 3.0
+        outlier_window_min: int = 60
+        outlier_baseline_min: int = 1440
+        outlier_warmup_min: int = 1440
+
 
     class FundingXSStrategy(Strategy):  # type: ignore[misc]
         """每个 funding cycle 重平 funding 横截面对冲组合。

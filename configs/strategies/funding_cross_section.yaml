@@ -37,6 +37,21 @@ check_interval_sec: 1800
 
 account_equity_usdt: 10000.0
 
+# === 2026-05-26: defense layer ===
+enable_dynamic_lever: true
+margin_mode: isolated
+lever_min: 2.0
+lever_max: 10.0
+lever_base: 2.0
+lever_slope: 3.0
+lever_edge_combine_basis: true
+
+enable_outlier_guard: true
+outlier_vol_ratio: 3.0
+outlier_window_min: 60
+outlier_baseline_min: 1440
+outlier_warmup_min: 1440
+
 # delta-neutral：vol_target / kelly / correlation / regime 都关，只留 drawdown
 risk:
   enable_drawdown: true
