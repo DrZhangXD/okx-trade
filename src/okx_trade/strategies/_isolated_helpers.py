@@ -73,6 +73,37 @@ def compute_edge_score(
     return float(sign * raw)
 
 
-def outlier_check(*args, **kwargs):
-    """Stub — implemented in P-Task 5."""
-    raise NotImplementedError("P-Task 5")
+def outlier_check(
+    *,
+    closes: Sequence[float],
+    window: int,
+    baseline: int,
+    warmup: int,
+    ratio_threshold: float,
+) -> tuple[bool, str]:
+    """Decide whether to allow a new leg given recent realized vol.
+
+    Returns ``(allow, reason)``:
+      - ``(True, "warmup")``   — not enough history (< ``warmup`` bars).
+      - ``(True, "no_baseline")`` — flat baseline (std==0); no filter possible.
+      - ``(True, "ok")``       — recent vol within ``ratio_threshold`` of baseline.
+      - ``(False, "vol_ratio=R>T")`` — recent vol > baseline × threshold; reject.
+
+    Assumes ``closes`` are 1-minute bar closes for the instrument; both
+    ``window`` and ``baseline`` are in bars (= minutes). Default config gives
+    window=60 (last 1h), baseline=1440 (last 24h), warmup=1440.
+    """
+    if len(closes) < warmup:
+        return True, "warmup"
+    arr = np.asarray(closes, dtype=float)
+    log_returns = np.diff(np.log(arr))
+    if len(log_returns) < max(window, baseline):
+        return True, "warmup"
+    recent_vol = float(np.std(log_returns[-window:], ddof=0))
+    baseline_vol = float(np.std(log_returns[-baseline:], ddof=0))
+    if baseline_vol <= 0:
+        return True, "no_baseline"
+    ratio = recent_vol / baseline_vol
+    if ratio > ratio_threshold:
+        return False, f"vol_ratio={ratio:.2f}>{ratio_threshold}"
+    return True, "ok"

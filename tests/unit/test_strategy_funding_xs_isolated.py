@@ -105,3 +105,53 @@ class TestComputeEdgeScore:
             combine_basis=False,
         )
         assert score == 0.0
+
+
+# ---------------------------------------------------------------------------
+# outlier_check
+# ---------------------------------------------------------------------------
+class TestOutlierCheck:
+    def _calm_closes(self, n: int = 1500) -> list[float]:
+        """Geometric Brownian motion-ish: small log-returns ~N(0, 0.001)."""
+        rng = np.random.default_rng(seed=42)
+        rets = rng.normal(0.0, 0.001, n)
+        prices = 100.0 * np.exp(np.cumsum(rets))
+        return prices.tolist()
+
+    def test_warmup_short_history_allowed(self) -> None:
+        ok, reason = outlier_check(
+            closes=[1.0, 1.1, 0.9],
+            window=60, baseline=1440, warmup=1440, ratio_threshold=3.0,
+        )
+        assert ok is True
+        assert reason == "warmup"
+
+    def test_calm_market_allowed(self) -> None:
+        ok, reason = outlier_check(
+            closes=self._calm_closes(),
+            window=60, baseline=1440, warmup=1440, ratio_threshold=3.0,
+        )
+        assert ok is True
+        assert reason == "ok"
+
+    def test_recent_spike_rejected(self) -> None:
+        closes = self._calm_closes(n=1440)
+        # Inject a large wick in the last 60 bars: 10x normal vol
+        rng = np.random.default_rng(seed=7)
+        wick = rng.normal(0.0, 0.01, 60)  # 10x sigma
+        closes.extend((closes[-1] * np.exp(np.cumsum(wick))).tolist())
+        ok, reason = outlier_check(
+            closes=closes,
+            window=60, baseline=1440, warmup=1440, ratio_threshold=3.0,
+        )
+        assert ok is False
+        assert "vol_ratio" in reason
+
+    def test_zero_baseline_vol_allowed(self) -> None:
+        # Flat history → std=0 baseline → allow (no signal to filter on)
+        ok, reason = outlier_check(
+            closes=[100.0] * 1500,
+            window=60, baseline=1440, warmup=1440, ratio_threshold=3.0,
+        )
+        assert ok is True
+        assert reason == "no_baseline"
