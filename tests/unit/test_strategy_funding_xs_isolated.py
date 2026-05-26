@@ -271,3 +271,36 @@ def test_leg_target_dataclass_construction() -> None:
     assert lt.lever == 5.0
     assert lt.edge_score == 1.5
     assert lt.pos_side == PosSide.SHORT
+
+
+# ---------------------------------------------------------------------------
+# Backtest fallback: force cross mode + skip set-leverage
+# ---------------------------------------------------------------------------
+class TestBacktestFallback:
+    def test_is_backtest_context_no_api_key(self) -> None:
+        from okx_trade.strategies.funding_cross_section import FundingXSStrategy
+
+        class _Stub:
+            _rest_settings = type("S", (), {"api_key": ""})()  # SecretStr-like empty
+
+        result = FundingXSStrategy._is_backtest_context(_Stub())  # type: ignore
+        assert result is True
+
+    def test_is_backtest_context_with_api_key(self) -> None:
+        from okx_trade.strategies.funding_cross_section import FundingXSStrategy
+
+        class _Stub:
+            _rest_settings = type("S", (), {"api_key": "real-key"})()
+
+        result = FundingXSStrategy._is_backtest_context(_Stub())  # type: ignore
+        assert result is False
+
+    def test_is_backtest_context_rest_settings_none(self) -> None:
+        """Before on_start, _rest_settings may not be set. Safe default: backtest."""
+        from okx_trade.strategies.funding_cross_section import FundingXSStrategy
+
+        class _Stub:
+            _rest_settings = None
+
+        result = FundingXSStrategy._is_backtest_context(_Stub())  # type: ignore
+        assert result is True
