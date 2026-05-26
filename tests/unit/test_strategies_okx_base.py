@@ -59,6 +59,9 @@ class TestSubmitIsolatedOrder:
             def __init__(self):
                 self.side = order_side
                 self.tags = None
+                self.quantity = 1.0
+                self.time_in_force = None
+                self.is_reduce_only = False
 
                 class _InstId:
                     value = "DOT-USDT-SWAP.OKX"
@@ -68,6 +71,21 @@ class TestSubmitIsolatedOrder:
             def __init__(self): self.warnings = []
             def warning(self, msg): self.warnings.append(msg)
             def info(self, msg): pass
+
+        class _RebuiltOrder:
+            """Captures what order_factory.market(...) was called with so
+            assertions can verify the rebuilt order's tags."""
+            def __init__(self, **kwargs):
+                self.instrument_id = kwargs["instrument_id"]
+                self.side = kwargs["order_side"]
+                self.quantity = kwargs.get("quantity")
+                self.time_in_force = kwargs.get("time_in_force")
+                self.is_reduce_only = kwargs.get("reduce_only", False)
+                self.tags = kwargs.get("tags")
+
+        class _OrderFactory:
+            def market(self, **kwargs):
+                return _RebuiltOrder(**kwargs)
 
         config = _Config()
         config.enable_isolated_margin = enable_isolated_margin
@@ -79,6 +97,7 @@ class TestSubmitIsolatedOrder:
         m.log = _Log()
         m._submitted = []
         m.submit_order = lambda order: m._submitted.append(order)
+        m.order_factory = _OrderFactory()
         m.submit_isolated_order = OkxStrategyBase.submit_isolated_order.__get__(m)
         return m, _Order()
 
@@ -131,8 +150,10 @@ class TestSubmitIsolatedOrder:
         ok = await m.submit_isolated_order(order, lever=5, pos_side=PosSide.LONG)
         assert ok is True
         assert svc.calls == [("DOT-USDT-SWAP", 5, None)]  # forced None
-        assert order.tags == ["td_mode:isolated"]
+        # Tag is attached via rebuild (NT Order.tags is read-only), so check
+        # the submitted (rebuilt) order's tags, not the original.
         assert len(m._submitted) == 1
+        assert m._submitted[0].tags == ["td_mode:isolated"]
 
     @pytest.mark.asyncio
     async def test_branch5_long_short_mode_derives_from_buy(self) -> None:
@@ -204,4 +225,7 @@ class TestSubmitIsolatedOrder:
         order.tags = ["existing:tag"]
         ok = await m.submit_isolated_order(order, lever=5, pos_side=PosSide.LONG)
         assert ok is True
-        assert order.tags == ["existing:tag", "td_mode:isolated"]
+        # Tags merged on the rebuilt order (original order's tags are
+        # read-only in real NT; the helper rebuilds via order_factory)
+        assert len(m._submitted) == 1
+        assert m._submitted[0].tags == ["existing:tag", "td_mode:isolated"]

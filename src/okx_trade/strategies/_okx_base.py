@@ -99,6 +99,29 @@ class OkxStrategyBase(_NTStrategy):  # type: ignore[misc,valid-type]
             )
             return False
 
-        order.tags = list(order.tags or []) + self._iso_service.make_isolated_tags()
-        self.submit_order(order)
+        # NT Order.tags is a read-only Cython attribute — can't be reassigned
+        # after construction. Rebuild the order through order_factory with
+        # merged tags. Optimized for MarketOrder (the dominant case in this
+        # repo's strategies); falls back to plain submit on rebuild failure.
+        iso_tags = self._iso_service.make_isolated_tags()
+        existing_tags = list(order.tags) if order.tags else []
+        new_tags = existing_tags + iso_tags
+
+        try:
+            rebuilt = self.order_factory.market(
+                instrument_id=order.instrument_id,
+                order_side=order.side,
+                quantity=getattr(order, "quantity", None),
+                time_in_force=getattr(order, "time_in_force", None),
+                reduce_only=getattr(order, "is_reduce_only", False),
+                tags=new_tags,
+            )
+            self.submit_order(rebuilt)
+        except (AttributeError, TypeError) as exc:
+            self.log.warning(
+                f"{type(self).__name__} submit_isolated_order: failed to "
+                f"rebuild order with isolated tag ({exc}); falling back to "
+                f"plain submit (no isolated tag)"
+            )
+            self.submit_order(order)
         return True
