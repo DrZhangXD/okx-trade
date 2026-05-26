@@ -33,7 +33,6 @@ from __future__ import annotations
 
 import asyncio
 import time
-from collections import deque
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import TYPE_CHECKING
@@ -44,7 +43,6 @@ from .base import effective_equity_usdt
 from ._isolated_helpers import (
     compute_edge_score,
     compute_leverage,
-    outlier_check,
 )
 from .pnl_hook import read_account_total_equity_usdt, record_strategy_equity_daily, record_strategy_trade
 from .qty import safe_make_qty
@@ -159,7 +157,8 @@ if _NT_AVAILABLE:
         - ``self._positions: dict[inst_id, ("long"|"short", contracts)]``
         - ``self._last_rebalance_ts_ms``
         - ``self._closes_by_inst``: deque of recent 1D close（用来算 β）
-        - ``self._closes_1m_by_inst``: deque of recent 1m close（喂 Layer-3 outlier guard）
+        - Layer-3 outlier guard 的 1m close 缓冲由共享 ``VolatilityFilter``
+          服务维护（``self._vol_filter`` via OkxStrategyBase DI）。
         """
 
         def __init__(self, config: FundingXSConfig) -> None:
@@ -188,11 +187,10 @@ if _NT_AVAILABLE:
             }
 
             self._closes_by_inst: dict[str, list[float]] = {}
-            # 1m closes for outlier_check. maxlen sized to cover the largest
-            # outlier_baseline_min default (1440) with headroom.
-            self._closes_1m_by_inst: dict[str, deque[float]] = {
-                iid.value: deque(maxlen=2000) for iid in self._inst_ids
-            }
+            # 1m closes for the Layer-3 outlier guard are buffered by the shared
+            # VolatilityFilter service (DI'd as ``self._vol_filter`` via the
+            # OkxStrategyBase). ``on_bar`` feeds it; ``vol_filter_allow``
+            # consults it.
             self._latest_funding: dict[str, float] = {}
             self._positions: dict[str, tuple[str, float]] = {}  # inst_id → (dir, contracts)
             self._last_rebalance_hour: int = -1
@@ -398,13 +396,10 @@ if _NT_AVAILABLE:
             )
             filled_1m = 0
             for inst_value, closes_1m in fetched_1m.items():
-                if closes_1m:
-                    # Reseed the deque (drops anything older / preserves maxlen).
-                    dq = self._closes_1m_by_inst.setdefault(
-                        inst_value, deque(maxlen=2000),
-                    )
-                    dq.clear()
-                    dq.extend(closes_1m)
+                if closes_1m and self._vol_filter is not None:
+                    inst_id_okx = inst_value.split(".")[0]
+                    for c in closes_1m:
+                        self._vol_filter.feed_bar(inst_id_okx, c)
                     filled_1m += 1
             if self.config.enable_outlier_guard:
                 self.log.info(
@@ -418,14 +413,13 @@ if _NT_AVAILABLE:
             close_px = bar.close.as_double()
 
             # Dispatch by bar period:
-            #   1m bars → outlier_check cache (separate deque, sized for 1440+ warmup)
+            #   1m bars → VolatilityFilter service buffer (Layer-3 outlier guard)
             #   1D bars → β-hedge cache (capped at beta_window_days + 2)
             # Anything else is logged once and ignored.
             if spec.aggregation == BarAggregation.MINUTE and spec.step == 1:
-                buf_1m = self._closes_1m_by_inst.setdefault(
-                    inst_value, deque(maxlen=2000),
-                )
-                buf_1m.append(close_px)
+                if self._vol_filter is not None:
+                    inst_id_okx = inst_value.split(".")[0]
+                    self._vol_filter.feed_bar(inst_id_okx, close_px)
                 # 1m bars don't gate rebalance / risk — just cache.
                 return
 
@@ -538,12 +532,8 @@ if _NT_AVAILABLE:
                 for inst_value in legs:
                     # 2026-05-26: outlier guard — skip leg if recent vol abnormal
                     if self.config.enable_outlier_guard:
-                        ok, reason = outlier_check(
-                            closes=list(self._closes_1m_by_inst.get(inst_value, [])),
-                            window=self.config.outlier_window_min,
-                            baseline=self.config.outlier_baseline_min,
-                            warmup=self.config.outlier_warmup_min,
-                            ratio_threshold=self.config.outlier_vol_ratio,
+                        ok, reason = self.vol_filter_allow(
+                            inst_value.split(".")[0]
                         )
                         if not ok:
                             self.log.warning(

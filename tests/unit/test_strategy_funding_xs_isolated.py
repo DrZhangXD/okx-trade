@@ -13,6 +13,15 @@ from okx_trade.strategies._isolated_helpers import (
 )
 
 
+def _make_null_log():
+    class _Null:
+        def info(self, *_a, **_kw): pass
+        def warning(self, *_a, **_kw): pass
+        def error(self, *_a, **_kw): pass
+        def debug(self, *_a, **_kw): pass
+    return _Null()
+
+
 # ---------------------------------------------------------------------------
 # compute_leverage
 # ---------------------------------------------------------------------------
@@ -198,7 +207,7 @@ class TestComputeTargetsOutlierGuard:
 # ---------------------------------------------------------------------------
 class TestComputeTargetsIntegration:
     """End-to-end check that ``_compute_target_positions`` actually fires the
-    outlier guard when fed a populated ``_closes_1m_by_inst`` deque.
+    outlier guard when fed via the shared ``VolatilityFilter`` service.
 
     Before the wire-up fix, the guard read from ``_closes_by_inst`` (1D,
     capped at ~32 entries), which is always < warmup=1440 → ``(True,
@@ -209,7 +218,10 @@ class TestComputeTargetsIntegration:
     def mock_strategy(self):
         """Construct a minimal mock that exposes only the attributes
         ``_compute_target_positions`` reads — no real NT runtime."""
-        from collections import deque
+        from okx_trade.risk.volatility_filter import (
+            VolatilityFilter,
+            VolatilityFilterConfig,
+        )
 
         class _MockConfig:
             top_n = 1
@@ -284,11 +296,26 @@ class TestComputeTargetsIntegration:
             calm_iid: [calm_closes_1m[-1]],
             wick_iid: [wicky_closes_1m[-1]],
         }
-        # 1m cache: feeds outlier_check.
-        m._closes_1m_by_inst = {
-            calm_iid: deque(calm_closes_1m, maxlen=2000),
-            wick_iid: deque(wicky_closes_1m, maxlen=2000),
-        }
+        # 1m cache: feeds the shared VolatilityFilter service. The filter is
+        # keyed by OKX inst_id (no ``.OKX`` venue suffix), matching what the
+        # strategy passes from ``inst_value.split(".")[0]``.
+        vol_filter = VolatilityFilter(
+            VolatilityFilterConfig(
+                enable=True,
+                window_min=60,
+                baseline_min=1440,
+                warmup_min=1440,
+                ratio_threshold=3.0,
+                buffer_max=2000,
+            ),
+            log=_make_null_log(),
+        )
+        for px in calm_closes_1m:
+            vol_filter.feed_bar(calm_iid.split(".")[0], px)
+        for px in wicky_closes_1m:
+            vol_filter.feed_bar(wick_iid.split(".")[0], px)
+        m._vol_filter = vol_filter
+
         m._allocated_equity_usdt = 10000.0
         m._inst_ids = []  # not read by _compute_target_positions
 
@@ -298,6 +325,11 @@ class TestComputeTargetsIntegration:
         # Bind _returns staticmethod so _compute_target_positions can call it.
         from okx_trade.strategies.funding_cross_section import FundingXSStrategy
         m._returns = FundingXSStrategy._returns
+
+        # Bind vol_filter_allow from OkxStrategyBase so _compute_target_positions
+        # can route the guard through the shared service.
+        from okx_trade.strategies._okx_base import OkxStrategyBase
+        m.vol_filter_allow = OkxStrategyBase.vol_filter_allow.__get__(m)
 
         return m
 
@@ -339,21 +371,14 @@ class TestComputeTargetsIntegration:
 
         Pre-fix, the guard was wired to ``_closes_by_inst`` (1D, len ≤ 32),
         so it always returned ``(True, "warmup")``. We assert that with a
-        full 1500-bar 1m history, the guard reaches its decision branches
-        (not ``warmup``) for at least one leg.
+        full 1500-bar 1m history, the shared VolatilityFilter reaches its
+        decision branches (not ``warmup``) for the wicky leg.
         """
-        from okx_trade.strategies._isolated_helpers import outlier_check
-
-        # Same data the fixture would feed. If this returns "warmup", the
-        # wire-up is wrong (we'd be looking at 1D instead of 1m).
-        wick_closes = list(mock_strategy._closes_1m_by_inst["WICK-USDT-SWAP.OKX"])
-        ok, reason = outlier_check(
-            closes=wick_closes,
-            window=mock_strategy.config.outlier_window_min,
-            baseline=mock_strategy.config.outlier_baseline_min,
-            warmup=mock_strategy.config.outlier_warmup_min,
-            ratio_threshold=mock_strategy.config.outlier_vol_ratio,
-        )
+        # Route through the same path the strategy uses: vol_filter_allow,
+        # which delegates to VolatilityFilter.allow → outlier_check. If the
+        # filter buffer is too small (wire-up wrong), this comes back
+        # "warmup" and the assertion fails.
+        ok, reason = mock_strategy.vol_filter_allow("WICK-USDT-SWAP")
         assert reason != "warmup", (
             "Outlier guard returned 'warmup' even with 1500 1m bars — "
             "wire-up is wrong, still reading from a too-small cache."
