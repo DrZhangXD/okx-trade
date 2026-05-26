@@ -426,6 +426,49 @@ sudo systemctl stop okx-trade-healthcheck.timer
 
 ---
 
+## 五·B、FundingXS 三层防御 rollback runbook（2026-05-26）
+
+新增 isolated margin + dynamic leverage + outlier guard 防御。两个 enable 开关 + 1 个 margin_mode 让你不重启代码就能逐层关闭。
+
+### 症状 → 操作
+
+| 症状 | 软回滚（改 yaml + restart） |
+|---|---|
+| FundingXS 频繁打 `OUTLIER_SKIP` 日志，开不出腿 | `enable_outlier_guard: false` |
+| set-leverage REST 持续失败（OKX status 异常） | `enable_dynamic_lever: false` → 仍 isolated 但 lever = lever_max |
+| 完全回到事故前行为（cross-margin + lever 10×） | `enable_dynamic_lever: false` + `margin_mode: cross` |
+
+**软回滚步骤**：
+```bash
+# 1. 编辑 configs/strategies/funding_cross_section.yaml
+ssh okx-vps "sudo -u okxtrade vim /home/okxtrade/okx-trade/configs/strategies/funding_cross_section.yaml"
+# 2. 重启服务
+ssh okx-vps "sudo systemctl restart okx-trade.service"
+```
+
+**硬回滚**（git revert merge commit `79796f2`）：
+```bash
+git revert -m 1 79796f2
+git push origin main
+ssh okx-vps "sudo -u okxtrade git -C /home/okxtrade/okx-trade pull --ff-only && sudo systemctl restart okx-trade.service"
+```
+
+### 诊断观察点
+
+- **`OUTLIER_SKIP` 日志**：`journalctl -u okx-trade.service --no-pager | grep OUTLIER_SKIP` — 看拦截频率是否合理（demo 数据噪声大时偶尔触发是正常的）
+- **`set leverage` 日志**：`grep "set leverage"` — 看是否被调用，调用频率是否合理
+- **`set_leverage failed` warning**：grep 看是否有 REST 失败 — 持续失败说明 OKX 那边有问题
+- **OKX 真实持仓 mgnMode**：`sudo -u okxtrade .venv/bin/python -c 'import asyncio; from okx_trade import OKXRestClient, OKXSettings; async def m():\n    async with OKXRestClient(OKXSettings()) as c:\n        pos = await c.transport.request("GET", "/api/v5/account/positions", private=True, group=None)\n        for p in pos: print(f"{p[\"instId\"]} mgnMode={p[\"mgnMode\"]} lever={p.get(\"lever\")}")\nasyncio.run(m())'` — 应该看到 FundingXS 开的腿是 `mgnMode=isolated`
+- **`equities` 表**：每日 snapshot 应该 ≈ OKX totalEq 的 ±5%
+
+### 重要 contextual 提醒
+
+- VPS demo 账户当前 posMode = **`long_short_mode`**（不是 net）。Strategy 启动时自动 query `/account/config` 缓存 posMode，set-leverage 按 leg direction 传 `posSide=LONG/SHORT`。
+- Spec / Plan：`docs/superpowers/specs/2026-05-26-funding-xs-isolated-margin-design.md` (含 §9a addendum)
+- Probe 脚本：`scripts/probe_okx_isolated.py` — 改后想验证 OKX 那边 set-leverage 还是好的，直接 `sudo -u okxtrade .venv/bin/python scripts/probe_okx_isolated.py`
+
+---
+
 ## 六、实盘切换前 checklist
 
 1. ✅ paper trading 至少 7-14 天
