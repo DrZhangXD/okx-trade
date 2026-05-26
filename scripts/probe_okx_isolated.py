@@ -26,7 +26,7 @@ async def main() -> int:
                 inst_id=INST_ID,
                 leverage=TEST_LEVER,
                 mgn_mode=TdMode.ISOLATED,
-                pos_side=None,  # net mode → no posSide
+                pos_side=None,  # net mode → account.py auto-sets posSide=net
             )
         except Exception as exc:
             print(f"FAIL set_leverage: {exc}")

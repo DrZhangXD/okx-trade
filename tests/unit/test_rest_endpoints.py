@@ -279,6 +279,49 @@ class TestAccount:
 
         assert captured["body"]["posSide"] == "long"
 
+    async def test_set_leverage_isolated_no_pos_side_defaults_to_net(self) -> None:
+        """isolated + pos_side=None must auto-include posSide=net (OKX requirement)."""
+        captured: dict[str, Any] = {}
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            captured["body"] = json.loads(req.content)
+            return httpx.Response(200, json={"code": "0", "data": [{}]})
+
+        async with _client(handler) as c:
+            await c.account.set_leverage("DOT-USDT-SWAP", 3, TdMode.ISOLATED)
+
+        assert captured["body"]["mgnMode"] == "isolated"
+        assert captured["body"]["posSide"] == "net"
+
+    async def test_set_leverage_cross_no_pos_side_in_body(self) -> None:
+        """cross mode must NOT include posSide in the request body."""
+        captured: dict[str, Any] = {}
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            captured["body"] = json.loads(req.content)
+            return httpx.Response(200, json={"code": "0", "data": [{}]})
+
+        async with _client(handler) as c:
+            await c.account.set_leverage("BTC-USDT-SWAP", 5, TdMode.CROSS)
+
+        assert "posSide" not in captured["body"]
+        assert captured["body"]["mgnMode"] == "cross"
+
+    async def test_set_leverage_isolated_explicit_long_honors_value(self) -> None:
+        """Explicit pos_side overrides the auto-net default for hedge-mode accounts."""
+        captured: dict[str, Any] = {}
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            captured["body"] = json.loads(req.content)
+            return httpx.Response(200, json={"code": "0", "data": [{}]})
+
+        async with _client(handler) as c:
+            await c.account.set_leverage(
+                "BTC-USDT-SWAP", 10, TdMode.ISOLATED, pos_side=PosSide.LONG,
+            )
+
+        assert captured["body"]["posSide"] == "long"
+
 
 # ============================================================================
 # Trade endpoints
