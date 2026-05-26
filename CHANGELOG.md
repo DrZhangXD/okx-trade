@@ -8,6 +8,23 @@
 
 ## [Unreleased] — Paper trading 观察期
 
+### Fixed / Added (Defense hardening, 2026-05-26)
+
+- **`fix(adapter)`** ([3078d00](https://github.com/DrZhangXD/okx-trade/commit/3078d00)) — `generate_position_status_reports` 按 inst_id 字符串推 `instType` 调 OKX `/account/positions`，修 7 个月 latent bug `51015 Instrument ID doesn't match instrument type`。SWAP / FUTURES / OPTION 各按对应 instType 查，SPOT 直接跳过（positions 端点本就不返 SPOT）。同时把 NT reconcile 看不到真实持仓 → XSMomentum 等策略 reduce-only 拒单 cascade（`sCode 51169`）的源头切断。每次重启从 4-5 个 `positions_failed` warning 变 0。
+- **`fix(funding_xs)`** ([910d6e9](https://github.com/DrZhangXD/okx-trade/commit/910d6e9)) — `_set_leverage_cached` / `_fetch_basis` 剥 NT InstrumentId 的 `.OKX` venue 后缀再调 REST。修 P-Task 16 验证时发现的 `51001 Instrument ID doesn't exist`。
+- **`feat(funding_xs)`** ([79796f2](https://github.com/DrZhangXD/okx-trade/commit/79796f2) merge of Plan 7) — 三层防御 against single-leg wick (2026-05-25 DOT 事故 -$51,128 → 单腿损失上限 ~0.5-5% 账户)。
+  - Layer 1: 每腿 isolated margin (`tags=["td_mode:isolated"]` + OKX `set-leverage` per leg)
+  - Layer 2: 动态 leverage `clip(2 + 3 × |funding_z + basis_z|/2, 2, 10)`
+  - Layer 3: outlier guard，1m bar 独立订阅，近 1h vol > 24h baseline × 3 时跳腿
+  - `_execute_diff` 两阶段提交 — 任一 `set_leverage` 失败 abort 整轮 open-phase，杜绝单向 residual
+  - 配 OKX demo `posMode=long_short_mode` 真实状态（不是 spec 假设的 net mode）
+  - 三个独立 `enable_*` config 开关 + 完整 rollback runbook（`docs/operations.md` §五·B）
+  - 全套 design / plan / addendum 文档 + 30+ TDD 单测
+- **`fix(equity-publisher)`** ([0f46278](https://github.com/DrZhangXD/okx-trade/commit/0f46278)) — strategy `_feed_risk_data` 不再读 NT USDT 单币 `balance_total(USDT)`（事故时账户真实 totalEq $30,518 但 USDT-only 是 $377，写到 equities 表导致 dashboard 误报 99% 回撤）。改读 LiveMonitor 注入的 `_account_total_equity_usdt` cache（账户多币种 totalEq）。13 个 strategy 文件共改。
+- **`fix(reconcile)`** ([771c02a](https://github.com/DrZhangXD/okx-trade/commit/771c02a)) — `reconcile_pnl_from_okx.py` 按日分块拉 bills，绕过 OKX 单调用 20k 上限。高频日（stat_arb_pairs 单日 19,624 fill）下 7 天窗口不再丢早段。新增 `--chunk-hours` flag + hit-cap WARN。
+- **`fix(rest)`** ([ca2a502](https://github.com/DrZhangXD/okx-trade/commit/ca2a502)) — `account.set_leverage` 在 `mgnMode=ISOLATED` + caller 没传 `pos_side` 时自动补 `PosSide.NET`，避免 OKX `51000 Parameter posSide error`。
+- 单测从 803 → **949**（+146 新测，全绿）。
+
 ### Added (P1 — 因子研究实验室 + FactorPortfolioStrategy, 2026-05-19)
 
 - **`feat(rest)`** — `public.get_open_interest` / `get_open_interest_history` / `get_open_interest_history_extended`：OI 当前快照 + 历史回放 + 分页扩展。`models.OpenInterest` / `OpenInterestPoint` 解析。

@@ -204,6 +204,31 @@ NT 重启后多个策略需要数天-数十天的 live 数据累计才能产出�
 
 这把"加一个新因子"的工作量从"写一个新策略类 + yaml + 接入 live_node"压缩到"加一个 `@register_factor` 装饰的函数 + CLI approve"。已落 15 个 v1 因子（momentum / funding-OI / basis / volatility / flow 5 类）。
 
+### 10. Isolated margin per leg + two-phase set-leverage（FundingXS, 2026-05-26）
+
+事故催生：5/25 OKX demo 撮合在 DOT-USDT-SWAP 一根 1m K 内 $1.45 → $121.985 插针，`FundingXSStrategy` 一笔 738 contract short 被强平 -$51,128。根因不是 sizing 失控（单腿 notional 只占账户 1%），是 **cross-margin 让单腿浮亏吃掉整账户**。
+
+修后架构（**仅 FundingXS**，公共抽象在 Phase-1 follow-up）：
+
+- **OKX `set-leverage` per leg**：策略侧维护 `_set_lever_cache: dict[(inst, posSide), lever]`，每次 rebalance 算出 dynamic leverage 后只在 (inst, posSide, lever) 变化时调 REST。Idempotent。
+- **`tdMode=isolated` via OrderTags**：策略下单时附 `tags=["td_mode:isolated"]`，OKX adapter 现有 tag-override 路径透传给 OKX REST。无需改 trader-level `pos_side_mode` 或 OmsType。
+- **Dynamic leverage from edge_score**：`compute_edge_score(funding_z, basis_z, direction, combine_basis)` → `compute_leverage(edge_score, base, slope, lo, hi)`。conviction 越高 leverage 越高 → isolated margin 越小 → 损失上限越低。
+- **Outlier guard at entry**：1m bar 独立订阅到 `_closes_1m_by_inst`，`outlier_check` 计算近 1h vol vs 24h baseline ratio，超阈值跳腿。
+- **`_execute_diff` 两阶段提交**：Phase 1 close 旧腿（无 set-leverage 依赖）；Phase 2 收集要开的腿；Phase 3 pre-validate `set_leverage` for all to-open，任一失败整轮 abort（log `ABORT rebalance` + 0 单 directional residual）；Phase 4 才真正 `submit_order`。
+- **posMode 自检**：strategy 启动时 query `/api/v5/account/config` 缓存 OKX 账户的 `posMode`（`net_mode` / `long_short_mode`）；set-leverage 时按 leg direction 传 `PosSide.LONG` / `PosSide.SHORT`，long_short 账户需要这个，net 账户由 `account.py` 自动补 `PosSide.NET`。
+
+设计目标：单腿最坏损失从"整账户"降到"isolated margin = notional / lever"，即 0.5-5% 账户。完整 spec + plan：
+
+- `docs/superpowers/specs/2026-05-26-funding-xs-isolated-margin-design.md`（含 §9a addendum 记录 long_short_mode 发现）
+- `docs/superpowers/plans/2026-05-26-funding-xs-isolated-margin.md`（17 个 TDD task）
+- Rollback runbook：`docs/operations.md` §五·B
+
+### 11. OKX positions reconcile 按 inst_id 推 instType（2026-05-26）
+
+`adapter/execution.py:generate_position_status_reports` 原来不管 inst_id 是什么都用 `instType=SWAP` 查 `/account/positions`。NT reconcile 时按每个 inst 调一次，basis_arb 的 SPOT 腿或 FUTURES 腿走这条路就被 OKX 拒 `51015 Instrument ID doesn't match instrument type`，NT 拿不到真实持仓 → in-memory state 与 venue 分叉 → 其他策略发 reduce-only 单遭 `51169` 拒。
+
+修后用 `_infer_positions_inst_type(inst_id)` 按字符串格式分类（`*-SWAP` / `*-YYMMDD` / `*-YYMMDD-K-C/P`）传对应 instType；SPOT 直接跳过 query（positions 端点本就不返 SPOT，SPOT 资产走 `/account/balance`）。每次重启从 4-5 个 `positions_failed` warning 变 0，下游 `51169` cascade 也随之消失。
+
 ## 配置文件层级
 
 ```

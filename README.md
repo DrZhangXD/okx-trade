@@ -1,31 +1,31 @@
 # okx-trade
 
-[English](README.en.md) · **简体中文**
+**English** · [简体中文](README.zh.md)
 
-OKX 量化交易全栈：底层 SDK（REST + WebSocket，纯 asyncio）+ NautilusTrader 适配器 + **10 个策略** + 因子研究 lab + 多层风控 + PnL 跟踪 + 监控 + 回测 + VPS 部署脚本。
+Full-stack OKX quant trading: async SDK (REST + WebSocket) + NautilusTrader adapter + **10 strategies** + factor research lab + layered risk pipeline + PnL tracker + monitoring + backtest + VPS deploy scripts.
 
-**当前状态**：Paper trading 在 Aliyun VPS 24/7 跑中（**9 策略并行 enabled**），观察期至 **2026-05-22** → 评估推进 M6（实盘切换 + Telegram alert）。803/803 单测全绿。
+**Status**: paper trading running 24/7 on Aliyun VPS (**9 strategies enabled in parallel**) — observation window extended past the initial **2026-05-22** target while shoring up defensive layers after the 2026-05-25 DOT wick incident. **949/949 unit tests green**. M7 (real-money + Telegram alerts) still gated on the Phase 1 hardening below.
 
 ---
 
 ## Quick Start
 
 ```bash
-# 1) 安装（开发：含 NT + numpy 等策略层）
+# 1) Install (dev mode with NT + numpy strategy layer)
 pip install -e ".[strategy,dev]"
 
-# 2) 配置 OKX 凭证
+# 2) Configure OKX credentials
 cp .env.example .env
-# 编辑 .env，填 OKX_API_KEY / SECRET / PASSPHRASE / IS_DEMO=true
+# Edit .env: OKX_API_KEY / SECRET / PASSPHRASE / IS_DEMO=true
 
-# 3) 跑单测（无网络）
-pytest tests/unit -v             # 803 个
+# 3) Run unit tests (no network)
+pytest tests/unit -v             # 949 tests
 
-# 4) 跑集成测试（需 demo 凭证 + 国内代理）
+# 4) Integration tests (requires demo creds + proxy if in mainland China)
 pytest tests/integration -v -m integration
 ```
 
-## 四层架构
+## Four-layer architecture
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
@@ -33,7 +33,7 @@ pytest tests/integration -v -m integration
 │    FactorRegistry / FactorPanel / grade_factor / walk_forward       │
 │    CLI: list / fetch / eval / grade-all / approve / backtest-...    │
 ├─────────────────────────────────────────────────────────────────────┤
-│  Strategy Layer  (10 NautilusTrader Strategy 子类)                  │
+│  Strategy Layer  (10 NautilusTrader Strategy subclasses)            │
 │    funding_carry / xs_momentum / liq_reversal / basis_arb /         │
 │    ob_imbalance / funding_cross_section / funding_skew_momentum /   │
 │    stat_arb_pairs / option_vol_selling / ml_fusion /                │
@@ -41,7 +41,7 @@ pytest tests/integration -v -m integration
 ├─────────────────────────────────────────────────────────────────────┤
 │  Risk + PnL + Portfolio + Monitor                                   │
 │    KellyCheck / VolTargetCheck / DrawdownCheck /                    │
-│    AccountDrawdownCheck (Phase 0 单源 kill-switch) /                │
+│    AccountDrawdownCheck (Phase 0 single-source kill-switch) /       │
 │    CorrelationCheck / RegimeGateCheck /                             │
 │    PnLTracker / Allocator / LiveMonitor                             │
 ├─────────────────────────────────────────────────────────────────────┤
@@ -51,9 +51,9 @@ pytest tests/integration -v -m integration
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
-详细数据流见 [ARCHITECTURE.md](ARCHITECTURE.md)。
+Detailed data flow: see [ARCHITECTURE.md](ARCHITECTURE.md).
 
-## SDK 用法（最底层）
+## SDK usage (lowest layer)
 
 ### REST
 
@@ -69,7 +69,7 @@ async def main():
 asyncio.run(main())
 ```
 
-### WebSocket 订阅
+### WebSocket subscription
 
 ```python
 import asyncio
@@ -85,228 +85,244 @@ async def main():
 asyncio.run(main())
 ```
 
-更多 SDK 示例见 [`examples/`](examples/)。
+More SDK examples in [`examples/`](examples/).
 
-## 策略层
+## Strategy layer
 
-`src/okx_trade/strategies/` 下的策略全是 `nautilus_trader.trading.strategy.Strategy` 子类，回测和实盘共享同一份代码：
+`src/okx_trade/strategies/` ships strategies as subclasses of `nautilus_trader.trading.strategy.Strategy`. Backtest and live share the same code:
 
-| 策略 | 思路 | 频率 | 当前状态 |
+| Strategy | Idea | Cadence | Status |
 |---|---|---|---|
-| `FundingCarryStrategy` | spot+perp delta-neutral 资金费率套利 | 8h funding cycle | ✅ enabled |
-| `XSMomentumStrategy` | 横截面动量（vol-managed），多空各 5 腿 | 每日 UTC 00:00 rebalance | ✅ enabled |
-| `LiqReversalStrategy` | 强平瀑布反转（z-score on `liquidation-orders`） | 事件驱动 | ✅ enabled |
-| `BasisArbStrategy` (M5) | 交割合约 vs 现货期现套利（spot long + futures short） | 每小时检查 basis | ✅ enabled |
-| `OBImbalanceStrategy` (M5) | 订单流 microprice + book imbalance 微观结构反转 | 秒级聚合，分钟级持仓 | ✅ enabled |
-| `FundingXSStrategy` (M6+) | funding 横截面多空 + β-hedge | 每 8h funding cycle | ✅ enabled (5/19) |
-| `FundingSkewStrategy` (M6+) | funding rate ±2σ 反向 | ~30min poll | ✅ enabled (5/19) |
-| `StatArbStrategy` (M6+) | 协整对（BTC-ETH 等）spread 反转 | 每根 1H bar | ✅ enabled (5/19) |
-| `FactorPortfolioStrategy` (P1) | 通用因子合成器（z-score + top-K，读 yaml 选因子） | bar-driven 4h rebalance | ✅ enabled (5/19) |
-| `OptionVolStrategy` (M6+) | BTC short straddle + perp delta-hedge | 每小时 check | ❌ disabled |
-| `MLFusionStrategy` (M6+) | XGBoost meta（多个 alpha 融合预测 4h forward return） | 每 4h | ❌ disabled |
+| `FundingCarryStrategy` | Spot+perp delta-neutral funding rate carry | 8h funding cycle | ✅ enabled |
+| `XSMomentumStrategy` | Cross-sectional momentum, vol-managed, 5 long + 5 short legs | Daily UTC 00:00 rebalance | ✅ enabled |
+| `LiqReversalStrategy` | Liquidation cascade reversal (z-score on `liquidation-orders`) | Event-driven | ✅ enabled |
+| `BasisArbStrategy` (M5) | Delivery futures vs spot basis arbitrage | Hourly basis check | ✅ enabled |
+| `OBImbalanceStrategy` (M5) | Order-flow microprice + book imbalance microstructure reversion | Sub-second aggregation | ✅ enabled |
+| `FundingXSStrategy` (M6+) | Funding cross-section long/short with β-hedge | 8h funding cycle | ✅ enabled (5/19) |
+| `FundingSkewStrategy` (M6+) | Funding rate ±2σ reversal | ~30min poll | ✅ enabled (5/19) |
+| `StatArbStrategy` (M6+) | Cointegration pair (BTC-ETH default) spread reversal | Per 1H bar | ✅ enabled (5/19) |
+| `FactorPortfolioStrategy` (P1) | Generic factor synthesizer (z-score + top-K, factor list from yaml) | 4h rebalance, bar-driven | ✅ enabled (5/19) |
+| `OptionVolStrategy` (M6+) | BTC short straddle + perp delta-hedge | Hourly check | ❌ disabled |
+| `MLFusionStrategy` (M6+) | XGBoost meta-model fusing multiple alphas | Every 4h | ❌ disabled |
 
-剩 2 策略 disabled：`option_vol_selling` 需 live_node 动态注入 `option_ulys` filter；`ml_fusion` 需 `pip install xgboost` + 写 retrain 脚本。详见 [docs/strategy_roadmap.md](docs/strategy_roadmap.md)。
+Two remain disabled: `option_vol_selling` needs `live_node` to dynamically inject `option_ulys` instrument-provider filter; `ml_fusion` needs `pip install xgboost` + a retrain script. See [docs/strategy_roadmap.md](docs/strategy_roadmap.md).
 
-已下线：`RangeBreakoutStrategy`（M5.X，alpha 弱 + 实现不稳）。
+Retired: `RangeBreakoutStrategy` (M5.X, weak alpha + unstable implementation).
 
-### 冷启动消除：REST warmup
+### Cold-start elimination: REST warmup
 
-`funding_skew_momentum` / `stat_arb_pairs` / `funding_cross_section` / `factor_portfolio` 都在 `on_start` 异步调 OKX REST 拉历史 bars/funding 填 buffer，VPS 重启后即时具备全功能，不用等数天-数十天累计 live 数据。配置项 `warmup_via_rest: bool` 或 `warmup_via_rest_days: int`。
+`funding_skew_momentum` / `stat_arb_pairs` / `funding_cross_section` / `factor_portfolio` all spawn an async OKX REST fetch in `on_start` to pre-fill their history buffers, so on VPS restart they're immediately full-functional instead of waiting days-to-weeks for live data to accumulate. Config knobs: `warmup_via_rest: bool` or `warmup_via_rest_days: int`.
 
-### 因子研究 lab (P1, 2026-05-19)
+### Factor research lab (P1, 2026-05-19)
 
-`okx_trade.research` 模块：CLI 评估任意因子的 IC / IR / decay / turnover / net-PnL，通过 grade 的因子直接喂 yaml 上线给 `FactorPortfolioStrategy`：
+`okx_trade.research` module: a CLI to evaluate arbitrary candidate factors on IC / IR / decay / turnover / net-PnL, and pipe approved factors directly into `FactorPortfolioStrategy` via yaml:
 
 ```bash
-# 拉数据 + 跑 15 个 v1 因子 grade
+# Fetch data + grade 15 v1 factors
 python -m okx_trade.research fetch --start 2025-11-01 --end 2026-05-15 --universe top30
 python -m okx_trade.research grade-all --start 2025-11-01 --end 2026-05-15 --horizon 1d
 
-# approve 通过门槛的因子（写入 configs/factor_portfolio.yaml）
+# Approve a factor that passes the gate (writes configs/factor_portfolio.yaml)
 python -m okx_trade.research approve --factor basis_z_30d --weight 0.40
 
-# 端到端回测
+# End-to-end portfolio backtest
 python -m okx_trade.research backtest-portfolio --total-bars 2000
 ```
 
-详见 [strategy_roadmap.md](docs/strategy_roadmap.md#factor-research-lab-p1-2026-05-19)。
+Details in [strategy_roadmap.md](docs/strategy_roadmap.md#factor-research-lab-p1-2026-05-19).
 
-## 风控管道
+## Risk pipeline
 
-`src/okx_trade/risk/` 提供独立 check，由 `RiskManager` 串联，下单前调一次：
+`src/okx_trade/risk/` provides independent checks chained by `RiskManager`, invoked once before every order:
 
-| Check | 行为 | 层级 |
+| Check | Behavior | Tier |
 |---|---|---|
-| `AccountDrawdownCheck` | OKX `totalEq` 日 -3% / 周 -8% 触发整账户 kill-switch | **账户级（单源单实例）** |
-| `VolTargetCheck` | 按 N 日 realized vol 反推目标仓位 | 策略级 |
-| `KellyCheck` | f\* = (p×R - q)/R，× 0.25 折扣（前 20 笔成交后 PnL tracker 接管动态更新） | 策略级 |
-| `DrawdownCheck` | 日 -3% / 周 -8% 触发熔断（per-strategy；Phase 0 暂未喂数据，Phase 1 接 PnLTracker） | 策略级 |
-| `CorrelationCheck` | 滚动 30 日策略 PnL 相关性 > 0.7 降权 | 策略级 |
-| `RegimeGateCheck` | BTC trending / mean_reverting / neutral，按 strategy_kind 映射缩仓 | 全局 detector |
+| `AccountDrawdownCheck` | OKX `totalEq` -3%/day or -8%/week → halts ALL strategies (kill switch) | **Account (single instance)** |
+| `VolTargetCheck` | Size from N-day realized vol → annualized vol target | Per-strategy |
+| `KellyCheck` | f\* = (p×R - q)/R, × 0.25 fractional Kelly (PnL tracker takes over after first 20 trades) | Per-strategy |
+| `DrawdownCheck` | -3% daily / -8% weekly equity drawdown (per-strategy; Phase 0 not fed, Phase 1 will wire to PnLTracker) | Per-strategy |
+| `CorrelationCheck` | Rolling 30-day strategy PnL correlation > 0.7 → down-weight | Per-strategy |
+| `RegimeGateCheck` | BTC trending / mean_reverting / neutral → scale by `strategy_kind` map | Shared detector |
 
-每个 check 接受 `RiskIntent(intent.size)` → 返回 `APPROVE / SCALE / REJECT`。所有 check 都是纯函数 / 纯状态机，不依赖 NT 运行时。
+Each check accepts `RiskIntent(size)` → returns `APPROVE / SCALE / REJECT`. All checks are pure functions / pure state machines, decoupled from NT runtime.
 
-### DD 架构分层（Phase 0, 2026-05-20）
+### DD architecture split (Phase 0, 2026-05-20)
 
-- **账户级 `AccountDrawdownTracker`**：单例，由 `LiveMonitor` 持有，每次 alloc_refresh 推送 OKX `totalEq` 进去
-- **策略级 `DrawdownTracker`**：每策略各一个，**当前不喂数据**（Phase 1 后续接 PnLTracker 的 per-strategy realized PnL 实现真隔离）
-- 任一 `AccountDrawdownCheck` 触发即所有策略 kill-switch；单源单告警，杜绝之前多源喂 tracker 的 27% 假 breach
+- **Account-level `AccountDrawdownTracker`**: a singleton owned by `LiveMonitor`; each alloc_refresh pushes OKX `totalEq` into it
+- **Per-strategy `DrawdownTracker`**: one per strategy, **currently unfed** (Phase 1 will wire it to per-strategy realized PnL from `PnLTracker` for true single-strategy isolation)
+- Any `AccountDrawdownCheck` breach kill-switches every strategy via a single tracker + single alert, eliminating the 27% phantom-breach cascade caused by the prior multi-source feed.
 
-## PnL 跟踪 + 组合优化
+### FundingXS three-layer defense (2026-05-26)
 
-| 模块 | 用途 |
+Added after a DOT-USDT-SWAP wick on the OKX demo exchange ($1.45 → $121.985 in one 1-minute bar) force-liquidated a `FundingXSStrategy` short and burned -$51,128 of paper equity in a single event. Three independent layers, each with an `enable_*` kill switch in `configs/strategies/funding_cross_section.yaml`:
+
+1. **Isolated margin per leg** — submitted with `tags=["td_mode:isolated"]`; OKX caps each leg's loss to its allocated margin (~0.5–5% of account), making cross-account cascade liquidation impossible.
+2. **Dynamic leverage** — `clip(2 + 3 × |funding_z + basis_z|/2, 2, 10)`. Higher conviction → higher leverage → smaller isolated margin → lower loss ceiling per leg. Spec recasts leverage as an inverted conviction signal.
+3. **Outlier guard** — pre-entry filter: skip a leg if its last-1h realized vol > 3 × the last-24h baseline. 1-minute bar feed is subscribed independently of the strategy's β-hedge 1D feed.
+
+`_execute_diff` does a **two-phase commit**: pre-validate `set_leverage` for every leg in the rebalance; if any fails, abort the entire open-phase to prevent directional residual. Spec + plan + runbook are at:
+
+- [docs/superpowers/specs/2026-05-26-funding-xs-isolated-margin-design.md](docs/superpowers/specs/2026-05-26-funding-xs-isolated-margin-design.md)
+- [docs/superpowers/plans/2026-05-26-funding-xs-isolated-margin.md](docs/superpowers/plans/2026-05-26-funding-xs-isolated-margin.md)
+- Rollback runbook in [`docs/operations.md` §五·B](docs/operations.md)
+
+Phase-1 follow-up: extract `IsolatedMarginPolicy` + `OutlierGuard` as shared risk handles so `FundingCarry` / `XSMomentum` / `FundingSkew` can opt in.
+
+## PnL tracking + portfolio optimization
+
+| Module | Purpose |
 |---|---|
-| `pnl/tracker.py` | 每笔成交 + 每日 equity 写 SQLite (`var/pnl.sqlite`) |
-| `pnl/stats.py` | 算 `win_rate` / `avg_R` / Sharpe / Sortino |
-| `pnl/feed.py` | 把 stats 回灌进 `KellyCheck.set_stats()` / `CorrelationCheck.update_strategy_pnl()` |
-| `portfolio/equal_weight.py` | 冷启动用，4 策略平均分钱 |
-| `portfolio/risk_budget.py` | 30 日数据后切，inverse-vol + correlation penalty |
+| `pnl/tracker.py` | Persists trades + daily equity to SQLite (`var/pnl.sqlite`) |
+| `pnl/stats.py` | Computes `win_rate` / `avg_R` / Sharpe / Sortino |
+| `pnl/feed.py` | Pipes stats into `KellyCheck.set_stats()` / `CorrelationCheck.update_strategy_pnl()` |
+| `portfolio/equal_weight.py` | Cold-start: even split across 4 strategies |
+| `portfolio/risk_budget.py` | Kicks in after 30 days of data: inverse-vol + correlation penalty |
 
-## 监控 + 告警 + 日报
+## Monitoring + alerts + daily report
 
-`src/okx_trade/monitor/`：
+`src/okx_trade/monitor/`:
 
-- **`LiveMonitor`** 每 60s 轮询风控状态，触发条件 emit `Alert`
-- **Sinks**: `LogSink`、`JsonlSink` (`var/alerts.jsonl`)、`TelegramSink`（M6 接入）
-- **`DailyReporter`** 每日把 tracker 数据写 JSON 到 `var/daily_reports/`
+- **`LiveMonitor`** polls risk state every 60s, emits `Alert` on threshold breach
+- **Sinks**: `LogSink`, `JsonlSink` (`var/alerts.jsonl`), `TelegramSink` (M6 wiring)
+- **`DailyReporter`** writes JSON daily reports to `var/daily_reports/`
 
-## 回测
+## Backtest
 
 ```bash
-# xs_momentum 30 天回测
+# xs_momentum 30-day backtest
 .venv/bin/python scripts/backtest.py \
   --strategy xs_momentum \
   --instrument-ids "BTC-USDT-SWAP,ETH-USDT-SWAP,SOL-USDT-SWAP,XRP-USDT-SWAP,DOGE-USDT-SWAP" \
   --signal-bar 1H --total-bars 720 --equity 10000
 
-# funding_carry 1 年现金流估算
+# funding_carry 1-year cashflow estimator
 .venv/bin/python scripts/backtest_funding_carry.py \
   --perp-symbol BTC-USDT-SWAP --total 1095 --equity 10000
 ```
 
-回测引擎是 NautilusTrader 的 `BacktestNode`，数据走 `ParquetDataCatalog`。`scripts/backtest.py --reuse-data` 可复用本地 catalog 跳过下载。
+Backtest engine is NautilusTrader's `BacktestNode`, data via `ParquetDataCatalog`. Use `--reuse-data` to skip download on subsequent runs.
 
-## Live Paper Trading
+## Live paper trading
 
 ```bash
-# 配置校验（不启动 NT）
+# Validate config + universe resolution (no NT engine)
 .venv/bin/python scripts/live.py --check
 
-# 启动 9 策略并行 paper trading（NT TradingNode + monitor）
+# Start 9 strategies in parallel (NT TradingNode + monitor)
 .venv/bin/python scripts/live.py --run
 
-# 仅生成今日 daily report 后退出
+# Generate today's daily report and exit
 .venv/bin/python scripts/live.py --report-only
 ```
 
-VPS 部署见 [deploy/README.md](deploy/README.md)，含 systemd unit + healthcheck timer + bootstrap 脚本。
+VPS deployment: see [deploy/README.md](deploy/README.md), includes systemd unit + healthcheck timer + bootstrap script.
 
-运维手册（incident 应对、诊断脚本、cron 配置）见 [docs/operations.md](docs/operations.md)。
+Operations playbook (incident response, diagnostic scripts, cron config): see [docs/operations.md](docs/operations.md).
 
-观察期里随时拉报告：
+Pull observation report any time:
 
 ```bash
 ssh okx-vps '/home/okxtrade/okx-trade/scripts/observation_report.sh adhoc | xargs cat'
 ```
 
-## 项目结构
+## Project layout
 
 ```
 src/okx_trade/
-├── auth.py                  # HMAC-SHA256 签名（纯函数）
+├── auth.py                  # HMAC-SHA256 signing (pure functions)
 ├── config.py                # OKXSettings (pydantic-settings)
-├── exceptions.py            # OKXAPIError 体系（含 sCode/sMsg 透传）
+├── exceptions.py            # OKXAPIError hierarchy (sCode/sMsg surfacing)
 ├── enums.py                 # InstType / TdMode / Side / OrdType / BarSize ...
-├── models/                  # pydantic v2 数据模型
-├── rest/                    # REST 客户端：account / market / public / trade / transport
-├── ws/                      # WS 客户端：public / private / business 三连接
-├── adapter/                 # NT 适配器：data / execution / parsing / instrument_provider / factories
-├── strategies/              # 10 个策略 + base + confirmation/OFI + pnl_hook + _features
-├── research/                # P1 因子研究 lab：panel / registry / compute / data / grade / store / report / cli + factors/
-├── pricing/                 # Black-Scholes pricer + Greeks（option_vol_selling 用）
-├── risk/                    # vol_target / kelly / drawdown (+ Account 级) / correlation / regime / stats / integration
+├── models/                  # pydantic v2 data models
+├── rest/                    # REST client: account / market / public / trade / transport
+├── ws/                      # WS client: public / private / business (3 connections)
+├── adapter/                 # NT adapter: data / execution / parsing / instrument_provider / factories
+├── strategies/              # 10 strategies + base + confirmation/OFI + pnl_hook + _features
+├── research/                # P1 factor research lab: panel/registry/compute/data/grade/store/report/cli + factors/
+├── pricing/                 # Black-Scholes pricer + Greeks (for option_vol_selling)
+├── risk/                    # vol_target / kelly / drawdown (+ Account-level) / correlation / regime / stats / integration
 ├── pnl/                     # tracker / stats / feed
 ├── portfolio/               # equal_weight / risk_budget
 ├── monitor/                 # alerts / live / daily_report
-├── runtime/                 # live_node：把 yaml + tracker + allocator + account DD tracker 装进 NT TradingNode
+├── runtime/                 # live_node: yaml + tracker + allocator + account-DD-tracker → NT TradingNode
 └── backtest/                # data_loader / runner / plotting / walk_forward
 
 scripts/
-├── live.py                  # paper trading entrypoint (--check / --run / --report-only)
-├── backtest.py              # 多策略回测（--strategy ...）
+├── live.py                  # Paper trading entrypoint (--check / --run / --report-only)
+├── backtest.py              # Multi-strategy backtest (--strategy ...)
 ├── backtest_funding_carry.py
 ├── backtest_oneyear.py
 ├── backtest_m4_smoke.py
-├── healthcheck.py           # systemd timer 调用
-├── observation_report.sh    # day_7 / day_14 评估报告
-├── stat_arb_observe.sh      # stat_arb 24h / lunch 观察
-├── reconcile_okx_positions.py  # ExecStartPre：启动前对账
-├── factor_research_smoke.sh    # 因子 lab end-to-end 烟测
-├── diag_account_bills.py    # OKX 流水诊断（按 type/subType 汇总）
-└── diag_mtm_swing.py        # 当前持仓 + 1H candles MTM 对照
+├── healthcheck.py           # Invoked by systemd timer
+├── observation_report.sh    # day_7 / day_14 evaluation reports
+├── stat_arb_observe.sh      # stat_arb 24h / lunch snapshot
+├── reconcile_okx_positions.py  # ExecStartPre: reconcile before start
+├── factor_research_smoke.sh # Factor lab end-to-end smoke
+├── diag_account_bills.py    # OKX bills diagnostic (grouped by type/subType)
+└── diag_mtm_swing.py        # Current positions + 1H candles MTM correlation
 
 configs/
-├── live.yaml                # 9 enabled 策略 + risk_defaults + portfolio + monitor + alerts
-├── risk.yaml                # 风控参数样板（参考用，live.yaml 内联实际值）
-├── factor_portfolio.yaml    # FactorPortfolioStrategy 配置（5 approved factors）
-└── strategies/*.yaml        # 每个策略的独立参数
+├── live.yaml                # 9 enabled strategies + risk_defaults + portfolio + monitor + alerts
+├── risk.yaml                # Risk parameter reference (live.yaml inlines actual values)
+├── factor_portfolio.yaml    # FactorPortfolioStrategy config (5 approved factors)
+└── strategies/*.yaml        # Per-strategy parameters
 
-deploy/                      # VPS systemd 部署（见 deploy/README.md）
+deploy/                      # VPS systemd deployment (see deploy/README.md)
 docs/
-├── strategy_roadmap.md      # 策略状态 + 工程基础设施 todo
-├── operations.md            # 运维手册（incident 应对、cron、diag 脚本）
-└── superpowers/             # spec / plan 文档（P1 因子 lab 等）
+├── strategy_roadmap.md      # Strategy status + engineering backlog
+├── operations.md            # Operations playbook (incident response, cron, diag scripts)
+└── superpowers/             # Spec / plan docs (P1 factor lab etc.)
 
-tests/unit/                  # 803 个 unit test
-tests/integration/           # 默认 skip，配凭证后手动跑
+tests/unit/                  # 803 unit tests
+tests/integration/           # Skipped by default; run manually with credentials
 ```
 
-## 设计原则
+## Design principles
 
-- 全异步（httpx + websockets）
-- 价格 / 数量用 `Decimal`，杜绝浮点误差
-- SDK 层不依赖 pandas / numpy；策略层按需引入
-- 风控 / PnL / Portfolio 都是纯函数 / 纯状态机，便于单测
-- 策略代码在回测和实盘共享一份（NT 抽象保证）
-- 国内代理通过 `.env` 配置，REST 与 WS 共用
+- Fully async (httpx + websockets)
+- `Decimal` for prices and quantities (no float precision errors)
+- SDK layer has zero pandas / numpy dependency; strategy layer pulls them in via `[strategy]` extras
+- Risk / PnL / Portfolio modules are pure functions / pure state machines for easy unit testing
+- Strategy code is shared between backtest and live (NT abstraction guarantees this)
+- Mainland China proxy via `.env`, shared between REST and WS
 
-## 开发
+## Development
 
 ```bash
-# 运行所有 unit test
+# Run all unit tests
 pytest tests/unit -v
 
-# 跑特定模块
+# Run a specific module
 pytest tests/unit/test_exceptions.py -v
 pytest tests/unit/ -k "kelly or risk" -v
 
-# 类型检查（开发依赖里）
+# Type checking (in dev extras)
 mypy src/
 
 # Lint
 ruff check src/ tests/
 ```
 
-提交规范：Conventional Commits（`feat:` / `fix:` / `refactor:` / `docs:` / `test:`）。
+Commit conventions: [Conventional Commits](https://www.conventionalcommits.org/) (`feat:` / `fix:` / `refactor:` / `docs:` / `test:`).
 
 ## Roadmap
 
 - ✅ **M1**: REST + WS SDK
-- ✅ **M2**: range_breakout (已下线) + funding_carry 策略 + 风控雏形
-- ✅ **M3**: 完整风控管道（vol_target / kelly / drawdown / correlation）
-- ✅ **M3.6**: NT 集成（`RiskAwareStrategy` 在 `submit_order` 前注入）
-- ✅ **M4**: xs_momentum + liq_reversal + OFI confirmation + 回测引擎
-- ✅ **M5**: PnL tracker + portfolio optimizer + monitor + alerts + 日报 + paper trading runtime
-- ✅ **M6+**: 5 个中长期策略（funding_xs / funding_skew / stat_arb / option_vol / ml_fusion）+ regime gate + walk-forward + OPTION 适配
-- ✅ **P1 (2026-05-19)**: 因子研究 lab（15 因子 + grade pipeline + FactorPortfolioStrategy generic synthesizer）
-- ✅ **Phase 0 DD (2026-05-20)**: AccountDrawdownTracker 单源 kill-switch + REST warmup 消除冷启动
-- 🟡 **观察期**：2026-05-08 → **2026-05-22 (day_14)** paper trading
-- 🔲 **Phase 1 DD**: per-strategy DrawdownTracker 接 PnLTracker realized PnL（真隔离）
-- 🔲 **M7**: 实盘切换 + Telegram alert + Portfolio rebalance scheduler
-- 🔲 **M8**: 多账户 / 多 venue 路由 / 期权策略上线 / ml_fusion 上线
+- ✅ **M2**: range_breakout (retired) + funding_carry strategies + risk pipeline scaffolding
+- ✅ **M3**: full risk pipeline (vol_target / kelly / drawdown / correlation)
+- ✅ **M3.6**: NT integration (`RiskAwareStrategy` injects check before `submit_order`)
+- ✅ **M4**: xs_momentum + liq_reversal + OFI confirmation + backtest engine
+- ✅ **M5**: PnL tracker + portfolio optimizer + monitor + alerts + daily report + paper trading runtime
+- ✅ **M6+**: 5 mid-/long-term strategies (funding_xs / funding_skew / stat_arb / option_vol / ml_fusion) + regime gate + walk-forward + OPTION adapter
+- ✅ **P1 (2026-05-19)**: factor research lab (15 factors + grade pipeline + `FactorPortfolioStrategy` generic synthesizer)
+- ✅ **Phase 0 DD (2026-05-20)**: `AccountDrawdownTracker` single-source kill-switch + REST warmup eliminating cold-start
+- 🟡 **Observation window**: 2026-05-08 → **2026-05-22 (day_14)** paper trading
+- 🔲 **Phase 1 DD**: per-strategy `DrawdownTracker` wired to PnLTracker realized PnL (true isolation)
+- 🔲 **M7**: real-money switch + Telegram alerts + portfolio rebalance scheduler
+- 🔲 **M8**: multi-account / multi-venue routing / option strategies on / ml_fusion on
 
-每个里程碑详见 [CHANGELOG.md](CHANGELOG.md)。
+Per-milestone detail: see [CHANGELOG.md](CHANGELOG.md).
 
 ## License
 
-仓库公开可读但**未授予使用许可**——© 2026 DrZhangXD，All Rights Reserved。如需引用 / 二次开发，请先联系作者获取书面许可。
+Source visible but **not licensed for use** — © 2026 DrZhangXD, All Rights Reserved. Contact the author in writing before reuse or derivative work.
