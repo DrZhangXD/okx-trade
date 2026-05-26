@@ -36,6 +36,30 @@ class TestIsolatedMarginServiceInit:
         assert svc._rest is None
 
 
+class TestMakeIsolatedTags:
+    def test_returns_td_mode_isolated(self) -> None:
+        from okx_trade.config import OKXSettings
+        svc = IsolatedMarginService(OKXSettings(), log=_make_null_log())
+        assert svc.make_isolated_tags() == ["td_mode:isolated"]
+
+
+class TestIsBacktest:
+    def test_returns_true_when_api_key_empty(self) -> None:
+        from okx_trade.config import OKXSettings
+        # Default OKXSettings reads from env; force empty api_key
+        settings = OKXSettings(api_key="", secret_key="", passphrase="")
+        svc = IsolatedMarginService(settings, log=_make_null_log())
+        assert svc.is_backtest() is True
+
+    def test_returns_false_when_api_key_set(self) -> None:
+        from okx_trade.config import OKXSettings
+        settings = OKXSettings(
+            api_key="real-key", secret_key="real-secret", passphrase="real-pass",
+        )
+        svc = IsolatedMarginService(settings, log=_make_null_log())
+        assert svc.is_backtest() is False
+
+
 def _make_null_log():
     class _Null:
         def info(self, *_a, **_kw): pass

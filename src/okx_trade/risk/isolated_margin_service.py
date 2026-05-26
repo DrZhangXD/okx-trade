@@ -41,3 +41,24 @@ class IsolatedMarginService:
         self._lever_cache: dict[tuple[str, str], float] = {}
         self._pos_mode: str | None = None
         self._log = log
+
+    def make_isolated_tags(self) -> list[str]:
+        """Convenience: returns ``["td_mode:isolated"]`` for OrderTags."""
+        return ["td_mode:isolated"]
+
+    def is_backtest(self) -> bool:
+        """Heuristic: empty / None api_key → backtest context.
+
+        OKXSettings.api_key is pydantic ``SecretStr``. Empty SecretStr is
+        falsy via ``get_secret_value()``. None is also falsy. Real keys
+        evaluate truthy.
+        """
+        api_key_attr = getattr(self._rest_settings, "api_key", None)
+        if api_key_attr is None:
+            return True
+        # SecretStr: extract underlying value if present; else use as-is
+        try:
+            value = api_key_attr.get_secret_value()
+        except AttributeError:
+            value = api_key_attr
+        return not bool(value)
