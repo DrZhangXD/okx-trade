@@ -153,6 +153,8 @@ try:
     from nautilus_trader.trading.config import StrategyConfig
     from nautilus_trader.trading.strategy import Strategy
 
+    from ._okx_base import OkxStrategyBase
+
     _NT_AVAILABLE = True
 except ImportError:  # pragma: no cover
     _NT_AVAILABLE = False
@@ -193,8 +195,11 @@ if _NT_AVAILABLE:
         reads the panel via read_funding_parquet() and calls feed_funding_panel()
         before any bar subscription. Used for backtest.
         """
+        # 2026-05-26 Phase 1c: isolated margin opt-in (perp leg only)
+        enable_isolated_margin: bool = False
+        isolated_lever: int = 5
 
-    class FundingCarryStrategy(Strategy):  # type: ignore[misc]
+    class FundingCarryStrategy(OkxStrategyBase):  # type: ignore[misc]
         """Funding cash-and-carry：定时拉 funding rate，命中阈值开/平 delta-neutral 组合。
 
         实现细节：
@@ -344,9 +349,9 @@ if _NT_AVAILABLE:
                     f"funding={rate_8h:+.4%}/8h action={action.value} pos={self._has_position}"
                 )
                 if action == CarryAction.ENTER:
-                    self._enter_carry()
+                    await self._enter_carry()
                 elif action == CarryAction.EXIT:
-                    self._exit_carry()
+                    await self._exit_carry()
             except Exception as exc:
                 self.log.error(f"funding check failed: {exc}")
 
@@ -367,7 +372,7 @@ if _NT_AVAILABLE:
             fr = await self._rest.public.get_funding_rate(perp_inst_id_str)
             return float(fr.funding_rate)
 
-        def _enter_carry(self) -> None:
+        async def _enter_carry(self) -> None:
             spot_inst = self.cache.instrument(self.spot_id)
             perp_inst = self.cache.instrument(self.perp_id)
             if spot_inst is None or perp_inst is None or self._latest_spot_price <= 0:
@@ -431,8 +436,51 @@ if _NT_AVAILABLE:
                 quantity=perp_qty_obj,
                 time_in_force=TimeInForce.IOC,
             )
+
+            # 2026-05-26 Phase 1c: isolated-margin opt-in for the PERP leg only.
+            # Spot leg always goes through cash mode (adapter resolve_td_mode
+            # auto-derives cash for SPOT inst_ids — see adapter/execution.py).
+            #
+            # Atomic-pair semantics: if the perp leg's set-leverage pre-check
+            # fails in isolated mode, we abort BEFORE submitting the spot leg
+            # so we never end up with a one-sided (non-delta-neutral) position.
+            if (self.config.enable_isolated_margin
+                    and self._iso_service is not None
+                    and not self._iso_service.is_backtest()):
+                # Resolve pos_side per account posMode for the perp short leg.
+                pos_mode = await self._iso_service.get_pos_mode()
+                if pos_mode == "long_short_mode":
+                    # carry永远 SELL perp → SHORT
+                    from ..enums import PosSide
+                    pos_side = PosSide.SHORT
+                else:
+                    pos_side = None  # net_mode: account.py auto-fills NET
+                perp_inst_okx = self.perp_id.value.split(".")[0]
+                ok, err = await self._iso_service.ensure_leverage(
+                    perp_inst_okx, self.config.isolated_lever, pos_side,
+                )
+                if not ok:
+                    self.log.warning(
+                        f"funding_carry skip enter inst={perp_inst_okx} "
+                        f"(set_leverage failed: {err}); neither leg submitted"
+                    )
+                    return
+
+            # Spot leg: plain cash-mode submit (adapter auto-derives td_mode=cash).
             self.submit_order(spot_order)
-            self.submit_order(perp_order)
+            # Perp leg: isolated-aware helper. ensure_leverage above is a cache
+            # hit so the helper just tags + submits.
+            submitted = await self.submit_isolated_order(
+                perp_order, lever=self.config.isolated_lever,
+            )
+            if not submitted:
+                # Should be impossible — pre-check above already passed; treat
+                # as defensive log. Spot leg is already submitted; record state
+                # so a follow-up _exit_carry can close it.
+                self.log.error(
+                    "funding_carry: perp submit_isolated_order returned False "
+                    "after pre-check passed; spot leg already submitted"
+                )
 
             self._has_position = True
             self._spot_qty = spot_qty
@@ -441,7 +489,7 @@ if _NT_AVAILABLE:
             self._carry_entry_spot_price = self._latest_spot_price
             self.log.info(f"ENTER carry: spot={spot_qty} perp={perp_contracts} contracts")
 
-        def _exit_carry(self) -> None:
+        async def _exit_carry(self) -> None:
             if not self._has_position:
                 return
             spot_inst = self.cache.instrument(self.spot_id)
@@ -477,8 +525,13 @@ if _NT_AVAILABLE:
                 time_in_force=TimeInForce.IOC,
                 reduce_only=True,
             )
+            # 2026-05-26 Phase 1c: spot reduce-only goes through cash mode
+            # (auto-derived by adapter); perp reduce-only goes through the
+            # isolated helper which cache-hits ensure_leverage from enter.
             self.submit_order(spot_close)
-            self.submit_order(perp_close)
+            await self.submit_isolated_order(
+                perp_close, lever=self.config.isolated_lever,
+            )
             self.log.info(
                 f"EXIT carry: spot={self._spot_qty} perp={self._perp_contracts} contracts"
             )
