@@ -242,6 +242,63 @@ class TestEnsureLeverage:
         assert ("BAD-USDT", "long") not in svc._lever_cache
 
 
+class TestBatchEnsureLeverage:
+    @pytest.mark.asyncio
+    async def test_all_succeed_all_ok_true(self) -> None:
+        from okx_trade.config import OKXSettings
+        from okx_trade.enums import PosSide
+        svc = IsolatedMarginService(OKXSettings(), log=_make_null_log())
+
+        class _MockAccount:
+            async def set_leverage(self_inner, **kw): pass
+
+        class _MockRest:
+            account = _MockAccount()
+
+        svc._rest = _MockRest()
+        items = [
+            ("BTC-USDT-SWAP", 5.0, PosSide.LONG),
+            ("ETH-USDT-SWAP", 5.0, PosSide.SHORT),
+        ]
+        result = await svc.batch_ensure_leverage(items)
+        assert result.all_ok is True
+        assert result.failed == []
+
+    @pytest.mark.asyncio
+    async def test_partial_failure_collects_failed_list(self) -> None:
+        from okx_trade.config import OKXSettings
+        from okx_trade.enums import PosSide
+        svc = IsolatedMarginService(OKXSettings(), log=_make_null_log())
+
+        class _MockAccount:
+            async def set_leverage(self_inner, *, inst_id, **kw):
+                if inst_id == "ETH-USDT-SWAP":
+                    raise RuntimeError("OKX 51001: eth broken")
+
+        class _MockRest:
+            account = _MockAccount()
+
+        svc._rest = _MockRest()
+        items = [
+            ("BTC-USDT-SWAP", 5.0, PosSide.LONG),
+            ("ETH-USDT-SWAP", 5.0, PosSide.SHORT),
+            ("SOL-USDT-SWAP", 5.0, PosSide.LONG),
+        ]
+        result = await svc.batch_ensure_leverage(items)
+        assert result.all_ok is False
+        assert len(result.failed) == 1
+        assert result.failed[0][0] == "ETH-USDT-SWAP"
+        assert "51001" in result.failed[0][1]
+
+    @pytest.mark.asyncio
+    async def test_empty_items_all_ok_trivially(self) -> None:
+        from okx_trade.config import OKXSettings
+        svc = IsolatedMarginService(OKXSettings(), log=_make_null_log())
+        result = await svc.batch_ensure_leverage([])
+        assert result.all_ok is True
+        assert result.failed == []
+
+
 def _make_null_log():
     class _Null:
         def info(self, *_a, **_kw): pass

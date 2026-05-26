@@ -151,3 +151,20 @@ class IsolatedMarginService:
                 f"posSide={ps_key} lever={lever}: {err_msg}"
             )
             return False, err_msg
+
+    async def batch_ensure_leverage(
+        self,
+        items: list[tuple[str, float, PosSide | None]],
+    ) -> BatchEnsureResult:
+        """Pre-validate set-leverage for every item. Sequential (preserves
+        OKX rate-limit headroom + makes error attribution clear). Caller
+        (multi-leg strategy) inspects ``all_ok`` and aborts open-phase if
+        False to avoid directional residual.
+        """
+        failed: list[tuple[str, str]] = []
+        for inst_id, lever, pos_side in items:
+            ok, err = await self.ensure_leverage(inst_id, lever, pos_side)
+            if not ok:
+                inst_id_okx = inst_id.split(".")[0]
+                failed.append((inst_id_okx, err or "unknown"))
+        return BatchEnsureResult(all_ok=(not failed), failed=failed)
