@@ -34,9 +34,13 @@ from ..monitor import (
     LogSink,
     MonitorThresholds,
 )
+from ..config import OKXSettings
 from ..pnl import PnLTracker
 from ..portfolio import Allocator, EqualWeightAllocator, RiskBudgetingAllocator
 from ..risk.integration import RiskConfig, RiskHandles
+from ..risk.isolated_margin_service import IsolatedMarginService
+from ..risk.volatility_filter import VolatilityFilter, VolatilityFilterConfig
+from ..utils.logging import get_logger
 
 if TYPE_CHECKING:
     pass
@@ -349,6 +353,29 @@ def build_live_context(
                 "allocated_equity_usdt": float(allocations[name]),
             }
 
+    # 2026-05-26 Phase 1: isolated-margin policy singleton + shared 1m bar
+    # buffer / outlier guard. Both are constructed once here and DI'd into
+    # every OkxStrategyBase subclass (legacy strategies that haven't migrated
+    # yet won't declare the attrs — the hasattr guard skips them silently).
+    # LiveMonitor also holds refs for future diagnostics surfacing.
+    iso_service = IsolatedMarginService(
+        rest_settings=OKXSettings(), log=get_logger("iso_margin"),
+    )
+    vol_cfg_dict = live_cfg.get("volatility_filter") or {}
+    vol_filter = VolatilityFilter(
+        VolatilityFilterConfig(**vol_cfg_dict), log=get_logger("vol_filter"),
+    )
+    for _strategy in strategies.values():
+        # In build_node=False dry-run path, strategies[name] is a plain dict
+        # (no DI surface) — skip. In build_node=True path, every instance
+        # inheriting OkxStrategyBase declares _iso_service / _vol_filter as
+        # class-level defaults; non-migrated strategies (still inheriting
+        # ``Strategy`` directly) just won't accept the assignment.
+        if hasattr(_strategy, "_iso_service"):
+            _strategy._iso_service = iso_service
+        if hasattr(_strategy, "_vol_filter"):
+            _strategy._vol_filter = vol_filter
+
     sinks = _build_sinks(live_cfg)
     monitor_cfg = live_cfg.get("monitor", {}) or {}
     # 周期 alloc refresh:从 live_cfg.account.equity_provider 决定数据源
@@ -376,6 +403,8 @@ def build_live_context(
         regime_bootstrap_days=int(
             (live_cfg.get("regime", {}) or {}).get("bootstrap_days", 400)
         ),
+        iso_service=iso_service,
+        vol_filter=vol_filter,
     ) if handles_map else None
 
     reporter = DailyReporter(
