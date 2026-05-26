@@ -251,6 +251,20 @@ strategies:
 | td_mode 注入 | **strategy attr B 路径** | 侵入面小，其他策略零影响 |
 | Migration | **不主动迁** | 现持仓只有 2 个微仓，roll off 成本低 |
 
+## 9a. Addendum 2026-05-26 — Discovery during P-Task 1
+
+Pre-flight probe revealed **OKX demo 账户实际 `posMode='long_short_mode'`**（不是 spec 假设的 `net`）。set-leverage 在 long_short 账户下要求 `posSide=long` 或 `posSide=short`（不能 net）。
+
+**调整决策**（不改 spec §3-7 主架构）：
+
+1. **不切换 trader-level `pos_side_mode`**——避免影响其他策略的 OmsType 行为（NETTING→HEDGING）。
+2. `_set_leverage_cached(inst, lever, pos_side)` 接受第三个参数：caller 传 `PosSide.LONG`/`PosSide.SHORT` 基于 leg direction。
+3. Strategy 启动时 query `/api/v5/account/config` 一次缓存 `posMode`，根据它决定 set-leverage 的 posSide 参数：
+   - `net_mode` → `posSide=None`（`account.py` 自动补 `PosSide.NET`）
+   - `long_short_mode` → 按 leg direction 传 `PosSide.LONG` / `PosSide.SHORT`
+4. **订单本身不变**：trader pos_side_mode 仍是 `net`，adapter `resolve_pos_side` 见 `pos_side_mode != "long_short"` 返 `None`，不发 posSide 字段。OKX 已经在长这个组合（订单不带 posSide × 账户 long_short）下成功成交（重启后 64+ fill 验证）。
+5. **`account.py:set_leverage` 已有 helper-side auto-fill**（在 P-Task 1 commit `ca2a502`）：`mgn_mode=ISOLATED + pos_side=None` 自动补 `PosSide.NET`。long_short 账户下 caller 必须显式传 LONG/SHORT，不能依赖 helper 默认。
+
 ## 10. 后续工作（out of scope，下次议）
 
 - 抽 `IsolatedMarginPolicy` / `OutlierGuard` 为公共 risk handle，让 FundingCarry / FundingSkew / XSMomentum 接入
