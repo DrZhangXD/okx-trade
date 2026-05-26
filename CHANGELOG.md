@@ -8,6 +8,19 @@
 
 ## [Unreleased] — Paper trading 观察期
 
+### Added / Refactored (Phase 1 — shared isolated-margin services, 2026-05-26 later)
+
+- **`feat(risk)`** ([f738830](https://github.com/DrZhangXD/okx-trade/commit/f738830) merge) — 抽 FundingXS 的 isolated margin + outlier guard 成共享 service，让其他 9 策略可 opt-in。
+  - `IsolatedMarginService`（单例）：posMode cache + (inst, posSide)→lever cache + 共享 OKXRestClient。`ensure_leverage` (idempotent) + `batch_ensure_leverage` (多腿两阶段 commit) + `is_backtest()`。
+  - `VolatilityFilter`（单例）：per-inst 1m close deque + `allow(inst_id)` 包 `outlier_check` 纯函数。
+  - `OkxStrategyBase` thin Strategy base，提供 `submit_isolated_order(order, lever, pos_side)` 7-分支 helper + `vol_filter_allow`。
+  - DI in `build_live_context` + LiveMonitor 持服务引用（同 `account_drawdown_tracker` 路径）。
+  - 新 `volatility_filter:` top-level block in `configs/live.yaml`（全局，不再每策略）。
+- **`refactor(funding_xs)`** — FundingXS 迁完，从 inline state 改为消费 service。`_set_lever_cache` / `_get_account_pos_mode` / `_set_leverage_cached` / `_closes_1m_by_inst` / `_is_backtest_context` 全删。基类换 `OkxStrategyBase`。`_execute_diff` 用 `batch_ensure_leverage`，`_open_leg` 用 `ensure_leverage`。行为等价。
+- Phase 1c-1f（其他 9 策略 opt-in）是后续 PR，每个翻 `enable_isolated_margin: true` yaml flag + 改基类。
+- Spec: `docs/superpowers/specs/2026-05-26-isolated-margin-services-design.md`；Plan: `docs/superpowers/plans/2026-05-26-isolated-margin-services.md`（21 task）。
+- 单测从 949 → **~985**（+~36 新测：service + filter + base 各分支）。
+
 ### Fixed / Added (Defense hardening, 2026-05-26)
 
 - **`fix(adapter)`** ([3078d00](https://github.com/DrZhangXD/okx-trade/commit/3078d00)) — `generate_position_status_reports` 按 inst_id 字符串推 `instType` 调 OKX `/account/positions`，修 7 个月 latent bug `51015 Instrument ID doesn't match instrument type`。SWAP / FUTURES / OPTION 各按对应 instType 查，SPOT 直接跳过（positions 端点本就不返 SPOT）。同时把 NT reconcile 看不到真实持仓 → XSMomentum 等策略 reduce-only 拒单 cascade（`sCode 51169`）的源头切断。每次重启从 4-5 个 `positions_failed` warning 变 0。

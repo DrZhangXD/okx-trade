@@ -223,6 +223,18 @@ NT 重启后多个策略需要数天-数十天的 live 数据累计才能产出�
 - `docs/superpowers/plans/2026-05-26-funding-xs-isolated-margin.md`（17 个 TDD task）
 - Rollback runbook：`docs/operations.md` §五·B
 
+### 10.1 Phase 1：抽成共享 service（2026-05-26 当日 later）
+
+§10 的 FundingXS-specific 实现进了三个共享件，让其他 9 个策略也能 opt-in：
+
+- **`IsolatedMarginService`**（`src/okx_trade/risk/isolated_margin_service.py`）—— 单例：posMode cache + (inst, posSide)→lever cache + 共享 OKXRestClient。`ensure_leverage`（idempotent）+ `batch_ensure_leverage`（多腿两阶段 commit）+ `is_backtest()`。10 个策略复用同一份 cache：FundingXS 设了 DOT/long=5×，后续 XSMomentum 想同样会直接命中 cache 不再调 REST。
+- **`VolatilityFilter`**（`src/okx_trade/risk/volatility_filter.py`）—— 单例：per-inst 1m close deques + `allow(inst_id)`。策略订阅 1m bar 后 `feed_bar()` 投喂；NT DataEngine 自动 dedup 多策略的相同订阅。
+- **`OkxStrategyBase`**（`src/okx_trade/strategies/_okx_base.py`）—— 可选 thin base 继承 NT `Strategy`，提供 `submit_isolated_order(order, lever, pos_side)` 一句调（处理 7 个分支：disabled/no-service/backtest/net-mode/long_short-derive/lever-fail/happy）+ `vol_filter_allow` 便捷包。
+
+DI 在 `runtime/live_node.py` `build_live_context` 里构造服务 + 注入到每个 `OkxStrategyBase` 子类（同 `account_drawdown_tracker` 路径）。`live.yaml` 加 top-level `volatility_filter:` block。
+
+FundingXS 已迁完（Phase 1b）：原 `_set_lever_cache` / `_get_account_pos_mode` / `_set_leverage_cached` / `_closes_1m_by_inst` / `_is_backtest_context` 全删，换成 service 调用，行为等价。Phase 1c-1f 其他 9 个策略按业务优先级逐个 opt-in（独立 PR，每个翻 yaml flag）。
+
 ### 11. OKX positions reconcile 按 inst_id 推 instType（2026-05-26）
 
 `adapter/execution.py:generate_position_status_reports` 原来不管 inst_id 是什么都用 `instType=SWAP` 查 `/account/positions`。NT reconcile 时按每个 inst 调一次，basis_arb 的 SPOT 腿或 FUTURES 腿走这条路就被 OKX 拒 `51015 Instrument ID doesn't match instrument type`，NT 拿不到真实持仓 → in-memory state 与 venue 分叉 → 其他策略发 reduce-only 单遭 `51169` 拒。
