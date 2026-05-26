@@ -37,3 +37,71 @@ class TestComputeLeverage:
     def test_lo_clip(self) -> None:
         # if base were below lo somehow (config error), still clip to lo
         assert compute_leverage(0.0, base=1.0, slope=3.0, lo=2.0, hi=10.0) == 2.0
+
+
+# ---------------------------------------------------------------------------
+# compute_edge_score
+# ---------------------------------------------------------------------------
+class TestComputeEdgeScore:
+    def test_short_positive_funding_positive_edge(self) -> None:
+        # leg is short, funding > universe avg → "going short on high funding"
+        # → strong edge
+        score = compute_edge_score(
+            funding_rate=0.005,
+            funding_universe=[0.001, 0.001, 0.001, 0.001, 0.005],
+            basis=None,
+            basis_universe=None,
+            direction="short",
+            combine_basis=False,
+        )
+        # funding_z of 0.005 in [0.001, 0.001, 0.001, 0.001, 0.005] ≈ 2.0
+        # short direction → sign(+1) × 2.0 → +2.0
+        assert score == pytest.approx(2.0, abs=0.1)
+
+    def test_long_negative_funding_positive_edge(self) -> None:
+        # leg is long, funding < universe avg → "going long on low funding"
+        # → strong edge (mirror of above)
+        score = compute_edge_score(
+            funding_rate=-0.005,
+            funding_universe=[-0.001, -0.001, -0.001, -0.001, -0.005],
+            basis=None,
+            basis_universe=None,
+            direction="long",
+            combine_basis=False,
+        )
+        # funding_z of -0.005 ≈ -2.0; long direction → sign(-1) × -2.0 → +2.0
+        assert score == pytest.approx(2.0, abs=0.1)
+
+    def test_combine_basis_adds_basis_z(self) -> None:
+        # both funding and basis aligned with short → larger edge
+        score = compute_edge_score(
+            funding_rate=0.005,
+            funding_universe=[0.001, 0.005],
+            basis=0.01,
+            basis_universe=[0.001, 0.01],
+            direction="short",
+            combine_basis=True,
+        )
+        # both signals at "high" end → both z ≈ +1; mean = 1; sign(+1) × 1 = 1
+        assert score == pytest.approx(1.0, abs=0.1)
+
+    def test_universe_zero_std_returns_zero(self) -> None:
+        # all identical funding → no edge
+        score = compute_edge_score(
+            funding_rate=0.001,
+            funding_universe=[0.001, 0.001, 0.001],
+            basis=None, basis_universe=None,
+            direction="short",
+            combine_basis=False,
+        )
+        assert score == 0.0
+
+    def test_single_element_universe_returns_zero(self) -> None:
+        score = compute_edge_score(
+            funding_rate=0.005,
+            funding_universe=[0.005],
+            basis=None, basis_universe=None,
+            direction="short",
+            combine_basis=False,
+        )
+        assert score == 0.0
