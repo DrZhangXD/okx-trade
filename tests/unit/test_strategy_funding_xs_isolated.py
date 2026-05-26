@@ -225,3 +225,32 @@ class TestSetLeverageCache:
         assert len(fake_strategy.calls) == 2
         assert fake_strategy.calls[0][1] == 5
         assert fake_strategy.calls[1][1] == 8
+
+
+# ---------------------------------------------------------------------------
+# Integration: _compute_targets respects outlier guard
+# ---------------------------------------------------------------------------
+class TestComputeTargetsOutlierGuard:
+    """We can't construct a real FundingXSStrategy without NT runtime, but we
+    can directly test the underlying outlier_check helper that _compute_targets
+    delegates to — that's the unit-testable contract."""
+
+    def test_calm_market_includes_leg(self) -> None:
+        from okx_trade.strategies._isolated_helpers import outlier_check
+        rng = np.random.default_rng(seed=11)
+        rets = rng.normal(0.0, 0.001, 1500)
+        closes = (100 * np.exp(np.cumsum(rets))).tolist()
+        ok, _ = outlier_check(closes=closes, window=60, baseline=1440,
+                              warmup=1440, ratio_threshold=3.0)
+        assert ok is True
+
+    def test_wicky_market_excludes_leg(self) -> None:
+        from okx_trade.strategies._isolated_helpers import outlier_check
+        rng = np.random.default_rng(seed=11)
+        rets = rng.normal(0.0, 0.001, 1440)
+        spike = rng.normal(0.0, 0.02, 60)  # 20x normal
+        closes = (100 * np.exp(np.cumsum(np.concatenate([rets, spike])))).tolist()
+        ok, reason = outlier_check(closes=closes, window=60, baseline=1440,
+                                    warmup=1440, ratio_threshold=3.0)
+        assert ok is False
+        assert "vol_ratio" in reason

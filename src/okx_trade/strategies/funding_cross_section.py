@@ -39,6 +39,7 @@ from typing import TYPE_CHECKING
 from ..risk import RiskConfig, RiskIntent, apply_risk_manager, build_risk_manager
 from ..risk.stats import rolling_beta
 from .base import effective_equity_usdt
+from ._isolated_helpers import outlier_check
 from .pnl_hook import read_account_total_equity_usdt, record_strategy_equity_daily, record_strategy_trade
 from .qty import safe_make_qty
 
@@ -379,6 +380,21 @@ if _NT_AVAILABLE:
 
             for direction, legs in (("long", long_legs), ("short", short_legs)):
                 for inst_value in legs:
+                    # 2026-05-26: outlier guard — skip leg if recent vol abnormal
+                    if self.config.enable_outlier_guard:
+                        ok, reason = outlier_check(
+                            closes=self._closes_by_inst.get(inst_value, []),
+                            window=self.config.outlier_window_min,
+                            baseline=self.config.outlier_baseline_min,
+                            warmup=self.config.outlier_warmup_min,
+                            ratio_threshold=self.config.outlier_vol_ratio,
+                        )
+                        if not ok:
+                            self.log.warning(
+                                f"funding_xs OUTLIER_SKIP inst={inst_value} "
+                                f"direction={direction} reason={reason}"
+                            )
+                            continue
                     # β-hedge：调整 size，让 portfolio β ≈ 0
                     size_scale = 1.0
                     if self.config.enable_beta_hedge:
