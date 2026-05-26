@@ -42,3 +42,7 @@ risk:
   # M5.X regime gate：xs_momentum 是 momentum 类，趋势市加满、震荡市砍 60%
   enable_regime_gate: true
   regime_strategy_kind: momentum
+
+# 2026-05-26 Phase 1c: isolated margin opt-in
+enable_isolated_margin: true
+isolated_lever: 3

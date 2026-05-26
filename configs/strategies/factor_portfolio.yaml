@@ -1,0 +1,4 @@
+
+# 2026-05-26 Phase 1c: isolated margin opt-in
+enable_isolated_margin: true
+isolated_lever: 3

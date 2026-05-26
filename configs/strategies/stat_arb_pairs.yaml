@@ -33,3 +33,7 @@ risk:
   enable_correlation: false
   enable_regime_gate: false
   regime_strategy_kind: neutral
+
+# 2026-05-26 Phase 1c: isolated margin opt-in
+enable_isolated_margin: true
+isolated_lever: 3
