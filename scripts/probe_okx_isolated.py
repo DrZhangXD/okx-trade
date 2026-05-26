@@ -12,7 +12,7 @@ import asyncio
 import sys
 
 from okx_trade import OKXRestClient, OKXSettings
-from okx_trade.enums import TdMode
+from okx_trade.enums import PosSide, TdMode
 
 INST_ID = "DOT-USDT-SWAP"
 TEST_LEVER = 3
@@ -20,17 +20,43 @@ TEST_LEVER = 3
 
 async def main() -> int:
     settings = OKXSettings()
+    print(f"is_demo={settings.is_demo}")
     async with OKXRestClient(settings) as client:
+        # Step 0: check account config to confirm posMode
         try:
-            await client.account.set_leverage(
-                inst_id=INST_ID,
-                leverage=TEST_LEVER,
-                mgn_mode=TdMode.ISOLATED,
-                pos_side=None,  # net mode → account.py auto-sets posSide=net
+            cfg = await client.transport.request(
+                "GET", "/api/v5/account/config",
+                private=True, group=None,
             )
+            pos_mode = cfg[0].get("posMode") if cfg else "unknown"
+            print(f"account posMode={pos_mode!r}")
         except Exception as exc:
-            print(f"FAIL set_leverage: {exc}")
-            return 1
+            print(f"WARN: could not fetch account config: {exc}")
+            pos_mode = "unknown"
+
+        # Step 1: determine correct posSide for set-leverage
+        # OKX set-leverage isolated rules:
+        #   posMode=net      → posSide=net (or omit — behaviour varies by acct)
+        #   posMode=long_short → posSide=long AND posSide=short (two calls)
+        if pos_mode == "long_short":
+            sides_to_try = [PosSide.LONG, PosSide.SHORT]
+        else:
+            # net mode: account.py auto-defaults to posSide=net
+            sides_to_try = [None]  # None → auto-net via account.py
+
+        for side in sides_to_try:
+            side_label = side.value if side else "net(auto)"
+            try:
+                await client.account.set_leverage(
+                    inst_id=INST_ID,
+                    leverage=TEST_LEVER,
+                    mgn_mode=TdMode.ISOLATED,
+                    pos_side=side,  # None → auto posSide=net for net-mode accounts
+                )
+                print(f"  set_leverage OK for posSide={side_label}")
+            except Exception as exc:
+                print(f"FAIL set_leverage posSide={side_label}: {exc}")
+                return 1
 
         # Verify via GET /api/v5/account/leverage-info
         data = await client.transport.request(
@@ -42,14 +68,14 @@ async def main() -> int:
             print("FAIL: leverage-info returned empty")
             return 1
         for row in data:
-            print(f"  {row}")
+            print(f"  leverage-info row: {row}")
             if row.get("mgnMode") != "isolated":
                 print(f"FAIL: row mgnMode={row.get('mgnMode')} != isolated")
                 return 1
             if str(row.get("lever")) != str(TEST_LEVER):
                 print(f"FAIL: row lever={row.get('lever')} != {TEST_LEVER}")
                 return 1
-        print(f"PASS: {INST_ID} set to isolated lever={TEST_LEVER} (net mode)")
+        print(f"PASS: {INST_ID} set to isolated lever={TEST_LEVER} (posMode={pos_mode})")
         return 0
 
 
