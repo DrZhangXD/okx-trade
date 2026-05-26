@@ -206,6 +206,11 @@ class LiveMonitor:
 
         changed: dict[str, float] = {}
         for name, strategy in self._strategies_by_name.items():
+            # 2026-05-26 fix: 把账户级 totalEq 也下发给策略，让 _feed_risk_data
+            # 写到 equities 表的 snapshot 用真实多币种 NAV 而不是 NT 的 USDT 单币 bal。
+            # 否则 NT USDT bal 在仓位有 BTC/ETH/OKB collateral 时会严重低估
+            # （事故：实际 totalEq $30,518 → NT USDT bal $377 → publisher 写 $377）。
+            strategy._account_total_equity_usdt = float(total_equity)
             new_equity = float(allocations.get(name, 0))
             if new_equity <= 0:
                 continue

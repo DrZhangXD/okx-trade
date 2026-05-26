@@ -39,7 +39,7 @@ from typing import TYPE_CHECKING
 from ..risk import RiskConfig, RiskIntent, apply_risk_manager, build_risk_manager
 from ..risk.stats import rolling_beta
 from .base import effective_equity_usdt
-from .pnl_hook import record_strategy_equity_daily, record_strategy_trade
+from .pnl_hook import read_account_total_equity_usdt, record_strategy_equity_daily, record_strategy_trade
 from .qty import safe_make_qty
 
 if TYPE_CHECKING:
@@ -290,17 +290,9 @@ if _NT_AVAILABLE:
                     self.log.warning("funding_xs: no running loop; skip rebalance")
 
         def _feed_risk_data(self) -> None:
-            handles = self._risk_handles
-            equity_usdt: float | None = None
-            try:
-                account = self.portfolio.account(self._beta_ref_id.venue)
-                if account is not None:
-                    from nautilus_trader.model.currencies import USDT
-                    bal = account.balance_total(USDT)
-                    if bal is not None:
-                        equity_usdt = float(bal.as_decimal())
-            except Exception:
-                equity_usdt = None
+            equity_usdt = read_account_total_equity_usdt(
+                self, fallback_venue=self._beta_ref_id.venue,
+            )
             if equity_usdt is not None:
                 now_ms = int(time.time() * 1000)
                 self._last_equity_day = record_strategy_equity_daily(

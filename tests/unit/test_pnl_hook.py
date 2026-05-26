@@ -8,6 +8,7 @@ import pytest
 from okx_trade.pnl import PnLTracker
 from okx_trade.strategies.pnl_hook import (
     DEFAULT_TAKER_FEE_BPS,
+    read_account_total_equity_usdt,
     realized_pnl_and_r,
     record_strategy_equity_daily,
     record_strategy_trade,
@@ -222,3 +223,35 @@ def test_record_equity_daily_silent_when_tracker_none() -> None:
 def test_utc_day_format() -> None:
     # 1700000000000 ms ≈ 2023-11-14 UTC
     assert utc_day(1_700_000_000_000) == "2023-11-14"
+
+
+# ---------------------------------------------------------------------------
+# read_account_total_equity_usdt — 2026-05-26 fix
+# ---------------------------------------------------------------------------
+class _StubStrategy:
+    """承载 ``_account_total_equity_usdt`` 属性的最小 strategy 替身。"""
+
+    def __init__(self, cached: float | None) -> None:
+        if cached is not None:
+            self._account_total_equity_usdt = cached
+
+
+def test_read_account_total_equity_usdt_uses_cache() -> None:
+    s = _StubStrategy(cached=30518.17)
+    assert read_account_total_equity_usdt(s) == 30518.17
+
+
+def test_read_account_total_equity_usdt_no_cache_no_fallback_returns_none() -> None:
+    s = _StubStrategy(cached=None)
+    assert read_account_total_equity_usdt(s) is None
+
+
+def test_read_account_total_equity_usdt_cache_zero_returns_none() -> None:
+    """cache=0 (provider 早期空状态) 算未填,返回 None,不写脏 snapshot。"""
+    s = _StubStrategy(cached=0.0)
+    assert read_account_total_equity_usdt(s) is None
+
+
+def test_read_account_total_equity_usdt_cache_negative_returns_none() -> None:
+    s = _StubStrategy(cached=-1.0)
+    assert read_account_total_equity_usdt(s) is None

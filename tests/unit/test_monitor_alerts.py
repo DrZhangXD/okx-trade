@@ -358,6 +358,17 @@ async def test_alloc_refresh_writes_equity_to_strategies() -> None:
 
 
 @pytest.mark.asyncio
+async def test_alloc_refresh_writes_account_total_equity_to_strategies() -> None:
+    """2026-05-26 fix: monitor 把账户级 totalEq 也下发,strategy._feed_risk_data
+    把它写进 equities 表的 snapshot,而不是 NT USDT 单币 balance(后者在仓位
+    有非 USDT collateral 时严重低估,2026-05-26 事故)."""
+    mon, _alloc, strategies = await _mk_mon_with_alloc(80000.0)
+    await mon._refresh_allocations()
+    assert strategies["s1"]._account_total_equity_usdt == 80000.0
+    assert strategies["s2"]._account_total_equity_usdt == 80000.0
+
+
+@pytest.mark.asyncio
 async def test_alloc_refresh_provider_returns_none_skips() -> None:
     """provider 返回 None → 不改 strategy 状态。"""
     mon, _alloc, strategies = await _mk_mon_with_alloc(None)

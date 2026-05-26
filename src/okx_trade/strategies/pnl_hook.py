@@ -130,6 +130,41 @@ def utc_day(ts_ms: int) -> str:
     return datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc).strftime("%Y-%m-%d")
 
 
+def read_account_total_equity_usdt(strategy, fallback_venue=None) -> float | None:
+    """读取账户多币种 totalEq（USDT 计），策略 ``_feed_risk_data`` 用。
+
+    优先级：
+      1. ``strategy._account_total_equity_usdt`` —— LiveMonitor 每次 alloc refresh
+         从 OKX ``/api/v5/account/balance`` 拉 ``totalEq``（含 BTC/ETH/OKB 等
+         collateral 折算）后写到 strategy 上。**实盘的唯一正确源**。
+      2. NT ``Portfolio.account(venue).balance_total(USDT)`` 兜底 —— 只看 USDT
+         单币 cash。回测里全 USDT collateral，对得上；实盘里只是 USDT 那部分，
+         **不准**（2026-05-26 事故：账户 totalEq=$30,518 而 NT USDT bal=$377，
+         publisher 把 $377 写进 equities，dashboard 误报 99% 回撤）。
+
+    Args:
+        strategy: NT Strategy 实例，需提供 ``portfolio`` 属性。
+        fallback_venue: 若 cache 缺失，回退到 NT 时用哪个 venue 取账户。``None``
+            则不回退，直接返回 ``None``。
+    """
+    cached = getattr(strategy, "_account_total_equity_usdt", None)
+    if cached is not None and cached > 0:
+        return float(cached)
+    if fallback_venue is None:
+        return None
+    try:
+        account = strategy.portfolio.account(fallback_venue)
+        if account is None:
+            return None
+        from nautilus_trader.model.currencies import USDT
+        bal = account.balance_total(USDT)
+        if bal is None:
+            return None
+        return float(bal.as_decimal())
+    except Exception:
+        return None
+
+
 def record_strategy_equity_daily(
     tracker: PnLTracker | None,
     *,
@@ -164,6 +199,7 @@ def record_strategy_equity_daily(
 
 
 __all__ = [
+    "read_account_total_equity_usdt",
     "realized_pnl_and_r",
     "record_strategy_equity_daily",
     "record_strategy_trade",

@@ -39,7 +39,7 @@ from ..risk import (
     build_risk_manager,
 )
 from .base import BarSnapshot, effective_equity_usdt, position_contracts, to_bar_snapshots
-from .pnl_hook import record_strategy_equity_daily, record_strategy_trade
+from .pnl_hook import read_account_total_equity_usdt, record_strategy_equity_daily, record_strategy_trade
 from .qty import safe_make_qty
 
 LiqSide = Literal["buy", "sell"]
@@ -419,16 +419,9 @@ if _NT_AVAILABLE:
                 handles.vol_target.update_return(inst_id_str, ret)
             self._prev_close = snap.close
 
-            equity_usdt: float | None = None
-            try:
-                account = self.portfolio.account(self._inst_id.venue)
-                if account is not None:
-                    from nautilus_trader.model.currencies import USDT
-                    bal = account.balance_total(USDT)
-                    if bal is not None:
-                        equity_usdt = float(bal.as_decimal())
-            except Exception:
-                equity_usdt = None
+            equity_usdt = read_account_total_equity_usdt(
+                self, fallback_venue=self._inst_id.venue,
+            )
 
             if equity_usdt is not None:
                 # equity 用 wall-clock：snap.ts 是 bar 收线时间，对长 bar（1H/1D）会落到未来。

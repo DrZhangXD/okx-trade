@@ -39,7 +39,7 @@ from .base import (
     position_contracts,
     to_bar_snapshots,
 )
-from .pnl_hook import record_strategy_equity_daily, record_strategy_trade
+from .pnl_hook import read_account_total_equity_usdt, record_strategy_equity_daily, record_strategy_trade
 from .qty import safe_make_qty
 
 State = Literal["idle", "breakout_up", "breakout_down"]
@@ -375,18 +375,11 @@ if _NT_AVAILABLE:
                 handles.vol_target.update_return(inst_id_str, ret)
             self._prev_close = snap.close
 
-            # drawdown + correlation：用 portfolio 当前净值。读不到就跳过
-            equity_usdt: float | None = None
-            try:
-                account = self.portfolio.account(self.instrument_id.venue)
-                if account is not None:
-                    # NT Account 的 ``balance_total`` 是 Money 对象
-                    from nautilus_trader.model.currencies import USDT
-                    bal = account.balance_total(USDT)
-                    if bal is not None:
-                        equity_usdt = float(bal.as_decimal())
-            except Exception:
-                equity_usdt = None  # 回测早期可能还没初始化，静默跳过
+            # drawdown + correlation：实盘走 LiveMonitor 注入的 totalEq cache；
+            # 回测无 monitor，回退到 NT USDT-only balance（全 USDT collateral 时对）。
+            equity_usdt = read_account_total_equity_usdt(
+                self, fallback_venue=self.instrument_id.venue,
+            )
 
             if equity_usdt is not None:
                 # equity 用 wall-clock：snap.ts 是 1H signal_bar 收线时间，会落到未来。

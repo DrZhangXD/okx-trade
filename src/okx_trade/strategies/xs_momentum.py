@@ -39,7 +39,7 @@ from .base import BarBuffer, BarSnapshot, effective_equity_usdt, to_bar_snapshot
 
 # xs_momentum 走每日 rebalance + 增量订单，不存在清晰的"一笔成交"边界，
 # PnL 主要通过 equity snapshot 喂 correlation；不需要 record_strategy_trade。
-from .pnl_hook import record_strategy_equity_daily
+from .pnl_hook import read_account_total_equity_usdt, record_strategy_equity_daily
 from .qty import safe_make_qty
 
 # ---------------------------------------------------------------------------
@@ -413,17 +413,9 @@ if _NT_AVAILABLE:
                 handles.vol_target.update_return(inst_id_str, ret)
             self._prev_close[inst_id_str] = snap.close
 
-            equity_usdt: float | None = None
-            try:
-                venue = self._inst_ids[0].venue
-                account = self.portfolio.account(venue)
-                if account is not None:
-                    from nautilus_trader.model.currencies import USDT
-                    bal = account.balance_total(USDT)
-                    if bal is not None:
-                        equity_usdt = float(bal.as_decimal())
-            except Exception:
-                equity_usdt = None
+            equity_usdt = read_account_total_equity_usdt(
+                self, fallback_venue=self._inst_ids[0].venue,
+            )
 
             if equity_usdt is not None:
                 # equity 用 wall-clock：snap.ts 是 bar 收线时间，对 1D bar 可能在未来。
