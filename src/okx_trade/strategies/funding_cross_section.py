@@ -368,7 +368,7 @@ if _NT_AVAILABLE:
                 # 2) 选股 + 计算 β-hedged 仓位
                 target_positions = self._compute_target_positions()
                 # 3) diff 当前持仓 vs target
-                self._execute_diff(target_positions)
+                await self._execute_diff(target_positions)
                 self.log.info(
                     f"funding_xs rebalanced: open_legs={len(self._positions)} "
                     f"funding_count={len(self._latest_funding)}"
@@ -495,7 +495,7 @@ if _NT_AVAILABLE:
                 return []
             return [(closes[i] / closes[i - 1]) - 1.0 for i in range(1, len(closes))]
 
-        def _execute_diff(self, target: dict[str, _LegTarget]) -> None:
+        async def _execute_diff(self, target: dict[str, _LegTarget]) -> None:
             """把当前 self._positions diff 到 target，平多余腿、开新腿、调整 size。"""
             current = dict(self._positions)
             # 平：当前持有但不在 target，或方向变了
@@ -506,13 +506,13 @@ if _NT_AVAILABLE:
             for inst_value, leg in target.items():
                 cur = self._positions.get(inst_value)
                 if cur is None:
-                    self._open_leg(inst_value, leg.direction, leg.contracts)
+                    await self._open_leg(inst_value, leg)
                 elif cur[0] == leg.direction and abs(cur[1] - leg.contracts) > 1e-6:
                     # 同方向但 size 变 → 简化：先平后开（避免增仓 / 减仓两套 path）
                     self._close_leg(inst_value, cur[0], cur[1])
-                    self._open_leg(inst_value, leg.direction, leg.contracts)
+                    await self._open_leg(inst_value, leg)
 
-        def _open_leg(self, inst_value: str, direction: str, contracts: float) -> None:
+        async def _open_leg(self, inst_value: str, leg: "_LegTarget") -> None:
             inst_id = InstrumentId.from_str(inst_value)
             inst = self.cache.instrument(inst_id)
             if inst is None:
@@ -522,12 +522,11 @@ if _NT_AVAILABLE:
             )
             last_closes = self._closes_by_inst.get(inst_value, [])
             entry_px = last_closes[-1] if last_closes else 0.0
-            # 用 entry_px 当 stop_price 跑 risk（neutral 策略没有 SL 概念）
             intent = RiskIntent(
                 strategy_id=str(self.id),
                 instrument_id=inst_value,
-                direction=direction,  # type: ignore[arg-type]
-                size=contracts,
+                direction=leg.direction,  # type: ignore[arg-type]
+                size=leg.contracts,
                 entry_price=entry_px,
                 stop_price=entry_px,
                 account_equity_usdt=equity,
@@ -537,17 +536,41 @@ if _NT_AVAILABLE:
                 return
             contracts = adjusted
 
+            # 2026-05-26: isolated margin path (live only)
+            use_isolated = (
+                self.config.margin_mode == "isolated"
+                and self.config.enable_dynamic_lever
+                and not self._is_backtest_context()
+            )
+            if use_isolated:
+                pos_mode = await self._get_account_pos_mode()
+                # In long_short_mode, pass leg.pos_side (PosSide.LONG/SHORT).
+                # In net_mode, pass None (account.py auto-fills PosSide.NET).
+                pos_side_arg = leg.pos_side if pos_mode == "long_short_mode" else None
+                ok = await self._set_leverage_cached(inst_value, leg.lever, pos_side_arg)
+                if not ok:
+                    self.log.warning(
+                        f"funding_xs skip leg inst={inst_value} (set_leverage failed)"
+                    )
+                    return
+
             qty_obj = safe_make_qty(inst, contracts, self.log, ctx=f"open {inst_value}")
             if qty_obj is None:
                 return
-            side = OrderSide.BUY if direction == "long" else OrderSide.SELL
+            side = OrderSide.BUY if leg.direction == "long" else OrderSide.SELL
+            tags = ["td_mode:isolated"] if use_isolated else None
             order = self.order_factory.market(
                 instrument_id=inst_id, order_side=side,
                 quantity=qty_obj, time_in_force=TimeInForce.IOC,
+                tags=tags,
             )
             self.submit_order(order)
-            self._positions[inst_value] = (direction, contracts)
-            self.log.info(f"OPEN {direction} {inst_value} qty={contracts}")
+            self._positions[inst_value] = (leg.direction, contracts)
+            self.log.info(
+                f"OPEN {leg.direction} {inst_value} qty={contracts} "
+                f"lever={leg.lever:.1f} edge={leg.edge_score:+.2f} "
+                f"mode={'isolated' if use_isolated else 'cross'}"
+            )
 
         def _close_leg(self, inst_value: str, direction: str, contracts: float) -> None:
             inst_id = InstrumentId.from_str(inst_value)
@@ -590,6 +613,21 @@ if _NT_AVAILABLE:
             )
 
             self._positions.pop(inst_value, None)
+
+        def _is_backtest_context(self) -> bool:
+            """Detect whether we're in NT backtest engine (synchronous, no
+            live REST client). Used to skip set-leverage and fall back to
+            cross mode in backtest, since NT's MarginAccount doesn't model
+            isolated correctly.
+
+            Cheap heuristic: live mode has ``self._rest_settings`` populated
+            with real credentials; backtest fixture passes empty/dummy
+            settings. We check whether the settings look usable.
+            """
+            try:
+                return not bool(getattr(self._rest_settings, "api_key", None))
+            except Exception:
+                return True  # safe default: assume backtest on any error
 
         async def _get_account_pos_mode(self) -> str:
             """Cached fetch of OKX account-level posMode. Values: 'net_mode',
