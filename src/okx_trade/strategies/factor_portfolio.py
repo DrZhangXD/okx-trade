@@ -104,6 +104,8 @@ try:
     from nautilus_trader.trading.config import StrategyConfig
     from nautilus_trader.trading.strategy import Strategy
 
+    from ._okx_base import OkxStrategyBase
+
     _NT_AVAILABLE = True
 except ImportError:  # pragma: no cover
     _NT_AVAILABLE = False
@@ -210,9 +212,12 @@ if _NT_AVAILABLE:
         # spending 30 days warming up. 0 disables (use for backtest).
         warmup_via_rest_days: int = 30
         risk_config: RiskConfig | None = None
+        # 2026-05-26 Phase 1c: isolated margin opt-in
+        enable_isolated_margin: bool = False  # default off, yaml flag flips on
+        isolated_lever: int = 3  # fixed leverage when isolated mode enabled
 
 
-    class FactorPortfolioStrategy(Strategy):  # type: ignore[misc]
+    class FactorPortfolioStrategy(OkxStrategyBase):  # type: ignore[misc]
         """Generic factor portfolio: read approved factors -> synthesize -> top-K trade.
 
         Compatible with the existing risk / pnl / portfolio infrastructure (matches
@@ -485,7 +490,18 @@ if _NT_AVAILABLE:
                 if (self._weights
                         and ts_ms - self._last_rebalance_ms
                         >= self.config.rebalance_hours * 3_600_000):
-                    self._rebalance(ts_ms)
+                    # 2026-05-26 Phase 1c: _rebalance is now async (calls
+                    # await self._open_leg which may await set-leverage).
+                    # Dispatch from sync on_bar via asyncio.create_task,
+                    # mirroring funding_cross_section.on_bar→_rebalance_async.
+                    import asyncio
+                    try:
+                        loop = asyncio.get_running_loop()
+                        loop.create_task(self._rebalance(ts_ms))
+                    except RuntimeError:
+                        self.log.warning(
+                            "factor_portfolio: no running loop; skip rebalance"
+                        )
                     self._last_rebalance_ms = ts_ms
                 return
             if inst_value in self._spot_to_perp:
@@ -549,7 +565,7 @@ if _NT_AVAILABLE:
                 basis_apr=basis_arr if any_basis else None,
             )
 
-        def _rebalance(self, ts_ms: int) -> None:
+        async def _rebalance(self, ts_ms: int) -> None:
             panel = self._build_panel()
             if panel is None:
                 return
@@ -574,14 +590,14 @@ if _NT_AVAILABLE:
 
             for inst_v, direction in target.items():
                 if inst_v not in self._positions:
-                    self._open_leg(inst_v, direction, ts_ms=ts_ms)
+                    await self._open_leg(inst_v, direction, ts_ms=ts_ms)
 
             self.log.info(
                 f"factor_portfolio rebalance: longs={longs} shorts={shorts} "
                 f"open_legs={len(self._positions)}"
             )
 
-        def _open_leg(self, inst_value: str, direction: str, *, ts_ms: int) -> None:
+        async def _open_leg(self, inst_value: str, direction: str, *, ts_ms: int) -> None:
             cfg: FactorPortfolioConfig = self.config  # type: ignore[assignment]
             inst_id = InstrumentId.from_str(inst_value)
             inst = self.cache.instrument(inst_id)
@@ -616,10 +632,19 @@ if _NT_AVAILABLE:
             if qty_obj is None:
                 return
             side = OrderSide.BUY if direction == "long" else OrderSide.SELL
-            self.submit_order(self.order_factory.market(
+            # 2026-05-26 Phase 1c: isolated-margin opt-in. submit_isolated_order
+            # falls back to plain submit_order if enable_isolated_margin=False
+            # or in backtest context.
+            order = self.order_factory.market(
                 instrument_id=inst_id, order_side=side,
                 quantity=qty_obj, time_in_force=TimeInForce.IOC,
-            ))
+            )
+            submitted = await self.submit_isolated_order(
+                order, lever=self.config.isolated_lever,
+            )
+            if not submitted:
+                # set-leverage failed; don't record phantom position
+                return
             self._positions[inst_value] = (direction, adjusted, ts_ms)
             self.log.info(f"OPEN {direction} {inst_value} qty={adjusted}")
 

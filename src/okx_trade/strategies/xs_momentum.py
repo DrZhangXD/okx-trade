@@ -22,6 +22,7 @@ crypto 市场存在显著且稳定的横截面动量：过去 1-7 天涨幅靠�
 """
 from __future__ import annotations
 
+import asyncio
 import time
 from datetime import date, datetime, timezone
 from decimal import Decimal
@@ -267,6 +268,8 @@ try:
     from nautilus_trader.trading.config import StrategyConfig
     from nautilus_trader.trading.strategy import Strategy
 
+    from ._okx_base import OkxStrategyBase
+
     _NT_AVAILABLE = True
 except ImportError:  # pragma: no cover —— pyproject [strategy] extra 未装时的 fallback
     _NT_AVAILABLE = False
@@ -313,9 +316,12 @@ if _NT_AVAILABLE:
         account_equity_usdt: float = 10000.0
         buffer_size: int = 60
         risk_config: RiskConfig | None = None
+        # 2026-05-26 Phase 1c: isolated margin opt-in
+        enable_isolated_margin: bool = False  # default off, yaml flag flips on
+        isolated_lever: int = 3  # fixed leverage when isolated mode enabled
 
 
-    class XSMomentumStrategy(Strategy):  # type: ignore[misc]
+    class XSMomentumStrategy(OkxStrategyBase):  # type: ignore[misc]
         """每日 UTC 0 点 rebalance 的横截面动量策略。
 
         持仓表示：``self._target_contracts[inst_id]`` 正负浮点；
@@ -387,7 +393,17 @@ if _NT_AVAILABLE:
                 return
             if bar_dt.hour < self.config.rebalance_hour_utc:
                 return
-            self._rebalance(today)
+            # 2026-05-26 Phase 1c: _rebalance is now async (calls
+            # await self._submit_delta which awaits set-leverage).
+            # Dispatch from sync on_bar via asyncio.create_task,
+            # mirroring funding_cross_section.on_bar→_rebalance_async.
+            try:
+                loop = asyncio.get_running_loop()
+                loop.create_task(self._rebalance(today))
+            except RuntimeError:
+                self.log.warning(
+                    "xs_momentum: no running loop; skip rebalance"
+                )
 
         def on_stop(self) -> None:
             self.log.info(
@@ -429,7 +445,7 @@ if _NT_AVAILABLE:
                     last_day=self._last_equity_day,
                 )
 
-        def _rebalance(self, today: date) -> None:
+        async def _rebalance(self, today: date) -> None:
             """计算 target 持仓 → diff current → 下增量订单。"""
             cfg: XSMomentumConfig = self.config  # type: ignore[assignment]
 
@@ -481,7 +497,7 @@ if _NT_AVAILABLE:
             deltas = rebalance_orders(current, target)
 
             for inst_id_str, delta in deltas.items():
-                self._submit_delta(inst_id_str, delta)
+                await self._submit_delta(inst_id_str, delta)
 
             self._last_rebalance_date = today
             self._target_contracts = target
@@ -544,7 +560,7 @@ if _NT_AVAILABLE:
                 return 0.0
             return sign * adjusted
 
-        def _submit_delta(self, inst_id_str: str, delta_contracts: float) -> None:
+        async def _submit_delta(self, inst_id_str: str, delta_contracts: float) -> None:
             inst_id = InstrumentId.from_str(inst_id_str)
             inst = self.cache.instrument(inst_id)
             if inst is None:
@@ -566,7 +582,24 @@ if _NT_AVAILABLE:
                     time_in_force=TimeInForce.IOC,
                     reduce_only=reduce_only,
                 )
-                self.submit_order(order)
+                # 2026-05-26 Phase 1c: isolated-margin opt-in. submit_isolated_order
+                # falls back to plain submit_order if enable_isolated_margin=False
+                # or in backtest context. Option B: route both opening AND reducing
+                # legs through the helper — set-leverage on already-set leverage is
+                # a no-op cache hit; the isolated tag doesn't change order semantics.
+                # Per 2026-05-22 incident, _submit_delta is the single funnel for
+                # all rebalance orders, so single-path simplifies the migration.
+                submitted = await self.submit_isolated_order(
+                    order, lever=self.config.isolated_lever,
+                )
+                if not submitted:
+                    # set-leverage failed in isolated mode — skip this leg.
+                    # Don't corrupt _target_contracts; next rebalance will retry.
+                    self.log.warning(
+                        f"rebalance: skip {inst_id_str} qty={qty_signed:+.4f} "
+                        f"(submit_isolated_order returned False)"
+                    )
+                    continue
                 self.log.info(
                     f"rebalance order: {inst_id_str} qty={qty_signed:+.4f} "
                     f"side={side.name} reduce_only={reduce_only} "

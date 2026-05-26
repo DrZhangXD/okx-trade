@@ -52,6 +52,8 @@ try:
     from nautilus_trader.trading.config import StrategyConfig
     from nautilus_trader.trading.strategy import Strategy
 
+    from ._okx_base import OkxStrategyBase
+
     _NT_AVAILABLE = True
 except ImportError:  # pragma: no cover
     _NT_AVAILABLE = False
@@ -101,9 +103,12 @@ if _NT_AVAILABLE:
         # can run coint check immediately instead of waiting weeks of live bars.
         # Disable for backtest (simulated clock + offline data).
         warmup_via_rest: bool = True
+        # 2026-05-26 Phase 1c: isolated margin opt-in
+        enable_isolated_margin: bool = False
+        isolated_lever: int = 3
 
 
-    class StatArbStrategy(Strategy):  # type: ignore[misc]
+    class StatArbStrategy(OkxStrategyBase):  # type: ignore[misc]
         """单 pair 协整套利策略。
 
         状态：
@@ -256,14 +261,26 @@ if _NT_AVAILABLE:
                 self._recompute_cointegration()
                 self._last_coint_check_ms = now_ms
 
-            # 判定信号
+            # 判定信号 — enter/exit are async (isolated-margin two-phase commit);
+            # dispatch via create_task from the sync NT on_bar boundary.
             if self._coint_pvalue >= self.config.coint_pvalue_threshold:
                 # 当前 pair 不可交易；若有持仓就平
                 if self._position is not None:
-                    self._exit_pair(reason="COINT_BROKEN")
+                    self._spawn_async(self._exit_pair(reason="COINT_BROKEN"))
                 return
 
-            self._evaluate_signal()
+            self._spawn_async(self._evaluate_signal())
+
+        def _spawn_async(self, coro) -> None:  # noqa: ANN001
+            """Bridge sync NT on_bar → async enter/exit. Logs + drops on no loop."""
+            try:
+                loop = asyncio.get_running_loop()
+                loop.create_task(coro)
+            except RuntimeError:
+                # No running loop (e.g., pure-sync backtest); close the coroutine
+                # to avoid "coroutine was never awaited" warnings.
+                coro.close()
+                self.log.warning("stat_arb: no running loop; skip async dispatch")
 
         def _feed_risk_data(self) -> None:
             handles = self._risk_handles
@@ -297,7 +314,7 @@ if _NT_AVAILABLE:
                 f"n={n} tradeable={pvalue < self.config.coint_pvalue_threshold}"
             )
 
-        def _evaluate_signal(self) -> None:
+        async def _evaluate_signal(self) -> None:
             if not self._spread_history or len(self._spread_history) < 30:
                 return
             n = min(len(self._closes_left), len(self._closes_right))
@@ -311,28 +328,28 @@ if _NT_AVAILABLE:
             # 出场
             if self._position == "long_spread":
                 if z >= -self.config.spread_z_exit:
-                    self._exit_pair(reason="MEAN_REVERT")
+                    await self._exit_pair(reason="MEAN_REVERT")
                     return
                 if z <= -self.config.spread_z_stop:
-                    self._exit_pair(reason="STOP")
+                    await self._exit_pair(reason="STOP")
                     return
             elif self._position == "short_spread":
                 if z <= self.config.spread_z_exit:
-                    self._exit_pair(reason="MEAN_REVERT")
+                    await self._exit_pair(reason="MEAN_REVERT")
                     return
                 if z >= self.config.spread_z_stop:
-                    self._exit_pair(reason="STOP")
+                    await self._exit_pair(reason="STOP")
                     return
 
             # 入场
             if self._position is None:
                 if z >= self.config.spread_z_entry:
                     # spread 偏高 → 空 spread = 空 left + 多 right
-                    self._enter_pair(direction="short_spread")
+                    await self._enter_pair(direction="short_spread")
                 elif z <= -self.config.spread_z_entry:
-                    self._enter_pair(direction="long_spread")
+                    await self._enter_pair(direction="long_spread")
 
-        def _enter_pair(self, direction: str) -> None:
+        async def _enter_pair(self, direction: str) -> None:
             cfg: StatArbConfig = self.config  # type: ignore[assignment]
             left_inst = self.cache.instrument(self._left_id)
             right_inst = self.cache.instrument(self._right_id)
@@ -391,14 +408,73 @@ if _NT_AVAILABLE:
                 left_side = OrderSide.SELL
                 right_side = OrderSide.BUY
 
-            self.submit_order(self.order_factory.market(
+            left_order = self.order_factory.market(
                 instrument_id=self._left_id, order_side=left_side,
                 quantity=left_qty, time_in_force=TimeInForce.IOC,
-            ))
-            self.submit_order(self.order_factory.market(
+            )
+            right_order = self.order_factory.market(
                 instrument_id=self._right_id, order_side=right_side,
                 quantity=right_qty, time_in_force=TimeInForce.IOC,
-            ))
+            )
+
+            # 2026-05-26 Phase 1c: pair entry is atomic — if isolated margin is
+            # enabled, pre-validate set-leverage for BOTH legs before submitting
+            # either order. If one fails we abort the whole pair to avoid a
+            # directional residual (one leg filled, the other rejected).
+            use_isolated = (
+                cfg.enable_isolated_margin
+                and self._iso_service is not None
+                and not self._iso_service.is_backtest()
+            )
+            if use_isolated:
+                pos_mode = await self._iso_service.get_pos_mode()
+                from ..enums import PosSide
+                if pos_mode == "long_short_mode":
+                    left_pos_side: "PosSide | None" = (
+                        PosSide.LONG if left_side == OrderSide.BUY else PosSide.SHORT
+                    )
+                    right_pos_side: "PosSide | None" = (
+                        PosSide.LONG if right_side == OrderSide.BUY else PosSide.SHORT
+                    )
+                else:
+                    left_pos_side = None
+                    right_pos_side = None
+                lever = cfg.isolated_lever
+                left_inst_okx = self._left_id.value.split(".")[0]
+                right_inst_okx = self._right_id.value.split(".")[0]
+                result = await self._iso_service.batch_ensure_leverage([
+                    (left_inst_okx, lever, left_pos_side),
+                    (right_inst_okx, lever, right_pos_side),
+                ])
+                if not result.all_ok:
+                    self.log.warning(
+                        f"stat_arb ABORT pair entry: set-leverage failed for "
+                        f"{[f[0] for f in result.failed]}; skipping both legs "
+                        f"to avoid directional residual"
+                    )
+                    return  # leave self._position untouched (still None)
+
+            # Submit both legs. submit_isolated_order cache-hits the
+            # ensure_leverage call we just made (Phase 3 of two-phase commit),
+            # and gracefully degrades to plain submit_order when isolated mode
+            # is disabled / backtest / no service.
+            left_submitted = await self.submit_isolated_order(
+                left_order, lever=cfg.isolated_lever,
+            )
+            right_submitted = await self.submit_isolated_order(
+                right_order, lever=cfg.isolated_lever,
+            )
+            if not (left_submitted and right_submitted):
+                # Pre-validation should have caught this; defensive log only.
+                # We don't try to unwind a partial fill here — on_order_rejected
+                # clears _position state and live monitor will close residuals.
+                self.log.warning(
+                    f"stat_arb partial submit despite pre-validate "
+                    f"(left={left_submitted} right={right_submitted}); "
+                    f"position state not recorded"
+                )
+                return
+
             self._position = direction
             self._left_contracts = left_contracts
             self._right_contracts = right_contracts
@@ -410,7 +486,7 @@ if _NT_AVAILABLE:
                 f"right={right_contracts}@{self._last_right_close:.4f}"
             )
 
-        def _exit_pair(self, reason: str) -> None:
+        async def _exit_pair(self, reason: str) -> None:
             if self._position is None:
                 return
             left_inst = self.cache.instrument(self._left_id)
@@ -428,21 +504,28 @@ if _NT_AVAILABLE:
             else:
                 left_side = OrderSide.BUY
                 right_side = OrderSide.SELL
-            self.submit_order(self.order_factory.market(
+            cfg: StatArbConfig = self.config  # type: ignore[assignment]
+            left_order = self.order_factory.market(
                 instrument_id=self._left_id, order_side=left_side,
                 quantity=left_qty, time_in_force=TimeInForce.IOC, reduce_only=True,
-            ))
-            self.submit_order(self.order_factory.market(
+            )
+            right_order = self.order_factory.market(
                 instrument_id=self._right_id, order_side=right_side,
                 quantity=right_qty, time_in_force=TimeInForce.IOC, reduce_only=True,
-            ))
+            )
+            # Reduce-only exits: route through submit_isolated_order for
+            # consistency (cache-hits ensure_leverage; degrades to cross when
+            # opt-in is off / backtest / no service). Two-phase validation is
+            # unnecessary here — closing one leg even if the other rejects
+            # only shrinks the residual, never creates one.
+            await self.submit_isolated_order(left_order, lever=cfg.isolated_lever)
+            await self.submit_isolated_order(right_order, lever=cfg.isolated_lever)
             self.log.info(
                 f"EXIT {self._position} reason={reason} "
                 f"left={self._left_contracts} right={self._right_contracts}"
             )
 
             # 记一笔 PnL（用 left 腿当代表）
-            cfg: StatArbConfig = self.config  # type: ignore[assignment]
             ts_now_ms = int(self.clock.timestamp_ns() // 1_000_000)
             ct_val = float(left_inst.multiplier) if float(left_inst.multiplier) > 0 else 1.0
             direction = "long" if self._position == "long_spread" else "short"

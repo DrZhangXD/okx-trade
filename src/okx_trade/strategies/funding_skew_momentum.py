@@ -56,6 +56,8 @@ try:
     from nautilus_trader.trading.config import StrategyConfig
     from nautilus_trader.trading.strategy import Strategy
 
+    from ._okx_base import OkxStrategyBase
+
     _NT_AVAILABLE = True
 except ImportError:  # pragma: no cover
     _NT_AVAILABLE = False
@@ -143,9 +145,12 @@ if _NT_AVAILABLE:
         reads the panel via read_funding_parquet() and calls feed_funding_panel()
         before any bar subscription. Used for backtest.
         """
+        # 2026-05-26 Phase 1c: isolated margin opt-in
+        enable_isolated_margin: bool = False  # default off, yaml flag flips on
+        isolated_lever: int = 5  # fixed leverage when isolated mode enabled
 
 
-    class FundingSkewStrategy(Strategy):  # type: ignore[misc]
+    class FundingSkewStrategy(OkxStrategyBase):  # type: ignore[misc]
         """每 ~30min poll funding rate，z-score 触发反向交易。"""
 
         def __init__(self, config: FundingSkewConfig) -> None:
@@ -314,11 +319,11 @@ if _NT_AVAILABLE:
                 # 把 current 加入 history（在 decision 之后避免污染本次判定）
                 self._funding_history.append(current)
                 if decision is not None and self._active_direction is None:
-                    self._enter(decision)
+                    await self._enter(decision)
             except Exception as exc:
                 self.log.error(f"funding_skew check failed: {exc}")
 
-        def _enter(self, direction: TradeDir) -> None:
+        async def _enter(self, direction: TradeDir) -> None:
             cfg: FundingSkewConfig = self.config  # type: ignore[assignment]
             inst = self.cache.instrument(self._inst_id)
             if inst is None or self._latest_close <= 0:
@@ -374,7 +379,14 @@ if _NT_AVAILABLE:
                 instrument_id=self._inst_id, order_side=side,
                 quantity=qty_obj, time_in_force=TimeInForce.IOC,
             )
-            self.submit_order(order)
+            # 2026-05-26 Phase 1c: isolated-margin opt-in. Falls back to cross
+            # submit_order if enable_isolated_margin=False or in backtest.
+            submitted = await self.submit_isolated_order(
+                order, lever=self.config.isolated_lever,
+            )
+            if not submitted:
+                # set-leverage failed in isolated mode — bail without recording state
+                return
             self._active_direction = direction
             self._entry_price = entry
             self._stop_price = stop
