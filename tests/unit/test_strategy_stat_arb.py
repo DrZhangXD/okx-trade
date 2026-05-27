@@ -53,3 +53,32 @@ class TestStatArbConfig:
             pair_right="ETH-USDT-SWAP.OKX",
         )
         assert cfg.spread_z_exit < cfg.spread_z_entry < cfg.spread_z_stop
+
+    def test_cooldown_after_exit_default_sane(self) -> None:
+        """2026-05-25 12:38–15:27 三小时打 4394 笔，平均 -$0.32/笔 = -$1,412 USDT。
+
+        z_entry=2.0 / z_exit=0.5 在低波动期会反复触发 enter→exit→enter，
+        每个 round-trip 4 legs × taker fee 把 1.5σ 毛收益吃光。
+
+        必须有 cooldown_sec_after_exit gate（默认 ≥ 1 小时），平仓后强制等
+        一段时间再判信号；和 1H bar 节奏对齐。
+        """
+        cfg = StatArbConfig(
+            pair_left="BTC-USDT-SWAP.OKX",
+            pair_right="ETH-USDT-SWAP.OKX",
+        )
+        # 默认必须 ≥ 1 小时（3600s）。3 小时 4394 笔事件平均 24 笔/分钟，
+        # 一根 1H bar 内最多 1 个 round-trip 已经足够稀疏。
+        assert cfg.cooldown_sec_after_exit >= 3600, (
+            f"cooldown {cfg.cooldown_sec_after_exit}s too short — "
+            f"5/25 churn ran 4394 trades / 3h"
+        )
+
+    def test_cooldown_after_exit_configurable(self) -> None:
+        """可以在 yaml 里覆盖（回测想要更激进时降到 60s）。"""
+        cfg = StatArbConfig(
+            pair_left="BTC-USDT-SWAP.OKX",
+            pair_right="ETH-USDT-SWAP.OKX",
+            cooldown_sec_after_exit=60,
+        )
+        assert cfg.cooldown_sec_after_exit == 60

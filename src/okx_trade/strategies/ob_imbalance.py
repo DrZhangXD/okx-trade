@@ -98,7 +98,10 @@ if _NT_AVAILABLE:
         bar_type: str
         aggregation_sec: int = 1
         imbalance_window_sec: int = 30
-        imbalance_threshold: float = 0.45
+        # M6+.Y (2026-05-27): 5/20-5/27 7d 持续小亏 -$82 / 123 笔（修复后
+        # 胜率从 84% 跌到 28-38%），alpha 不足覆盖 round-trip fee；进一步
+        # 收紧 entry threshold 只接受更强信号。
+        imbalance_threshold: float = 0.55
         microprice_premium_bps: float = 5.0
         hold_max_sec: int = 300
         # M6+.X 修：原 8bp SL 太紧（BTC tick 0.5 USDT，几秒必触发），SL 不
@@ -106,12 +109,14 @@ if _NT_AVAILABLE:
         # 5/18 实测一天 15,944 fills 真实账户亏 -$8,429。改 30bp 让单笔 alpha
         # 有空间覆盖 fee。
         stop_distance_bps: float = 30.0
-        tp_rr_ratio: float = 1.5
+        # M6+.Y: 1.5 → 2.0，TP 从 45bp 拉到 60bp，让赢家更大弥补低胜率
+        tp_rr_ratio: float = 2.0
         # M6+.X 修：reentry cooldown，平仓后 60s 内不能再入场
         reentry_cooldown_sec: int = 60
         # M6+.X 修：reentry 要求 imbalance 先反转（跨过 0）才能再入场，避免同方向连扫
         reentry_requires_reversal: bool = True
-        risk_pct: float = 0.002
+        # M6+.Y: 0.002 → 0.0015，验证期继续压低单笔风险
+        risk_pct: float = 0.0015
         account_equity_usdt: float = 10000.0
         subscribe_books5: bool = True
         depth: int = 5

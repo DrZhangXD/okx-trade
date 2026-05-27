@@ -7,24 +7,25 @@
 instrument_id: BTC-USDT-SWAP.OKX
 bar_type: BTC-USDT-SWAP.OKX-1-MINUTE-LAST-EXTERNAL
 
-# 信号（M6+.X：5/18 死亡螺旋后阈值收紧 + cooldown）
+# 信号（M6+.Y 2026-05-27：M6+.X 修复后 7d 仍持续小亏 -$82/123 笔，
+# 胜率 84% → 28-38%，alpha 不足覆盖 round-trip fee；进一步收紧 + 提 R:R）
 aggregation_sec: 1          # 每秒聚合一次决策
 imbalance_window_sec: 30    # 30s 滚动平均
-imbalance_threshold: 0.45   # M6+.X：0.35→0.45 收紧避免噪声触发
-microprice_premium_bps: 5.0 # M6+.X：3→5 收紧
+imbalance_threshold: 0.55   # M6+.Y：0.45→0.55 进一步收紧，只接受更强信号
+microprice_premium_bps: 5.0 # M6+.X：3→5 收紧（保持）
 depth: 5
 
-# 出场（M6+.X：SL/TP 大幅放宽，原 8bp 几秒必触发）
+# 出场（M6+.Y：tp_rr 1.5→2.0 让赢家更大，弥补低胜率）
 hold_max_sec: 300           # 超过 5min 强平
-stop_distance_bps: 30.0     # M6+.X：8→30bp，BTC 上 ~ $24 stop distance
-tp_rr_ratio: 1.5            # TP = 45bp，需覆盖 fee 10bp + 滑点
+stop_distance_bps: 30.0     # M6+.X：8→30bp，BTC 上 ~ $24 stop distance（保持）
+tp_rr_ratio: 2.0            # M6+.Y：1.5→2.0；TP = 60bp，赢家需覆盖更多输家
 
 # Reentry gate（M6+.X 防 5/18 同方向连扫死亡螺旋）
 reentry_cooldown_sec: 60          # 平仓后 60s 内不能再入场
 reentry_requires_reversal: true   # 平仓后 imbalance 必须穿过 0 反转才能再入场
 
-# 仓位（M6+.X：0.3% → 0.2% 进一步压低）
-risk_pct: 0.002
+# 仓位（M6+.Y：0.2% → 0.15% 继续压低，验证期再缩仓）
+risk_pct: 0.0015
 account_equity_usdt: 10000.0
 
 # 实盘默认开 WS；回测/单测时设 false 改用手动喂帧

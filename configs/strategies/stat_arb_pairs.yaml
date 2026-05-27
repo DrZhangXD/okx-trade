@@ -17,6 +17,11 @@ spread_z_entry: 2.0
 spread_z_exit: 0.5
 spread_z_stop: 3.5
 
+# 2026-05-27: 5/25 12:38–15:27 三小时打 4394 笔 -$1,412 USDT，每笔均损
+# -$0.32 = 1.5σ 毛收益被 4 legs × taker fee 吃光。cooldown 平仓后强制
+# 等 1 小时再判信号，跟 1H bar 节奏对齐，最稀疏 24 round-trip/天。
+cooldown_sec_after_exit: 3600
+
 risk_pct: 0.003
 
 account_equity_usdt: 10000.0

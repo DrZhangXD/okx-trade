@@ -97,6 +97,11 @@ if _NT_AVAILABLE:
         spread_z_exit: float = 0.5
         spread_z_stop: float = 3.5
         risk_pct: float = 0.003
+        # 2026-05-27: 5/25 12:38–15:27 实测三小时打 4394 笔 -$1,412 USDT，
+        # 每笔均损 -$0.32 = 1.5σ 毛收益被 4 legs × taker fee 吃光。
+        # cooldown_sec_after_exit 强制平仓后等一段时间再判信号，跟 1H bar
+        # 节奏对齐。回测可在 yaml 里覆盖到更短。
+        cooldown_sec_after_exit: int = 3600
         account_equity_usdt: float = 10000.0
         risk_config: RiskConfig | None = None
         # Live REST warmup: on_start fetches historical 1H bars so the strategy
@@ -146,6 +151,9 @@ if _NT_AVAILABLE:
             self._entry_left_px: float = 0.0
             self._entry_right_px: float = 0.0
             self._entry_ts_ms: int = 0
+            # 2026-05-27 cooldown gate: 平仓后的 wall-clock ts，
+            # _evaluate_signal 入场分支会拒到 cooldown_sec_after_exit 之后。
+            self._last_exit_ts_ms: int = 0
             self._allocated_equity_usdt: float | None = None
 
             self._risk_manager, self._risk_handles = build_risk_manager(config.risk_config)
@@ -343,6 +351,15 @@ if _NT_AVAILABLE:
 
             # 入场
             if self._position is None:
+                # 2026-05-27 cooldown gate (5/25 4394-trade churn defense):
+                # 平仓后 cooldown_sec_after_exit 内不重新入场，跟 1H bar
+                # 节奏对齐，避免 spread 在 ±2σ 附近反复触发齿轮磨损。
+                if self._last_exit_ts_ms > 0:
+                    now_ms = int(time.time() * 1000)
+                    elapsed_ms = now_ms - self._last_exit_ts_ms
+                    cooldown_ms = self.config.cooldown_sec_after_exit * 1000
+                    if elapsed_ms < cooldown_ms:
+                        return  # cooldown 期内
                 if z >= self.config.spread_z_entry:
                     # spread 偏高 → 空 spread = 空 left + 多 right
                     await self._enter_pair(direction="short_spread")
@@ -548,6 +565,8 @@ if _NT_AVAILABLE:
             self._left_contracts = 0.0
             self._right_contracts = 0.0
             self._entry_ts_ms = 0
+            # 2026-05-27 cooldown gate: 记录 wall-clock ts 供下次入场判定
+            self._last_exit_ts_ms = int(time.time() * 1000)
 
         def on_order_rejected(self, event) -> None:  # noqa: ANN001
             if self._position is None:
