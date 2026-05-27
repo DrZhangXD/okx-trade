@@ -12,14 +12,16 @@
 
 后台调度
 --------
-``run_loop()`` 是 asyncio 死循环，每天 UTC ``0:01:00`` 写一份"刚结束那天"的
-报告（错峰一分钟避开整点 cron 高峰）。``scripts/live.py`` 在 ``--run`` 时通
-过 ``loop.create_task(reporter.run_loop())`` 起来；外部 ``cancel()`` 退出。
+``run_loop()`` 是 asyncio 死循环，每天 UTC ``0:10:00`` 写一份"刚结束那天"的
+报告（让位 ``reconcile_pnl_from_okx.py`` 的 0:05 cron，保证 trades_okx 在
+出报告前已是新一天的权威数据）。``scripts/live.py`` 在 ``--run`` 时通过
+``loop.create_task(reporter.run_loop())`` 起来；外部 ``cancel()`` 退出。
 """
 from __future__ import annotations
 
 import asyncio
 import json
+from collections import defaultdict
 from collections.abc import Awaitable, Callable
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -28,6 +30,36 @@ from pathlib import Path
 from typing import Any
 
 from ..pnl import PnLTracker
+
+# NT-instance-name → snake_case canonical strategy id（与 trades_okx 一致；
+# reconcile_pnl_from_okx.py 写 bills 时用 snake_case bare name）。
+# 保持与 PnLTracker._fetch_trades_okx 内嵌 mapping 同步——下次重构合并到一处。
+_NT_CLASS_TO_CANONICAL: dict[str, str] = {
+    "obimbalance": "ob_imbalance",
+    "fundingcarry": "funding_carry",
+    "xsmomentum": "xs_momentum",
+    "liqreversal": "liq_reversal",
+    "basisarb": "basis_arb",
+    "factorportfolio": "factor_portfolio",
+    "fundingxs": "funding_cross_section",
+    "fundingskew": "funding_skew_momentum",
+    "statarb": "stat_arb_pairs",
+    "optionvol": "option_vol_selling",
+    "mlfusion": "ml_fusion",
+}
+
+
+def _canonical_class_id(strategy_id: str) -> str:
+    """NT 实例 id（e.g. ``FundingCarryStrategy-001``）→ snake_case canonical
+    （``funding_carry``）。
+
+    无 ``Strategy`` 字样的 id（旧式 ``s1``/``s2``、回测 fixture）原样返回 —
+    避免误改无关命名空间。
+    """
+    if "Strategy" not in strategy_id:
+        return strategy_id
+    bare = strategy_id.split("Strategy")[0].lower()
+    return _NT_CLASS_TO_CANONICAL.get(bare, bare)
 
 
 @dataclass(frozen=True, slots=True)
@@ -62,19 +94,46 @@ class DailyReporter:
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
     def build_report(self, date_str: str) -> DailyReport:
-        """构建给定 UTC 日期的报告。"""
+        """构建给定 UTC 日期的报告。
+
+        Dedupe 语义（2026-05-27 修 attribution bug）
+        ----------------------------------------------
+        ``PnLTracker.list_strategies()`` 把 ``trades`` ∪ ``equities`` 表里
+        所有曾出现过的 strategy_id UNION 返回，包含：
+
+        - 当前 NT 进程的活实例（``FundingCarryStrategy-000``）；
+        - 之前部署的死 NT 实例（``FundingCarryStrategy-001`` 等，trades 表残留）。
+
+        而 ``_fetch_trades_okx`` 把 NT 实例名模糊匹配到 snake_case bare name
+        （``funding_carry``），所以**同类的所有 NT 实例都拉到同一份 OKX bills**
+        → 旧实现每个实例 emit 一行 → per_strategy 里出现 N 份完全相同的
+        trade_count/pnl，totals 也被 N 倍夸大。
+
+        修复：按 ``_canonical_class_id`` 把 list_strategies 的结果分桶 →
+        每个 canonical class emit 一行；trade lookup 用 canonical id（直接命中
+        trades_okx 的 snake_case 行）；ending_equity 只看当日 in-window 快照
+        across 桶内所有 NT 实例 → 死实例的多天前 stale equity 不会污染。
+        """
         day_start = int(
             datetime.strptime(date_str, "%Y-%m-%d").replace(tzinfo=timezone.utc).timestamp() * 1000,
         )
         day_end = day_start + 86_400_000
 
+        # 按 canonical class 分桶；每个桶保留组成它的 NT 实例 id 集合
+        buckets: dict[str, list[str]] = defaultdict(list)
+        for sid in self.tracker.list_strategies():
+            buckets[_canonical_class_id(sid)].append(sid)
+
         per_strategy: list[StrategyDailyReport] = []
         total_count = 0
         total_pnl = 0.0
 
-        for sid in self.tracker.list_strategies():
+        for canonical, _ in sorted(buckets.items()):
+            # 用 canonical（snake_case）直接查 — trades_okx 主路径精确命中，
+            # 不再依赖 _fetch_trades_okx 内的模糊回退；同类 N 个 NT 实例不再
+            # 拉到 N 倍重复行。
             trades = [
-                t for t in self.tracker.get_trades(sid, since_ms=day_start)
+                t for t in self.tracker.get_trades(canonical, since_ms=day_start)
                 if t.closed_ts_ms < day_end
             ]
             wins = sum(1 for t in trades if t.pnl_usdt > 0)
@@ -82,11 +141,12 @@ class DailyReporter:
             pnl = float(sum(t.pnl_usdt for t in trades)) if trades else 0.0
             win_rate = wins / count if count else 0.0
 
-            equities = self.tracker.get_equities(sid)
-            ending = float(equities[-1].equity_usdt) if equities else 0.0
+            ending = self._latest_equity_in_window(
+                buckets[canonical], day_start, day_end,
+            )
 
             per_strategy.append(StrategyDailyReport(
-                strategy_id=sid,
+                strategy_id=canonical,
                 trade_count=count,
                 pnl_usdt=pnl,
                 win_rate=win_rate,
@@ -101,6 +161,28 @@ class DailyReporter:
             totals_trade_count=total_count,
             totals_pnl_usdt=total_pnl,
         )
+
+    def _latest_equity_in_window(
+        self, sids: list[str], day_start: int, day_end: int,
+    ) -> float:
+        """桶内最新的 in-window equity 快照（across 所有 NT 实例 id）。
+
+        - in-window = ``day_start <= ts_ms < day_end``；
+        - 多个活实例共享同一账户（observe 同一份 totalEq），取**最新一笔**
+          即代表当日 ending；
+        - 死实例没 in-window 快照（``trades`` 表残留但 ``equities`` 无新写入）
+          → 自动忽略，不污染。
+
+        全员都没 in-window 快照 → 0.0（信号：这个 class 今日完全死了）。
+        """
+        latest_ts = -1
+        latest_eq = 0.0
+        for sid in sids:
+            for snap in self.tracker.get_equities(sid, since_ms=day_start):
+                if snap.ts_ms < day_end and snap.ts_ms > latest_ts:
+                    latest_ts = snap.ts_ms
+                    latest_eq = float(snap.equity_usdt)
+        return latest_eq
 
     def write_for_date(self, date_str: str) -> Path:
         """构建报告并写到 ``output_dir/{date}.json``，返回路径。"""
@@ -118,12 +200,19 @@ class DailyReporter:
 
     @staticmethod
     def _next_run_at(now: datetime) -> datetime:
-        """下一次写报告时间：下一个 UTC 0:01:00。"""
-        today_001 = now.replace(hour=0, minute=1, second=0, microsecond=0)
-        if now < today_001:
-            return today_001
+        """下一次写报告时间：下一个 UTC 0:10:00。
+
+        为什么 0:10 而不是 0:01？``scripts/reconcile_pnl_from_okx.py`` 在
+        UTC 0:05 跑（cron），把 OKX bills 写入 ``trades_okx``。daily_report 必须
+        等 reconcile 完成 → 否则报告里 trades_okx 还没今天的 bills，class 显示
+        0 trades（2026-05-26 prod bug：StatArbStrategy-008 实有 5501 笔但
+        报告 0 trades）。
+        """
+        today_010 = now.replace(hour=0, minute=10, second=0, microsecond=0)
+        if now < today_010:
+            return today_010
         return (now + timedelta(days=1)).replace(
-            hour=0, minute=1, second=0, microsecond=0,
+            hour=0, minute=10, second=0, microsecond=0,
         )
 
     async def run_loop(
@@ -134,7 +223,7 @@ class DailyReporter:
         on_write: Callable[[Path], None] | None = None,
         on_error: Callable[[BaseException], None] | None = None,
     ) -> None:
-        """死循环，每个 UTC 0:01 写"刚结束那天"的 daily report。
+        """死循环，每个 UTC 0:10 写"刚结束那天"的 daily report。
 
         ``scripts/live.py`` 在 ``--run`` 入口调 ``loop.create_task(reporter.run_loop())``；
         外部 ``task.cancel()`` 退出（CancelledError 由调用方处理）。
