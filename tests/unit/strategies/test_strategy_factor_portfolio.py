@@ -48,6 +48,28 @@ def test_cross_section_zscore_returns_nan_when_no_variance() -> None:
     assert np.all(np.isnan(z))
 
 
+def test_cross_section_zscore_all_nan_input_silent() -> None:
+    """All-NaN input must return all-NaN WITHOUT emitting numpy
+    RuntimeWarning. Regression for log spam at funding hours when
+    history-hungry factors (funding_z_30d, basis_z_30d) return all-NaN
+    rows before the 30-day rolling window is warm.
+    """
+    import warnings
+    vals = np.array([np.nan, np.nan, np.nan])
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")  # promote RuntimeWarning → exception
+        z = cross_section_zscore(vals)
+    assert np.all(np.isnan(z))
+
+
+def test_cross_section_zscore_empty_input_silent() -> None:
+    import warnings
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        z = cross_section_zscore(np.array([], dtype=float))
+    assert z.shape == (0,)
+
+
 def test_synthesize_score_combines_factors_by_weight() -> None:
     # Create close prices with 25 bars, 3 instruments, different momentum profiles
     closes = np.zeros((25, 3))
@@ -151,6 +173,38 @@ def test_factor_portfolio_strategy_subscribes_spot_pairs_by_default() -> None:
         "ETH-USDT.OKX": "ETH-USDT-SWAP.OKX",
     }
     assert len(s._spot_bar_types) == 2
+
+
+def test_missing_factor_log_event_dedupes_steady_state() -> None:
+    """Pure transition decider. Same skipped set across rebalances →
+    after the first call, returns None (silent). Regression for the
+    4-hourly "skipped factors ['basis_apr','basis_z_30d']" log spam.
+    """
+    from okx_trade.strategies.factor_portfolio import _missing_factor_log_event
+
+    basis_skip = frozenset({"basis_apr", "basis_z_30d"})
+
+    # First occurrence (None → any set) → emit at warning level
+    ev = _missing_factor_log_event(basis_skip, last_logged=None)
+    assert ev is not None and ev[0] == "warning"
+    assert "basis_apr" in ev[1] and "basis_z_30d" in ev[1]
+
+    # Steady state (same set re-evaluated) → silent
+    assert _missing_factor_log_event(basis_skip, last_logged=basis_skip) is None
+
+    # Skip-set narrows (one factor recovered, one still skipped) → emit warn
+    ev = _missing_factor_log_event(frozenset({"basis_z_30d"}), last_logged=basis_skip)
+    assert ev is not None and ev[0] == "warning"
+    assert "basis_z_30d" in ev[1]
+
+    # Recovery (set → empty) → emit info with "previously skipped" context
+    ev = _missing_factor_log_event(frozenset(), last_logged=basis_skip)
+    assert ev is not None and ev[0] == "info"
+    assert "all factors active" in ev[1] and "basis_apr" in ev[1]
+
+    # Steady all-clear (None or empty → empty) → silent
+    assert _missing_factor_log_event(frozenset(), last_logged=frozenset()) is None
+    assert _missing_factor_log_event(frozenset(), last_logged=None) is None
 
 
 def test_factor_portfolio_strategy_disable_spot_subscription() -> None:

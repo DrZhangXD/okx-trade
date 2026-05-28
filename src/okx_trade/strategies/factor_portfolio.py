@@ -25,7 +25,21 @@ class FactorWeight:
 
 
 def cross_section_zscore(vals: np.ndarray) -> np.ndarray:
-    """Per-row z-score across instruments. NaN-safe. Returns all-NaN if std=0."""
+    """Per-row z-score across instruments. NaN-safe. Returns all-NaN if std=0
+    or input is empty / fully NaN (without polluting the log with numpy
+    ``RuntimeWarning: Mean of empty slice / Degrees of freedom <= 0``).
+
+    The all-NaN path fires routinely in live before history is warm — e.g.
+    ``funding_z_30d`` requires 720 hourly bars; pre-warm it returns
+    all-NaN per row → here. Caller (``synthesize_score``) treats all-NaN as
+    "skip this factor", so guarding here is purely log hygiene; behavior is
+    unchanged.
+    """
+    if vals.size == 0:
+        return np.full_like(vals, np.nan, dtype=float)
+    # Avoid numpy's nanmean/nanstd RuntimeWarnings on all-NaN input.
+    if not np.any(np.isfinite(vals)):
+        return np.full_like(vals, np.nan, dtype=float)
     mu = np.nanmean(vals)
     sd = np.nanstd(vals)
     if not np.isfinite(sd) or sd == 0:
@@ -74,6 +88,35 @@ def synthesize_score(
     if used_weight == 0:
         return np.full(panel.n, np.nan, dtype=float), missing
     return accumulated, missing
+
+
+def _missing_factor_log_event(
+    new_missing: frozenset[str],
+    last_logged: frozenset[str] | None,
+) -> tuple[str, str] | None:
+    """Decide whether to emit a "skipped factors" log based on transitions.
+
+    Returns ``(level, msg)`` to emit, or ``None`` to stay silent. ``level``
+    is ``"warning"`` (new / changed skip) or ``"info"`` (recovered).
+
+    Steady-state (identical missing set across consecutive calls) is silent —
+    avoids the 4-hourly basis_apr / basis_z_30d log spam in live where those
+    factors are permanently skipped due to spot-instrument unavailability.
+
+    Pure function so it's trivially testable without instantiating the NT
+    Strategy (whose ``self.log`` is read-only Cython and can't be patched).
+    """
+    if new_missing == last_logged:
+        return None
+    if new_missing:
+        return ("warning", f"factor_portfolio: skipped factors {sorted(new_missing)}")
+    if last_logged:
+        return (
+            "info",
+            "factor_portfolio: all factors active "
+            f"(previously skipped {sorted(last_logged)})",
+        )
+    return None
 
 
 def select_top_bot(
@@ -271,6 +314,11 @@ if _NT_AVAILABLE:
             self._allocated_equity_usdt: float | None = None
             self._weights = [FactorWeight(id=fid, weight=w)
                              for fid, w in config.factor_weights]
+            # Dedupe "skipped factors" log — emit only when the set changes
+            # (e.g. basis_apr starts NaN at startup, becomes available once
+            # warmup lands). Sentinel None = "not logged yet"; empty set =
+            # explicit transition-to-clean. Stops 4-hourly spam in steady state.
+            self._last_logged_missing: frozenset[str] | None = None
             self._risk_manager, self._risk_handles = build_risk_manager(config.risk_config)
             self._pnl_tracker = None  # type: ignore[var-annotated]
 
@@ -337,6 +385,22 @@ if _NT_AVAILABLE:
                 self._warmup_task.cancel()
                 self._warmup_task = None
             self.log.info(f"factor_portfolio stop; open_legs={len(self._positions)}")
+
+        def _log_missing_factors(self, missing: list[str]) -> None:
+            """Dispatch to ``_missing_factor_log_event`` (pure transition
+            decider) and emit at the chosen level. State stored on the
+            instance to thread across rebalance ticks.
+            """
+            missing_set = frozenset(missing)
+            event = _missing_factor_log_event(missing_set, self._last_logged_missing)
+            self._last_logged_missing = missing_set
+            if event is None:
+                return
+            level, msg = event
+            if level == "warning":
+                self.log.warning(msg)
+            else:
+                self.log.info(msg)
 
         def _load_warmup_panel(self, path: str) -> None:
             """Pre-populate buffers from a fetch_panel parquet cache (offline path)."""
@@ -570,8 +634,7 @@ if _NT_AVAILABLE:
             if panel is None:
                 return
             score, missing = synthesize_score(panel, self._weights)
-            if missing:
-                self.log.warning(f"factor_portfolio: skipped factors {missing}")
+            self._log_missing_factors(missing)
             if not np.any(np.isfinite(score)):
                 self.log.warning("factor_portfolio: all-NaN score; no trades this round")
                 return
