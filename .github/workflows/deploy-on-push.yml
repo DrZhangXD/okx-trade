@@ -55,6 +55,17 @@ jobs:
              cd /home/okxtrade/okx-trade
              echo "=== Before pull ==="
              git log -1 --oneline
+             # Robustness: accidental local edits on VPS (hot-patches, sudo vi
+             # mistakes) historically broke `git pull --ff-only` and aborted
+             # 4 deploys in May 25–27. Auto-stash modified tracked files so
+             # deploy keeps flowing; the stash entry is named with timestamp
+             # for forensics (`git stash list` to recover).
+             if ! git diff --quiet || ! git diff --cached --quiet; then
+               STASH_MSG="ci-auto-stash before deploy $(date -Iseconds)"
+               echo "=== Working tree dirty; stashing as: $STASH_MSG ==="
+               git diff --stat
+               git stash push -m "$STASH_MSG"
+             fi
              git pull --ff-only origin main
              echo "=== After pull ==="
              git log -1 --oneline
