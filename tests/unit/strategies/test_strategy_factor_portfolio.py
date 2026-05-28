@@ -175,6 +175,53 @@ def test_factor_portfolio_strategy_subscribes_spot_pairs_by_default() -> None:
     assert len(s._spot_bar_types) == 2
 
 
+def test_ffill_basis_columns_bridges_gaps() -> None:
+    """Bounded column-wise ffill: small gaps filled, gaps >max_lookback stay NaN."""
+    from okx_trade.strategies.factor_portfolio import _ffill_basis_columns
+
+    arr = np.array([
+        [0.01, 0.02],   # row 0: both valid
+        [np.nan, 0.03], # row 1: col0 gap (1 row), col1 valid
+        [np.nan, np.nan],  # row 2: col0 gap (2), col1 gap (1)
+        [np.nan, np.nan],  # row 3: col0 gap (3), col1 gap (2)
+        [0.04, np.nan], # row 4: col0 recovered, col1 gap (3) — still in window
+    ])
+    _ffill_basis_columns(arr, max_lookback=3)
+    # col 0: row 1/2/3 filled from row 0 (gap 1/2/3 ≤ 3 = window)
+    assert arr[1, 0] == pytest.approx(0.01)
+    assert arr[2, 0] == pytest.approx(0.01)
+    assert arr[3, 0] == pytest.approx(0.01)
+    assert arr[4, 0] == pytest.approx(0.04)
+    # col 1: row 2/3/4 filled from row 1 (gap 1/2/3 ≤ 3)
+    assert arr[2, 1] == pytest.approx(0.03)
+    assert arr[3, 1] == pytest.approx(0.03)
+    assert arr[4, 1] == pytest.approx(0.03)
+
+
+def test_ffill_basis_columns_respects_max_lookback() -> None:
+    from okx_trade.strategies.factor_portfolio import _ffill_basis_columns
+
+    arr = np.array([
+        [0.01],
+        [np.nan],
+        [np.nan],
+        [np.nan],
+        [np.nan],  # row 4: gap 4 > window 3 → stays NaN
+    ])
+    _ffill_basis_columns(arr, max_lookback=3)
+    assert arr[1, 0] == pytest.approx(0.01)
+    assert arr[2, 0] == pytest.approx(0.01)
+    assert arr[3, 0] == pytest.approx(0.01)  # gap 3 = window → still fills
+    assert np.isnan(arr[4, 0])               # gap 4 > window → stale, leave NaN
+
+
+def test_ffill_basis_columns_empty_array_is_noop() -> None:
+    from okx_trade.strategies.factor_portfolio import _ffill_basis_columns
+    arr = np.empty((0, 0), dtype=float)
+    _ffill_basis_columns(arr, max_lookback=24)  # must not raise
+    assert arr.shape == (0, 0)
+
+
 def test_missing_factor_log_event_dedupes_steady_state() -> None:
     """Pure transition decider. Same skipped set across rebalances →
     after the first call, returns None (silent). Regression for the

@@ -90,6 +90,30 @@ def synthesize_score(
     return accumulated, missing
 
 
+def _ffill_basis_columns(arr: np.ndarray, *, max_lookback: int) -> None:
+    """Column-wise forward-fill of NaN cells, bounded by ``max_lookback`` rows.
+
+    Mutates ``arr`` in place. After ``arr[row, col]=NaN`` cells are filled
+    from the most recent non-NaN row above (within the lookback window).
+    Used to bridge transient gaps in basis_arr (spot WS dropped a few bars)
+    without papering over truly stale data (>``max_lookback`` rows old → still
+    NaN, factor gets skipped downstream).
+    """
+    T, N = arr.shape
+    if T == 0 or N == 0:
+        return
+    for col in range(N):
+        last_idx = -max_lookback - 1
+        last_val = np.nan
+        for row in range(T):
+            v = arr[row, col]
+            if not np.isnan(v):
+                last_val = v
+                last_idx = row
+            elif (row - last_idx) <= max_lookback and not np.isnan(last_val):
+                arr[row, col] = last_val
+
+
 def _missing_factor_log_event(
     new_missing: frozenset[str],
     last_logged: frozenset[str] | None,
@@ -614,6 +638,13 @@ if _NT_AVAILABLE:
                     if spot_v is not None and spot_v > 0 and perp_v is not None:
                         basis_arr[row, col] = (perp_v - spot_v) / spot_v
                         any_basis = True
+            # 2026-05-28: forward-fill basis values within each column so a
+            # transient spot WS gap (or warmup-only state where live spot bars
+            # haven't started arriving yet) doesn't blank the factor's last
+            # row → "skipped factors" log → 70% factor weight dead.
+            # Bounded ffill window (24 1H bars) so genuinely stale (>1d) data
+            # still gets dropped and the factor explicitly skipped.
+            _ffill_basis_columns(basis_arr, max_lookback=24)
 
             # funding_rate / open_interest: forward-fill from polled (ts, val) deques
             # to the canonical perp ts axis. Empty buffers → array stays NaN → factor

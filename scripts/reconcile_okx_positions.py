@@ -39,6 +39,22 @@
 
     # 生产 systemd 调:
     ExecStartPre=-/path/to/.venv/bin/python scripts/reconcile_okx_positions.py
+
+已知副作用：HEDGING 模式下的 "Received fill for closed position" 警告
+---------------------------------------------------------------------
+本脚本通过 ``/api/v5/trade/close-position`` 直接下平仓单，这条路径绕开
+NT 自己的订单 / 仓位 cache。restart 后 NT 的 ExecEngine 经过 external
+reconciliation 拉取 OKX 真实仓位，但同时也会收到本脚本平仓单产生的
+fill 事件 —— 对 NT cache 而言，这些 fill 对应"已经被 reconcile 视为关闭"
+的 position，NT 因此在日志里打：
+
+    [WARN] ExecEngine: Received fill for closed position X-USDT-SWAP.OKX-EXTERNAL
+    in HEDGING mode; creating new position and ignoring previous state
+
+警告本身无害（NT 会创建新 position 跟踪 fill；reconciliation 完成后状态
+对齐）。频次：每次 restart 集中爆几十条；steady-state 为 0。如要彻底
+消除，需要把 close-position 改成走 NT 自己的 submit_order(reduce_only=True)
+路径——但那就失去本脚本"在 NT 起来之前清干净"的解耦设计。
 """
 from __future__ import annotations
 
