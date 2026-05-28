@@ -28,6 +28,7 @@ from datetime import date, datetime, timezone
 from decimal import Decimal
 from typing import TYPE_CHECKING
 
+from ..enums import PosSide
 from ..risk import (
     RiskConfig,
     RiskIntent,
@@ -496,6 +497,11 @@ if _NT_AVAILABLE:
                        for iid in self._inst_ids}
             deltas = rebalance_orders(current, target)
 
+            # 4a) 2026-05-28: pre-validate set-leverage for all to-open legs
+            # before any order is submitted. Mirrors funding_xs Phase 3 guard.
+            if not await self._validate_isolated_leverage(target):
+                return
+
             for inst_id_str, delta in deltas.items():
                 await self._submit_delta(inst_id_str, delta)
 
@@ -559,6 +565,63 @@ if _NT_AVAILABLE:
             if adjusted is None or adjusted <= 0:
                 return 0.0
             return sign * adjusted
+
+        async def _validate_isolated_leverage(
+            self, target: dict[str, float],
+        ) -> bool:
+            """Pre-validate set-leverage for every to-be-held instrument so a
+            partial-failure can't open with directional residual.
+
+            Returns True when:
+              - not in isolated mode (cross fallback — no leverage check needed)
+              - ``_iso_service`` is None / in backtest (mocked path)
+              - every (inst, posSide) in ``target`` returned ok from
+                ``batch_ensure_leverage``
+
+            Returns False when any leg's set-leverage fails (e.g. lingering
+            OKX 51290 / 50004 past our retry window). Caller MUST abort the
+            entire rebalance — both opens and closes — because:
+              1. opens with partial coverage = directional residual until next
+                 rebalance window;
+              2. closes happen to be safe to execute alone, but the abort
+                 also skips them for simplicity. Funding_xs separates
+                 close-phase from open-phase; here a fresh rebalance next
+                 bar (1h) is usually sooner than the OKX outage lasts.
+
+            Empty target → trivially True (no opens to validate).
+            """
+            use_isolated = (
+                getattr(self.config, "enable_isolated_margin", False)
+                and self._iso_service is not None
+                and not self._iso_service.is_backtest()
+            )
+            if not use_isolated:
+                return True
+
+            pos_mode = await self._iso_service.get_pos_mode()
+            to_open_items: list[tuple[str, float, PosSide | None]] = []
+            for inst_id_str, signed_qty in target.items():
+                if signed_qty == 0:
+                    continue
+                ps = (
+                    (PosSide.LONG if signed_qty > 0 else PosSide.SHORT)
+                    if pos_mode == "long_short_mode" else None
+                )
+                to_open_items.append(
+                    (inst_id_str, float(self.config.isolated_lever), ps),
+                )
+            if not to_open_items:
+                return True
+
+            result = await self._iso_service.batch_ensure_leverage(to_open_items)
+            if not result.all_ok:
+                self.log.warning(
+                    f"xs_momentum ABORT rebalance: set-leverage failed for "
+                    f"{[f[0] for f in result.failed]}; skipping all orders "
+                    f"this round to avoid directional residual"
+                )
+                return False
+            return True
 
         async def _submit_delta(self, inst_id_str: str, delta_contracts: float) -> None:
             inst_id = InstrumentId.from_str(inst_id_str)

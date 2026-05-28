@@ -326,3 +326,130 @@ class TestPlanDeltaOrders:
         # 镜像
         out2 = plan_delta_orders(current=-5.0, delta=9.0)
         assert out2[0][0] > 0 and out2[1][0] > 0  # 都是 BUY 方向
+
+
+# ---------------------------------------------------------------------------
+# Pre-rebalance leverage validation (2026-05-28)
+# ---------------------------------------------------------------------------
+class TestValidateIsolatedLeverage:
+    """``_validate_isolated_leverage`` guards xs_momentum's rebalance against
+    partial set-leverage failure (which previously left directional residual
+    when one or more legs skipped via _submit_delta's per-leg fallback).
+
+    Tests bind the method to a hand-rolled mock instead of constructing the
+    NT Strategy class — `self.log` is a Cython read-only attr and direct
+    instantiation pulls in the full NT runtime.
+    """
+
+    @pytest.mark.asyncio
+    async def test_skips_check_when_not_isolated(self) -> None:
+        from okx_trade.strategies.xs_momentum import XSMomentumStrategy
+
+        class _MockConfig:
+            enable_isolated_margin = False
+            isolated_lever = 3
+
+        m = type("Mock", (), {})()
+        m.config = _MockConfig()
+        m._iso_service = object()  # would otherwise be used
+        m._validate_isolated_leverage = (
+            XSMomentumStrategy._validate_isolated_leverage.__get__(m)
+        )
+        # No service.get_pos_mode call should happen — non-isolated short-circuits
+        ok = await m._validate_isolated_leverage({"BTC-USDT-SWAP.OKX": 1.0})
+        assert ok is True
+
+    @pytest.mark.asyncio
+    async def test_aborts_when_any_leverage_fails(self) -> None:
+        from okx_trade.strategies.xs_momentum import XSMomentumStrategy
+        from okx_trade.enums import PosSide
+        from okx_trade.risk.isolated_margin_service import BatchEnsureResult
+
+        class _MockLog:
+            def __init__(self): self.warnings = []
+            def warning(self, msg): self.warnings.append(msg)
+
+        class _MockConfig:
+            enable_isolated_margin = True
+            isolated_lever = 3
+
+        class _MockService:
+            calls: list = []
+            def is_backtest(self): return False
+            async def get_pos_mode(self): return "long_short_mode"
+            async def batch_ensure_leverage(self, items):
+                self.calls.append(items)
+                return BatchEnsureResult(
+                    all_ok=False,
+                    failed=[("ETH-USDT-SWAP.OKX", "51290 transient")],
+                )
+
+        m = type("Mock", (), {})()
+        m.config = _MockConfig()
+        m.log = _MockLog()
+        m._iso_service = _MockService()
+        m._validate_isolated_leverage = (
+            XSMomentumStrategy._validate_isolated_leverage.__get__(m)
+        )
+        target = {
+            "BTC-USDT-SWAP.OKX": 1.5,   # long
+            "ETH-USDT-SWAP.OKX": -2.0,  # short
+            "SOL-USDT-SWAP.OKX": 0.0,   # not held — must be excluded
+        }
+        ok = await m._validate_isolated_leverage(target)
+        assert ok is False
+        assert any("ABORT" in w for w in m.log.warnings)
+        # Confirm we asked the service about exactly the two non-zero legs
+        # with the correct PosSide derived from sign
+        items = m._iso_service.calls[0]
+        assert len(items) == 2
+        items_sorted = sorted(items)
+        inst_to_ps = {inst: ps for inst, _lev, ps in items}
+        assert inst_to_ps["BTC-USDT-SWAP.OKX"] == PosSide.LONG
+        assert inst_to_ps["ETH-USDT-SWAP.OKX"] == PosSide.SHORT
+
+    @pytest.mark.asyncio
+    async def test_passes_through_all_ok(self) -> None:
+        from okx_trade.strategies.xs_momentum import XSMomentumStrategy
+        from okx_trade.risk.isolated_margin_service import BatchEnsureResult
+
+        class _MockConfig:
+            enable_isolated_margin = True
+            isolated_lever = 3
+
+        class _MockService:
+            def is_backtest(self): return False
+            async def get_pos_mode(self): return "long_short_mode"
+            async def batch_ensure_leverage(self, items):
+                return BatchEnsureResult(all_ok=True, failed=[])
+
+        m = type("Mock", (), {})()
+        m.config = _MockConfig()
+        m.log = type("L", (), {"warning": lambda self, msg: None})()
+        m._iso_service = _MockService()
+        m._validate_isolated_leverage = (
+            XSMomentumStrategy._validate_isolated_leverage.__get__(m)
+        )
+        ok = await m._validate_isolated_leverage({"BTC-USDT-SWAP.OKX": 1.0})
+        assert ok is True
+
+    @pytest.mark.asyncio
+    async def test_backtest_short_circuits(self) -> None:
+        from okx_trade.strategies.xs_momentum import XSMomentumStrategy
+
+        class _MockConfig:
+            enable_isolated_margin = True
+            isolated_lever = 3
+
+        class _MockService:
+            def is_backtest(self): return True
+            async def get_pos_mode(self): raise AssertionError("must not be called")
+
+        m = type("Mock", (), {})()
+        m.config = _MockConfig()
+        m._iso_service = _MockService()
+        m._validate_isolated_leverage = (
+            XSMomentumStrategy._validate_isolated_leverage.__get__(m)
+        )
+        ok = await m._validate_isolated_leverage({"BTC-USDT-SWAP.OKX": 1.0})
+        assert ok is True
