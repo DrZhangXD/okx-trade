@@ -498,27 +498,57 @@ if _NT_AVAILABLE:
             Errors are caught and logged so a failed warmup doesn't kill the
             strategy — it just falls back to organic on_bar accumulation.
             """
+            import asyncio as _asyncio
             import time as _time
 
             from .. import OKXRestClient, OKXSettings
             from ..research.data import fetch_panel
 
             days = int(self.config.warmup_via_rest_days)
-            end_ms = int(_time.time() * 1000)
-            start_ms = end_ms - days * 86_400_000
             bare_iids = [iid.value.split(".")[0] for iid in self._inst_ids]
-            try:
-                async with OKXRestClient(OKXSettings()) as client:
-                    panel = await fetch_panel(
-                        rest_client=client,
-                        inst_ids=bare_iids,
-                        start_ms=start_ms,
-                        end_ms=end_ms,
-                        bar="1H",
-                        include=("close", "volume_usdt", "funding_rate", "basis_apr"),
+
+            # Retry the entire warmup on transient failures (HTTP 429 from
+            # /market/history-candles is common when several strategies all
+            # bootstrap simultaneously and exhaust the candles rate-limit
+            # bucket). Linear backoff (30s / 60s / 120s) — first attempt is
+            # also delayed if retries happen so live spot bars have a chance
+            # to start populating buffers organically in the meantime.
+            attempt = 0
+            max_attempts = 4
+            backoffs = [0, 30, 60, 120]
+            panel = None
+            while attempt < max_attempts:
+                if backoffs[attempt] > 0:
+                    self.log.info(
+                        f"factor_portfolio REST warmup retry in "
+                        f"{backoffs[attempt]}s (attempt {attempt + 1}/{max_attempts})"
                     )
-            except Exception as exc:  # noqa: BLE001
-                self.log.warning(f"factor_portfolio REST warmup aborted: {exc}")
+                    await _asyncio.sleep(backoffs[attempt])
+                end_ms = int(_time.time() * 1000)
+                start_ms = end_ms - days * 86_400_000
+                try:
+                    async with OKXRestClient(OKXSettings()) as client:
+                        panel = await fetch_panel(
+                            rest_client=client,
+                            inst_ids=bare_iids,
+                            start_ms=start_ms,
+                            end_ms=end_ms,
+                            bar="1H",
+                            include=("close", "volume_usdt", "funding_rate", "basis_apr"),
+                        )
+                    break
+                except Exception as exc:  # noqa: BLE001
+                    self.log.warning(
+                        f"factor_portfolio REST warmup attempt "
+                        f"{attempt + 1}/{max_attempts} failed: {exc}"
+                    )
+                    attempt += 1
+            if panel is None:
+                self.log.warning(
+                    "factor_portfolio REST warmup gave up after "
+                    f"{max_attempts} attempts; falling back to organic on_bar "
+                    "accumulation (basis factors will warm up over hours)"
+                )
                 return
             try:
                 self._apply_warmup_panel(panel)
