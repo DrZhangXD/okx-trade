@@ -104,10 +104,15 @@ def test_output_dir_auto_created(tmp_path: Path) -> None:
 def _seed_trades_okx(tracker: PnLTracker, rows: list[tuple]) -> None:
     """直接往 trades_okx 表插 bill 行（reconcile_pnl_from_okx 路径的 fixture）。
 
-    rows: ``[(bill_id, ts_ms, inst_id, cl_ord_id, strategy_id, bal_chg), ...]``
+    rows: ``[(bill_id, ts_ms, inst_id, cl_ord_id, strategy_id, pnl, fee?), ...]``
+
+    第 6 列是 OKX bill 的 realized PnL（close bill 用，open bill 写 0），
+    第 7 列可选 fee（默认 0）。``bal_chg`` 字段在表里写成 pnl + fee（接近
+    round-tripped close 的实际语义），让数据自洽但 reader 已经不再读它。
+
+    历史注：2026-05-28 前这里第 6 列是 ``bal_chg``，配合 PnLTracker 的 bug
+    （读 bal_chg 当 pnl）能对得上；修复后 reader 只看 pnl+fee。
     """
-    import sqlite3
-    # tracker._conn 内部连接复用即可 —— 不另开 connection（避免 :memory: 各自孤岛）
     conn = tracker._conn  # noqa: SLF001 — 测试 fixture 直连
     conn.execute(
         """CREATE TABLE IF NOT EXISTS trades_okx (
@@ -116,10 +121,13 @@ def _seed_trades_okx(tracker: PnLTracker, rows: list[tuple]) -> None:
             bal_chg REAL, pnl REAL, fee REAL
         )"""
     )
-    for bill_id, ts_ms, inst_id, cl_ord_id, sid, bal_chg in rows:
+    for row in rows:
+        bill_id, ts_ms, inst_id, cl_ord_id, sid, pnl = row[:6]
+        fee = row[6] if len(row) > 6 else 0.0
+        bal_chg = pnl + fee  # 自洽但不被 reader 使用
         conn.execute(
             "INSERT INTO trades_okx VALUES (?,?,?,?,?,?,?,?,?,?)",
-            (bill_id, ts_ms, inst_id, "2", "0", cl_ord_id, sid, bal_chg, 0.0, 0.0),
+            (bill_id, ts_ms, inst_id, "2", "0", cl_ord_id, sid, bal_chg, pnl, fee),
         )
     conn.commit()
 

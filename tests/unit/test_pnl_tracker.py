@@ -183,6 +183,61 @@ def test_get_trades_prefers_trades_okx_when_present(tmp_path: Path) -> None:
     tracker.close()
 
 
+def test_get_trades_okx_uses_pnl_plus_fee_not_bal_chg(tmp_path: Path) -> None:
+    """Regression for 2026-05-28 daily_report attribution bug.
+
+    Buggy implementation summed ``bal_chg`` and reported it as ``pnl_usdt``.
+    For OPEN bills, ``bal_chg`` = notional cash flow (not PnL); for CLOSE
+    bills, ``bal_chg`` = +notional + pnl + fee. Only fully round-tripped
+    positions inside the query window happen to give ``SUM(bal_chg) ≈ pnl + fee``;
+    held-overnight strategies (funding_carry, xs_momentum) get wildly wrong
+    daily PnL.
+
+    Prod ground truth from 2026-05-27:
+      funding_carry  trades_okx → SUM(bal_chg)=-1127.79, SUM(pnl)+SUM(fee)=-0.47
+      xs_momentum    trades_okx → SUM(bal_chg)= -701.30, SUM(pnl)+SUM(fee)=-1.05
+    """
+    db_path = tmp_path / "pnl.sqlite"
+    tracker = PnLTracker(db_path)
+
+    import sqlite3
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("""
+        CREATE TABLE trades_okx (
+            bill_id TEXT PRIMARY KEY, ts_ms INTEGER NOT NULL, inst_id TEXT,
+            bill_type TEXT, sub_type TEXT, cl_ord_id TEXT, strategy_id TEXT,
+            bal_chg REAL, pnl REAL, fee REAL
+        )
+    """)
+    # Order A: open-only (held overnight) — bal_chg=-1000 (notional out),
+    # pnl=0, fee=-0.5. True PnL contribution = -0.5 (just the fee).
+    conn.execute(
+        "INSERT INTO trades_okx VALUES (?,?,?,?,?,?,?,?,?,?)",
+        ("bill_open", 1000, "BTC-USDT-SWAP", "2", "4",
+         "O-OPEN-001", "funding_carry", -1000.0, 0.0, -0.5),
+    )
+    # Order B: a separate close (subType 5) — bal_chg=+1010 (notional + pnl
+    # + fee), pnl=+10, fee=-0.5. True PnL contribution = +9.5.
+    conn.execute(
+        "INSERT INTO trades_okx VALUES (?,?,?,?,?,?,?,?,?,?)",
+        ("bill_close", 2000, "BTC-USDT-SWAP", "2", "5",
+         "O-CLOSE-002", "funding_carry", 1010.0, 10.0, -0.5),
+    )
+    conn.commit()
+    conn.close()
+
+    out = tracker.get_trades("funding_carry")
+    assert len(out) == 2  # one row per cl_ord_id
+    by_cl = {r.closed_ts_ms: float(r.pnl_usdt) for r in out}
+    # Buggy code would give: {1000: -1000.0, 2000: 1010.0}  ← off by 990/1000
+    # Fixed code gives: {1000: -0.5, 2000: 9.5}             ← realized + fee
+    assert by_cl[1000] == pytest.approx(-0.5)
+    assert by_cl[2000] == pytest.approx(9.5)
+    # Sum across the day (what daily_report reports) = realized PnL + fees
+    assert sum(by_cl.values()) == pytest.approx(9.0)
+    tracker.close()
+
+
 def test_get_trades_falls_back_when_okx_table_missing(tmp_path: Path) -> None:
     """Without trades_okx table → fallback to legacy trades (no behavior change
     for users who haven't run reconciliation yet)."""

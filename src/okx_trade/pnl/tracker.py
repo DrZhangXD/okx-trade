@@ -213,6 +213,24 @@ class PnLTracker:
         config name (e.g. "ob_imbalance") or the NT-assigned id (e.g.
         "OBImbalanceStrategy-004"); reconcile_pnl_from_okx.py writes the
         bare name when clOrdId parse succeeds.
+
+        PnL semantics (2026-05-28 fix)
+        ------------------------------
+        ``pnl_usdt`` ← ``SUM(pnl) + SUM(fee)``, NOT ``SUM(bal_chg)``.
+
+        OKX bill columns:
+        - ``pnl`` = realized PnL (only non-zero on close bills, subType 5/6 etc.)
+        - ``fee`` = trading fee (always non-positive)
+        - ``bal_chg`` = USDT balance change of the bill — for OPEN bills this is
+          the notional cash flow out (-$notional), for CLOSE bills this is
+          +$notional + pnl + fee. ``SUM(bal_chg)`` only equals realized PnL
+          when the position is fully round-tripped within the query window;
+          for held-overnight strategies (funding_carry carry, xs_momentum daily
+          rebalance) it explodes to the open notional, NOT a loss.
+
+        Prod symptom (2026-05-27 daily report): funding_carry reported
+        -$1127.79 and xs_momentum -$701.30 — actually -$0.47 and -$1.05
+        (fees only). Account-level mark-to-market was -$66, not -$1849.
         """
         bare_name = strategy_id.split("Strategy")[0].lower()
         # Strategy name from yaml: "ob_imbalance" etc. Try both forms.
@@ -241,7 +259,8 @@ class PnLTracker:
             params.append(int(since_ms))
         cur = self._conn.execute(
             f"SELECT strategy_id, inst_id, MAX(ts_ms) AS ts, "
-            f"  SUM(bal_chg) AS bal, cl_ord_id "
+            f"  COALESCE(SUM(pnl), 0) + COALESCE(SUM(fee), 0) AS realized_net, "
+            f"  cl_ord_id "
             f"FROM trades_okx WHERE strategy_id IN ({placeholders}){ts_filter} "
             f"GROUP BY cl_ord_id ORDER BY ts ASC",
             params,
