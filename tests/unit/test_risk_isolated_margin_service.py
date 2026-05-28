@@ -212,6 +212,36 @@ class TestEnsureLeverage:
         assert captured["calls"][1]["leverage"] == 8
 
     @pytest.mark.asyncio
+    async def test_cache_quantized_to_rounded_int(self, service_with_mock_rest) -> None:
+        """Continuous lever values that round to the same int must hit cache.
+
+        Regression for 2026-05-28 funding-hour bug: strategies pass lever
+        derived from edge_score (3.81, 3.95, 4.12...) every rebalance. Old
+        cache compared raw floats with 0.01 tolerance → cache miss → redundant
+        set-leverage calls during funding window → cascading 50004/51290.
+        """
+        from okx_trade.enums import PosSide
+        svc, captured = service_with_mock_rest
+        # All three round to 4 → second & third must cache-hit
+        await svc.ensure_leverage("BTC-USDT-SWAP", 3.81, PosSide.LONG)
+        await svc.ensure_leverage("BTC-USDT-SWAP", 3.95, PosSide.LONG)
+        await svc.ensure_leverage("BTC-USDT-SWAP", 4.12, PosSide.LONG)
+        assert len(captured["calls"]) == 1
+        assert captured["calls"][0]["leverage"] == 4
+        # 5.6 rounds to 6 → cache miss → new REST call
+        await svc.ensure_leverage("BTC-USDT-SWAP", 5.6, PosSide.LONG)
+        assert len(captured["calls"]) == 2
+        assert captured["calls"][1]["leverage"] == 6
+
+    @pytest.mark.asyncio
+    async def test_lever_floor_one(self, service_with_mock_rest) -> None:
+        """Lever < 0.5 rounds to 0; OKX rejects leverage=0. Floor to 1."""
+        from okx_trade.enums import PosSide
+        svc, captured = service_with_mock_rest
+        await svc.ensure_leverage("BTC-USDT-SWAP", 0.3, PosSide.LONG)
+        assert captured["calls"][0]["leverage"] == 1
+
+    @pytest.mark.asyncio
     async def test_none_pos_side_uses_net_cache_key(self, service_with_mock_rest) -> None:
         svc, captured = service_with_mock_rest
         await svc.ensure_leverage("BTC-USDT-SWAP", 5.0, None)

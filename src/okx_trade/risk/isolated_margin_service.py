@@ -38,7 +38,13 @@ class IsolatedMarginService:
     def __init__(self, rest_settings: "OKXSettings", log) -> None:
         self._rest_settings = rest_settings
         self._rest: "OKXRestClient | None" = None
-        self._lever_cache: dict[tuple[str, str], float] = {}
+        # Cache value is the **rounded int** actually sent to OKX, not the
+        # caller's continuous float. Strategies compute lever as a function of
+        # edge_score and pass values like 3.81 / 3.95 / 5.55 that change every
+        # rebalance even when OKX's effective leverage (int) hasn't moved.
+        # Caching the int eliminates redundant API calls — important during
+        # funding-hour bursts when OKX is most likely to return 50004/51290.
+        self._lever_cache: dict[tuple[str, str], int] = {}
         self._pos_mode: str | None = None
         self._log = log
 
@@ -127,21 +133,26 @@ class IsolatedMarginService:
         ps_key = pos_side.value if pos_side is not None else "net"
         inst_id_okx = inst_id.split(".")[0]
         cache_key = (inst_id_okx, ps_key)
-        cached = self._lever_cache.get(cache_key)
-        if cached is not None and abs(cached - lever) < 0.01:
+        # OKX only accepts integer leverage; quantize before cache compare so
+        # 3.81 vs 3.95 (both round to 4) hit the same cache entry. Prior impl
+        # cached the raw float with 0.01 tolerance → continuous lever from
+        # edge_score kept missing the cache and hammering set-leverage.
+        lever_int = max(1, int(round(lever)))
+        cached_int = self._lever_cache.get(cache_key)
+        if cached_int is not None and cached_int == lever_int:
             return True, None
         rest = await self._ensure_rest_client()
         try:
             await rest.account.set_leverage(
                 inst_id=inst_id_okx,
-                leverage=int(round(lever)),
+                leverage=lever_int,
                 mgn_mode=TdMode.ISOLATED,
                 pos_side=pos_side,
             )
-            self._lever_cache[cache_key] = lever
+            self._lever_cache[cache_key] = lever_int
             self._log.info(
                 f"iso_margin set leverage inst={inst_id_okx} "
-                f"mgnMode=isolated posSide={ps_key} lever={int(round(lever))}"
+                f"mgnMode=isolated posSide={ps_key} lever={lever_int}"
             )
             return True, None
         except Exception as exc:

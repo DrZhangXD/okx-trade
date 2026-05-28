@@ -38,6 +38,23 @@ class OKXRateLimitError(OKXError):
         self.retry_after = retry_after
 
 
+class OKXTransientError(OKXError):
+    """OKX 服务端瞬时不可用（与请求构造无关、可重试）。
+
+    覆盖的业务码（``_TRANSIENT_CODES``）
+    --------------------------------
+    - ``50004`` — ``API endpoint request timeout.``
+      OKX 网关侧超时。资费结算（每 8h 整点）期间最常见。
+    - ``51290`` — ``Trading bot engine currently upgrading. Try again later.``
+      OKX 交易引擎滚动升级窗口，几秒到几十秒内恢复。
+
+    重试语义和 ``OKXRateLimitError`` 一致——transport 走指数退避循环重试；
+    不命中本地 ratelimit cool_down（因为不是我们 burst 触发的限频，是对端瞬时
+    故障）。code != "0" 的"业务错误"在我们的设计里默认不重试，所以这类瞬时
+    错误必须显式列入豁免名单，否则会被当成永久错误抛回调用方。
+    """
+
+
 # ---------------------------------------------------------------------------
 # 业务错误（不重试）
 # ---------------------------------------------------------------------------
@@ -124,6 +141,7 @@ _AUTH_CODES = frozenset({
     "50111", "50112", "50113", "50114",
 })
 _RATE_LIMIT_CODES = frozenset({"50011", "50013"})
+_TRANSIENT_CODES = frozenset({"50004", "51290"})
 _INSUFFICIENT_BALANCE_CODES = frozenset({"51008"})
 _ORDER_NOT_FOUND_CODES = frozenset({"51400", "51401", "51402"})
 
@@ -136,12 +154,16 @@ def classify_business_error(
 ) -> OKXAPIError:
     """根据 OKX 业务错误码返回对应的异常实例。
 
-    限频码（50011/50013）单独抛 ``OKXRateLimitError``，由 transport 处理重试。
+    限频码（50011/50013）单独抛 ``OKXRateLimitError``，瞬时码（50004/51290）抛
+    ``OKXTransientError``——两者都由 transport 走重试路径（永久业务错误不重试）。
     其他码按映射表抛子类，未命中抛通用 ``OKXAPIError``。
     """
     if code in _RATE_LIMIT_CODES:
         # 限频是可重试的，单独走另一个分支
         raise OKXRateLimitError(f"OKX rate limited: code={code}, msg={message}")
+    if code in _TRANSIENT_CODES:
+        # 服务端瞬时不可用（如资费整点的 50004 timeout / 51290 engine upgrade）
+        raise OKXTransientError(f"OKX transient: code={code}, msg={message}")
     if code in _AUTH_CODES:
         return OKXAuthError(code, message, data, endpoint)
     if code in _INSUFFICIENT_BALANCE_CODES:
@@ -160,6 +182,7 @@ __all__ = [
     "OKXOrderNotFound",
     "OKXRateLimitError",
     "OKXSubscriptionError",
+    "OKXTransientError",
     "OKXWSConnectionError",
     "OKXWSError",
     "classify_business_error",

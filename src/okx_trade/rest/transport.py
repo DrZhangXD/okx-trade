@@ -33,6 +33,7 @@ from ..exceptions import (
     OKXAPIError,
     OKXNetworkError,
     OKXRateLimitError,
+    OKXTransientError,
     classify_business_error,
 )
 from ..utils.logging import get_logger
@@ -218,7 +219,8 @@ class Transport:
                     if code == "0":
                         return payload.get("data", []) or []
 
-                    # 业务错误：限频码会被 classify 抛 OKXRateLimitError；其他不重试
+                    # 业务错误：限频码 / 瞬时码会被 classify 抛专用异常进入重试；
+                    # 其他业务错误（请求构造错、余额不足等）按设计不重试。
                     try:
                         err = classify_business_error(
                             code=code,
@@ -228,6 +230,8 @@ class Transport:
                         )
                     except OKXRateLimitError as rl:
                         last_exc = rl
+                    except OKXTransientError as tr:
+                        last_exc = tr
                     else:
                         raise err
 

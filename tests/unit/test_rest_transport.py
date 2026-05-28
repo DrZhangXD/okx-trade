@@ -181,6 +181,56 @@ class TestRetry:
         assert call_count == 2
         assert data == [{"ok": True}]
 
+    async def test_transient_50004_retried(self) -> None:
+        """50004 (API endpoint request timeout) — OKX 网关瞬时不可用，
+        重启时段 / 资费整点高频出现。必须重试，否则上层会误判永久错误。"""
+        call_count = 0
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return httpx.Response(200, json={
+                    "code": "50004", "msg": "API endpoint request timeout.", "data": [],
+                })
+            return httpx.Response(200, json={"code": "0", "data": [{"ok": True}]})
+
+        async with _make_transport(httpx.MockTransport(handler), max_retries=3) as t:
+            import okx_trade.rest.transport as tx
+            orig = tx._backoff_delay
+            tx._backoff_delay = lambda attempt, exc: 0.0  # type: ignore[assignment]
+            try:
+                data = await t.request("POST", "/api/v5/account/set-leverage", private=True)
+            finally:
+                tx._backoff_delay = orig
+
+        assert call_count == 2
+        assert data == [{"ok": True}]
+
+    async def test_transient_51290_retried(self) -> None:
+        """51290 (Trading bot engine currently upgrading) — OKX 滚动升级窗口，
+        几秒到几十秒恢复。重试覆盖窗口。"""
+        from okx_trade.exceptions import OKXTransientError
+        call_count = 0
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            nonlocal call_count
+            call_count += 1
+            return httpx.Response(200, json={
+                "code": "51290",
+                "msg": "Trading bot engine currently upgrading. Try again later.",
+                "data": [],
+            })
+
+        async with _make_transport(httpx.MockTransport(handler), max_retries=2) as t:
+            import okx_trade.rest.transport as tx
+            tx._backoff_delay = lambda attempt, exc: 0.0  # type: ignore[assignment]
+            with pytest.raises(OKXTransientError):
+                await t.request("POST", "/api/v5/account/set-leverage", private=True)
+
+        # max_retries=2 → 3 次调用（初始 + 2 次 retry）
+        assert call_count == 3
+
     async def test_http_429_retried(self) -> None:
         call_count = 0
 
