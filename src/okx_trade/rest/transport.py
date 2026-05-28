@@ -147,10 +147,18 @@ class Transport:
 
         body_str = json.dumps(json_body, separators=(",", ":")) if json_body is not None else ""
 
+        # Two retry budgets so OKX-side transients (50004 / 51290) get more
+        # attempts than network / rate-limit errors. Per-iteration we count
+        # the failure against its type-specific budget; the outer loop cap
+        # is the sum so a pathological mix doesn't starve either budget.
         max_retries = self.settings.max_retries
+        max_transient = self.settings.max_transient_retries
+        outer_cap = max_retries + max_transient
+        transient_attempts = 0
+        network_attempts = 0
         last_exc: Exception | None = None
 
-        for attempt in range(max_retries + 1):
+        for attempt in range(outer_cap + 1):
             # 限频
             if group:
                 await self.rate_limiter.acquire(group)
@@ -236,13 +244,24 @@ class Transport:
                         raise err
 
             # 走到这里说明 last_exc 已被赋值，需要决定是否重试
-            if attempt < max_retries:
+            is_transient = isinstance(last_exc, OKXTransientError)
+            if is_transient:
+                done = transient_attempts
+                cap = max_transient
+            else:
+                done = network_attempts
+                cap = max_retries
+            if done < cap:
+                if is_transient:
+                    transient_attempts += 1
+                else:
+                    network_attempts += 1
                 wait = _backoff_delay(attempt, last_exc)
                 log.warning(
                     "rest_retry",
                     path=path,
                     attempt=attempt + 1,
-                    max_retries=max_retries,
+                    max_retries=cap,
                     error=type(last_exc).__name__,
                     wait_sec=wait,
                 )

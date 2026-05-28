@@ -222,14 +222,46 @@ class TestRetry:
                 "data": [],
             })
 
-        async with _make_transport(httpx.MockTransport(handler), max_retries=2) as t:
+        async with _make_transport(
+            httpx.MockTransport(handler),
+            max_retries=2, max_transient_retries=2,
+        ) as t:
             import okx_trade.rest.transport as tx
             tx._backoff_delay = lambda attempt, exc: 0.0  # type: ignore[assignment]
             with pytest.raises(OKXTransientError):
                 await t.request("POST", "/api/v5/account/set-leverage", private=True)
 
-        # max_retries=2 → 3 次调用（初始 + 2 次 retry）
+        # max_transient_retries=2 → 3 次调用（初始 + 2 次 retry）
         assert call_count == 3
+
+    async def test_transient_uses_separate_budget_from_network(self) -> None:
+        """OKXTransientError 用 max_transient_retries（默认 5），跟 max_retries
+        分开计数。即使 max_retries=0（禁止网络重试），transient 仍能重试，
+        因为它们是 OKX 服务端瞬时故障，跟我们的 burst 无关。"""
+        from okx_trade.exceptions import OKXTransientError
+        call_count = 0
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            nonlocal call_count
+            call_count += 1
+            if call_count <= 3:
+                return httpx.Response(200, json={
+                    "code": "51290", "msg": "engine upgrading", "data": [],
+                })
+            return httpx.Response(200, json={"code": "0", "data": [{"ok": True}]})
+
+        # max_retries=0 (zero retries for network) but max_transient_retries=5
+        # → 3 transient failures should still recover.
+        async with _make_transport(
+            httpx.MockTransport(handler),
+            max_retries=0, max_transient_retries=5,
+        ) as t:
+            import okx_trade.rest.transport as tx
+            tx._backoff_delay = lambda attempt, exc: 0.0  # type: ignore[assignment]
+            data = await t.request("POST", "/api/v5/account/set-leverage", private=True)
+
+        assert call_count == 4  # 3 transient + 1 success
+        assert data == [{"ok": True}]
 
     async def test_http_429_retried(self) -> None:
         call_count = 0

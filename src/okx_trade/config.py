@@ -45,6 +45,10 @@ class OKXSettings(BaseSettings):
     # ---- REST 行为 ----
     request_timeout_sec: float = Field(default=10.0, gt=0)
     max_retries: int = Field(default=3, ge=0)
+    # OKX 服务端瞬时错误（50004 timeout / 51290 engine upgrading）使用更长的
+    # 重试预算 —— 资费整点的 engine upgrade 窗口可持续 30–60s，3 次 backoff
+    # （2+4+8=14s）不够。5 次给到 ~62s（2+4+8+16+32）覆盖典型窗口。
+    max_transient_retries: int = Field(default=5, ge=0)
 
     # ---- 日志 ----
     log_level: str = "INFO"
