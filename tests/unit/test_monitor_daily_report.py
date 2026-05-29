@@ -212,6 +212,51 @@ def test_daily_report_uses_snake_case_canonical_strategy_id(tmp_path: Path) -> N
     tracker.close()
 
 
+def test_daily_report_counts_round_trips_not_open_orders(tmp_path: Path) -> None:
+    """trade_count / win_rate 必须按"已平仓回合"算,不能把开仓单也当 trade。
+
+    2026-05-29 prod bug:``_fetch_trades_okx`` 按 ``cl_ord_id`` 分组,每个 OKX
+    *订单*算一笔 trade。但 OKX 开仓单(subType 3/4)``pnl=0`` 只有负 fee,
+    平仓单(subType 5/6)才带 realized pnl,且开/平是不同 cl_ord_id。于是每个
+    开仓单都被算成一笔"亏损 trade",把持仓过夜策略(xs_momentum)的 win_rate
+    结构性压到 0、trade_count 翻倍。
+
+    修复语义:
+      - trade_count = 实现了非零 pnl 的回合数(SUM(pnl)!=0 的 cl_ord_id 组);
+      - win  = 该回合 net(pnl+fee)> 0(按净额判定,毛利为正但被手续费吃成
+        净亏的回合算输——对应 liq_reversal 真实出现的 +0.04 pnl / -0.39 fee);
+      - pnl_usdt(策略当日总额)仍含开仓手续费(真金白银的成本),不变。
+    """
+    tracker = PnLTracker(":memory:")
+    # 让 xs_momentum 出现在 list_strategies(它只扫 trades∪equities,不扫 trades_okx)
+    tracker.record_equity(EquitySnapshot(
+        strategy_id="xs_momentum", ts_ms=_ts("2026-05-28", hour=23),
+        equity_usdt=Decimal("31360"),
+    ))
+    _seed_trades_okx(tracker, [
+        # 2 个开仓单:pnl=0,只有负 fee → 不应计入 trade_count
+        ("o1", _ts("2026-05-28", 9), "BTC-USDT-SWAP", "clo1", "xs_momentum", 0.0, -0.01),
+        ("o2", _ts("2026-05-28", 9), "ETH-USDT-SWAP", "clo2", "xs_momentum", 0.0, -0.01),
+        # 3 个平仓回合(pnl!=0)
+        ("c1", _ts("2026-05-28", 10), "BTC-USDT-SWAP", "clc1", "xs_momentum", 5.0, -0.02),   # net +4.98 win
+        ("c2", _ts("2026-05-28", 11), "ETH-USDT-SWAP", "clc2", "xs_momentum", -3.0, -0.02),  # net -3.02 loss
+        ("c3", _ts("2026-05-28", 12), "BTC-USDT-SWAP", "clc3", "xs_momentum", 0.01, -0.50),  # 毛利+但 net -0.49 loss
+    ])
+    reporter = DailyReporter(tracker, output_dir=tmp_path)
+    j = json.loads(reporter.write_for_date("2026-05-28").read_text(encoding="utf-8"))
+
+    rows = [r for r in j["per_strategy"] if r["strategy_id"] == "xs_momentum"]
+    assert len(rows) == 1
+    row = rows[0]
+    # 只数 3 个平仓回合,不是 5 个订单
+    assert row["trade_count"] == 3
+    # 净额判定:仅 c1 是 win → 1/3
+    assert row["win_rate"] == pytest.approx(1 / 3)
+    # 总 pnl 仍把开仓手续费算进去:-0.01-0.01+4.98-3.02-0.49 = 1.45
+    assert row["pnl_usdt"] == pytest.approx(1.45)
+    tracker.close()
+
+
 def test_daily_report_non_nt_strategy_id_passthrough(tmp_path: Path) -> None:
     """不带 'Strategy' 后缀的旧式 sid（s1/s2，多见于单测/回测）不应被改写。"""
     tracker = PnLTracker(":memory:")

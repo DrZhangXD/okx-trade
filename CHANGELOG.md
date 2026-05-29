@@ -8,6 +8,14 @@
 
 ## [Unreleased] — Paper trading 观察期
 
+### Fixed (daily_report win_rate / trade_count 口径, 2026-05-29)
+
+- **`fix(daily_report)`** — `trade_count` / `win_rate` 改为按"已平仓回合"统计，不再把开仓单当成交。
+  - 根因：`_fetch_trades_okx` 按 `cl_ord_id` 分组，每个 OKX *订单* 算一笔 trade。但开仓单（subType 3/4）`pnl=0` 只有负 `fee`、且与平仓单（5/6）是不同 `cl_ord_id` → 每个开仓单都被算成一笔"亏损 trade"，把持仓过夜策略（xs_momentum 日内 rebalance）的 `win_rate` 结构性压到 0、`trade_count` 翻倍。
+  - 修：新增 `PnLTracker.get_round_trips()`，只返回 `SUM(pnl) != 0` 的回合（`_fetch_trades_okx` 加 `realized_only` 参数）；`daily_report` 的 `trade_count` / `win_rate` 改用它，胜负按 net(`pnl+fee`)> 0 判定。`pnl_usdt` 总额仍用 `get_trades`（保留开仓手续费这笔真实成本，数值不变）。
+  - 实测 05-28 prod ledger：ob_imbalance 真实胜率 41.7% → **83.3%**（之前被开仓费单稀释）；xs_momentum "479 笔 0%" → "0 个平仓回合"；liq_reversal 确认为 4 个平仓全亏的真实亏损 -21.5。
+  - 纯报表/可观测性修复，不碰下单逻辑（`feed_risk_handles` → Kelly 在 live 运行时本就未接线，仓位 sizing 不受影响）。回归测试 + 全套 1008 passed。
+
 ### Rolled out (Phase 1c — opt-in all active strategies, 2026-05-26 final)
 
 - **`feat(strategies)`** ([82aafe8](https://github.com/DrZhangXD/okx-trade/commit/82aafe8) merge) — 6 个活跃策略全部接入 `OkxStrategyBase` + `submit_isolated_order` / `batch_ensure_leverage`：

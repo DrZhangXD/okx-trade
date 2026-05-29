@@ -200,14 +200,70 @@ class PnLTracker:
             for r in rows
         ]
 
+    def get_round_trips(
+        self,
+        strategy_id: str,
+        *,
+        since_ms: int | None = None,
+    ) -> list[TradeRecord]:
+        """已平仓回合(realized round-trips）——用于 ``trade_count`` / ``win_rate``。
+
+        与 ``get_trades`` 的区别（2026-05-29 修 daily_report win_rate bug）
+        ----------------------------------------------------------------
+        ``get_trades`` 每个 OKX *订单*（``cl_ord_id``）emit 一行，**含只开仓
+        的 fee-only 单**（``pnl=0``，只有负 ``fee``）；它用于算"当日总现金流
+        PnL"（开仓手续费是真金白银的成本，必须算进去）。
+
+        但开仓单不是一笔"成交回合"：开/平是不同 ``cl_ord_id``，开仓单
+        ``pnl=0`` 永远 ≤0 → 旧实现把每个开仓单当一笔"亏损 trade"，使持仓
+        过夜策略（xs_momentum 日内 rebalance）的 ``win_rate`` 被结构性压到 0、
+        ``trade_count`` 翻倍。
+
+        本方法只返回**实现了非零 ``pnl`` 的 ``cl_ord_id`` 组**（即真正平掉
+        了仓位的回合），``pnl_usdt`` 仍取 ``SUM(pnl)+SUM(fee)``（净额，含该
+        平仓单自身的手续费）。胜负由调用方按 ``pnl_usdt > 0`` 判定（净额，
+        毛利为正但被手续费吃成净亏的回合算输）。
+
+        语义边界：``trades_okx`` 存在但该策略当日只开仓未平 → 返回 ``[]``
+        （正确：0 个回合），**不**回退到 legacy ``trades`` 的 bar-price 估算。
+        仅当 ``trades_okx`` 表不存在 / 该策略完全不在 OKX 账本时才回退 legacy
+        （legacy ``trades`` 每行本身就是一个 round-trip）。
+        """
+        with self._lock:
+            has_okx = self._conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' "
+                "AND name='trades_okx'"
+            ).fetchone()
+            if has_okx:
+                rows = self._fetch_trades_okx(
+                    strategy_id, since_ms, realized_only=True,
+                )
+                if rows:
+                    return rows
+                # 无 realized close：区分"在账本但只开仓未平"(→ 0 回合）
+                # vs "压根不在 OKX 账本"(→ 回退 legacy）。
+                if self._fetch_trades_okx(strategy_id, since_ms):
+                    return []
+        return self.get_trades(strategy_id, since_ms=since_ms, authoritative=False)
+
     def _fetch_trades_okx(
-        self, strategy_id: str, since_ms: int | None,
+        self,
+        strategy_id: str,
+        since_ms: int | None,
+        *,
+        realized_only: bool = False,
     ) -> list[TradeRecord]:
         """Aggregate ``trades_okx`` (raw bills) into TradeRecord rows.
 
         Group by ``cl_ord_id`` so partial fills of the same order become one
         record. r_multiple is left at 0 (we don't have risk_usdt here; Kelly
         only needs win_rate/avg_R which can be computed from pnl alone).
+
+        ``realized_only=True`` adds ``HAVING SUM(pnl) != 0`` so only orders that
+        realized a non-zero PnL (i.e. closing round-trips) come back; fee-only
+        open orders are dropped. Used by ``get_round_trips`` for trade_count /
+        win_rate. Default ``False`` keeps every order (used for total cash-flow
+        PnL, which must retain open fees).
 
         Strategy match is by ``strategy_id`` column matching either the bare
         config name (e.g. "ob_imbalance") or the NT-assigned id (e.g.
@@ -257,12 +313,13 @@ class PnLTracker:
         if since_ms is not None:
             ts_filter = " AND ts_ms >= ?"
             params.append(int(since_ms))
+        having = " HAVING COALESCE(SUM(pnl), 0) != 0" if realized_only else ""
         cur = self._conn.execute(
             f"SELECT strategy_id, inst_id, MAX(ts_ms) AS ts, "
             f"  COALESCE(SUM(pnl), 0) + COALESCE(SUM(fee), 0) AS realized_net, "
             f"  cl_ord_id "
             f"FROM trades_okx WHERE strategy_id IN ({placeholders}){ts_filter} "
-            f"GROUP BY cl_ord_id ORDER BY ts ASC",
+            f"GROUP BY cl_ord_id{having} ORDER BY ts ASC",
             params,
         )
         rows = cur.fetchall()

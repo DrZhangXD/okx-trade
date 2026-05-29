@@ -136,9 +136,18 @@ class DailyReporter:
                 t for t in self.tracker.get_trades(canonical, since_ms=day_start)
                 if t.closed_ts_ms < day_end
             ]
-            wins = sum(1 for t in trades if t.pnl_usdt > 0)
-            count = len(trades)
+            # pnl_usdt = 当日全部订单(开+平)的 net 求和 → 含开仓手续费这笔真实
+            # 成本,所以保留 get_trades(每个订单一行)。
             pnl = float(sum(t.pnl_usdt for t in trades)) if trades else 0.0
+            # trade_count / win_rate 只按已平仓回合算 —— 开仓单 pnl=0 不是一笔
+            # 成交回合,算进去会把持仓过夜策略的 win_rate 结构性压到 0
+            # (2026-05-29 修)。胜负按 net(pnl+fee)>0 判定。
+            round_trips = [
+                t for t in self.tracker.get_round_trips(canonical, since_ms=day_start)
+                if t.closed_ts_ms < day_end
+            ]
+            count = len(round_trips)
+            wins = sum(1 for t in round_trips if t.pnl_usdt > 0)
             win_rate = wins / count if count else 0.0
 
             ending = self._latest_equity_in_window(
