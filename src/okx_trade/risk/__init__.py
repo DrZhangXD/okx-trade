@@ -42,6 +42,7 @@ from .integration import (
     build_risk_manager,
 )
 from .kelly import KellyCheck, kelly_fraction, quarter_kelly_size
+from .trade_rate import TradeRateCheck
 from .vol_target import (
     VolTargetCheck,
     realized_vol_annualized,
@@ -63,6 +64,8 @@ __all__ = [
     "KellyCheck",
     "kelly_fraction",
     "quarter_kelly_size",
+    # trade-rate circuit breaker
+    "TradeRateCheck",
     # drawdown
     "AccountDrawdownCheck",
     "AccountDrawdownTracker",

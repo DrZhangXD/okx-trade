@@ -29,6 +29,7 @@ from .correlation import CorrelationCheck
 from .drawdown import AccountDrawdownCheck, AccountDrawdownTracker, DrawdownCheck, DrawdownTracker
 from .kelly import KellyCheck
 from .regime import RegimeDetectorProtocol, RegimeGateCheck, StrategyKind
+from .trade_rate import TradeRateCheck
 from .vol_target import VolTargetCheck
 
 if TYPE_CHECKING:
@@ -73,6 +74,13 @@ class RiskConfig:
     enable_regime_gate: bool = False
     # 必须声明策略类型让 gate 知道往哪缩——momentum / reversal / neutral
     regime_strategy_kind: StrategyKind = "neutral"
+
+    # trade-rate circuit breaker (churn guard, 2026-05-31)
+    # 滚动窗口内放行的 entry 数超 max_trades → REJECT,防 fee-churn blowup
+    # (2026-05-25 stat_arb 单日 5501 单 -550 fee 未触发 drawdown)。
+    enable_trade_rate: bool = False
+    trade_rate_max_trades: int = 60
+    trade_rate_window_sec: int = 3600
 
 
 @dataclass(frozen=True, slots=True)
@@ -181,6 +189,13 @@ def build_risk_manager(
             strategy_kind=config.regime_strategy_kind,
         ))
     handles_kwargs["regime_detector"] = regime_detector
+
+    # 频率熔断放最后:只统计"通过其它所有 check"的 entry(早退的 REJECT 不计)。
+    if config.enable_trade_rate:
+        checks.append(TradeRateCheck(
+            max_trades=config.trade_rate_max_trades,
+            window_sec=config.trade_rate_window_sec,
+        ))
 
     handles = RiskHandles(**handles_kwargs)
     if not checks:

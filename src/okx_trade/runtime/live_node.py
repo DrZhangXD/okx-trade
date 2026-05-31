@@ -230,6 +230,7 @@ def _build_risk_config(d: dict[str, Any] | None) -> RiskConfig | None:
             "enable_correlation", "correlation_window",
             "correlation_threshold", "correlation_high_corr_scale",
             "enable_regime_gate", "regime_strategy_kind",
+            "enable_trade_rate", "trade_rate_max_trades", "trade_rate_window_sec",
         )
     }
     kw = {k: v for k, v in d.items() if k in fields}

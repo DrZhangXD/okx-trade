@@ -38,6 +38,12 @@ risk:
   enable_correlation: false
   enable_regime_gate: false
   regime_strategy_kind: neutral
+  # 频率熔断(防 churn) —— cooldown_sec_after_exit 是策略层主防御,本项是风控层
+  # 兜底:任一滚动小时内放行 >60 笔 entry 即拒,挡住 cooldown 万一回归时的
+  # fee-churn(参考 5/25 三小时 4394 笔 -$1412)。正常 ~24 round-trip/天,绝不触发。
+  enable_trade_rate: true
+  trade_rate_max_trades: 60
+  trade_rate_window_sec: 3600
 
 # 2026-05-26 Phase 1c: isolated margin opt-in
 enable_isolated_margin: true

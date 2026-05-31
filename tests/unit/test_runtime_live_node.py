@@ -251,3 +251,20 @@ def test_okx_equity_provider_returns_none_on_exception(monkeypatch: pytest.Monke
 
     val = asyncio.run(_build_okx_equity_provider()())
     assert val is None
+
+
+def test_build_risk_config_passes_trade_rate_keys() -> None:
+    """_build_risk_config 的字段白名单必须包含 trade_rate_* —— 否则配置里
+    enable_trade_rate 会被静默丢弃,熔断永不生效(2026-05-31 回归)。"""
+    from okx_trade.runtime.live_node import _build_risk_config
+
+    cfg = _build_risk_config({
+        "enable_drawdown": True,
+        "enable_trade_rate": True,
+        "trade_rate_max_trades": 60,
+        "trade_rate_window_sec": 3600,
+    })
+    assert cfg is not None
+    assert cfg.enable_trade_rate is True
+    assert cfg.trade_rate_max_trades == 60
+    assert cfg.trade_rate_window_sec == 3600

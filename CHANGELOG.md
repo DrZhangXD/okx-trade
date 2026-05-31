@@ -8,6 +8,16 @@
 
 ## [Unreleased] — Paper trading 观察期
 
+### Added (trade-rate 熔断 + 全策略复盘, 2026-05-31)
+
+- **`feat(risk)`** — 新增 `TradeRateCheck`(per-strategy 下单频率熔断,risk pipeline 末尾)。滚动 `window_sec` 窗口内放行的 entry 数达 `max_trades` 即 REJECT 后续 entry。opt-in(`enable_trade_rate`,默认关)。
+  - 动机:`DrawdownCheck` 看净值跌幅,挡不住"高频小亏 churn"。2026-05-25 stat_arb 三小时刷 4394 单 -$1412(每笔 1.5σ 毛收益被 4 legs taker fee 吃光),整日 -1.7% 未触发 3% daily drawdown。策略层 `cooldown_sec_after_exit`(05-27)已是主防御,本 check 是风控层兜底(防 cooldown 回归 / 新策略漏配)。
+  - 在 `stat_arb_pairs.yaml` 启用(60 单/小时;正常 ~24 round-trip/天,绝不触发)。`_build_risk_config` 白名单同步加 3 个新键(否则 yaml 配置被静默丢弃)。
+- **复盘**(基于权威 `trades_okx` 按新回合口径重算,post-fix 4 天):发现并定性三件事 ——
+  - **−51k DOT 清算(05-25)**:`bill_type=5` 清算事件,即已知"DOT 事故",已被 isolated-margin + 单腿 wick 三层防御(05-26)覆盖;`strategy_id` NULL 故在 per-strategy 日报里不可见。05-26 后无新清算。
+  - **stat_arb churn(05-25)**:已被 cooldown 修复,现 ~24 round-trip/天 PF 1.46。
+  - **遗留待优化**:liq_reversal 执行滑点(3R 实测压成 ~1.2R)、ob_imbalance/funding_cross_section/factor_portfolio 手续费拖累(ob_imbalance 毛 alpha PF 2.12 被开仓费吃成净 -1.3)。需回测验证后再改。
+
 ### Fixed (daily_report win_rate / trade_count 口径, 2026-05-29)
 
 - **`fix(daily_report)`** — `trade_count` / `win_rate` 改为按"已平仓回合"统计，不再把开仓单当成交。
