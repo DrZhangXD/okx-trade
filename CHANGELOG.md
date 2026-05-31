@@ -8,6 +8,11 @@
 
 ## [Unreleased] — Paper trading 观察期
 
+### Changed (liq_reversal 止血 + 修复 plan, 2026-05-31)
+
+- **`fix(liq_reversal)`** — `risk_pct` 0.5% → **0.25%** 临时止血。复盘(4 天 12 round-trips)发现执行滑点把名义 3R 压成实测 ~1.2R(TP 市价回撤只吃 53%、SL 穿价 134%)+ 逆势 falling-knife 偏向(13 LONG vs 3 SHORT,入场价单边下行),结构性 -2.4 USDT/笔(4 天 -34)。减半把出血砍半,保留 paper 观察。
+- **`docs`** — 正经修复实施计划 `docs/superpowers/plans/2026-05-31-liq-reversal-execution-fix.md`:Part A 趋势否决过滤(EMA-slope veto 逆势 fade,小改)+ Part B tick 级 emulated bracket 出场(消除 TP 回撤/SL 穿价)。离线无清算数据,验证走 paper A/B;落地后回调 risk_pct。
+
 ### Added (trade-rate 熔断 + 全策略复盘, 2026-05-31)
 
 - **`feat(risk)`** — 新增 `TradeRateCheck`(per-strategy 下单频率熔断,risk pipeline 末尾)。滚动 `window_sec` 窗口内放行的 entry 数达 `max_trades` 即 REJECT 后续 entry。opt-in(`enable_trade_rate`,默认关)。
