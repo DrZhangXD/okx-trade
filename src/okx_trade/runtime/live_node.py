@@ -248,6 +248,15 @@ def _any_strategy_enables_regime(specs: list[tuple[str, str, dict[str, Any]]],
     return False
 
 
+def _any_strategy_enables_option_vol(specs: list[tuple[str, str, dict[str, Any]]]) -> bool:
+    """True when option_vol_selling is among the enabled strategies.
+
+    Used to auto-inject option_ulys into the instrument provider so that BTC
+    options are loaded at startup without requiring manual yaml edits.
+    """
+    return any(s_type == "option_vol_selling" for _, s_type, _ in specs)
+
+
 # ---------------------------------------------------------------------------
 # build_live_context（主入口）
 # ---------------------------------------------------------------------------
@@ -284,6 +293,13 @@ def build_live_context(
     if not specs:
         raise ValueError("no enabled strategies in live_cfg")
 
+    # Auto-inject option_ulys when option_vol_selling is enabled.
+    # Explicit live_cfg["data"]["option_ulys"] takes precedence; otherwise derive
+    # from the strategy's underlying (BTC-USD) to avoid loading ~1000 option contracts.
+    option_ulys: list[str] | None = (live_cfg.get("data") or {}).get("option_ulys")
+    if option_ulys is None and _any_strategy_enables_option_vol(specs):
+        option_ulys = ["BTC-USD"]
+
     # 用策略 name 当 strategy_id 喂 allocator（NT live 模式下 self.id 才知道，
     # 这里先用 name 算 allocation；后续会覆盖到 config.account_equity_usdt）
     names = [name for name, _, _ in specs]
@@ -315,7 +331,7 @@ def build_live_context(
     )
 
     if build_node:
-        node = _build_trading_node(live_cfg)
+        node = _build_trading_node(live_cfg, option_ulys=option_ulys)
         registry = _strategy_registry()
         for name, s_type, raw in specs:
             raw = _merge_risk_defaults(raw, risk_defaults)
@@ -455,7 +471,7 @@ def _build_thresholds(alerts_cfg: dict[str, Any]) -> MonitorThresholds:
     )
 
 
-def _build_trading_node(live_cfg: dict[str, Any]) -> Any:
+def _build_trading_node(live_cfg: dict[str, Any], option_ulys: list[str] | None = None) -> Any:
     """构造 NT ``TradingNode``，注册 OKX 工厂，build。"""
     from nautilus_trader.config import LoggingConfig
     from nautilus_trader.live.config import LiveExecEngineConfig, TradingNodeConfig
@@ -490,7 +506,7 @@ def _build_trading_node(live_cfg: dict[str, Any]) -> Any:
                 passphrase=creds.get("passphrase"),
                 is_demo=is_paper,
                 http_proxy=creds.get("http_proxy"),
-                option_ulys=live_cfg.get("data", {}).get("option_ulys"),  # restrict OPTION loading
+                option_ulys=option_ulys,
             ),
         },
         exec_clients={
