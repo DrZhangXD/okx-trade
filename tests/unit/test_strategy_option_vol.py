@@ -7,6 +7,7 @@ import pytest
 
 from okx_trade.strategies.option_vol_selling import (
     OptionVolConfig,
+    needs_rehedge,
     realized_vol_annualized,
     select_atm_strike,
 )
@@ -51,6 +52,37 @@ class TestSelectATMStrike:
         assert select_atm_strike([100.0], spot=-1.0) is None
 
 
+class TestNeedsRehedge:
+    """size-aware delta re-hedge 阈值(2026-06-01 修 bug:旧式 0.05×strike/10000
+    ≈0.35 BTC,而 $1000/腿 跨式 net_delta 物理上最多 ~0.014 BTC → re-hedge 永不
+    触发,对冲形同虚设)。新逻辑:net_delta 的 USD 价值 > 单腿名义 × threshold_frac。"""
+
+    def test_below_threshold_no_rehedge(self) -> None:
+        # 0.001 BTC × 70000 = $70 漂移 < 0.2 × $1000 = $200 → 不 re-hedge
+        assert needs_rehedge(0.001, 70000.0, threshold_frac=0.2,
+                             leg_notional_usd=1000.0) is False
+
+    def test_above_threshold_triggers(self) -> None:
+        # 0.005 BTC × 70000 = $350 > $200 → re-hedge
+        assert needs_rehedge(0.005, 70000.0, threshold_frac=0.2,
+                             leg_notional_usd=1000.0) is True
+
+    def test_realistic_max_drift_now_triggers(self) -> None:
+        # 回归:$1000/腿 跨式的最大物理漂移 ~0.014 BTC,旧阈值(0.35 BTC)永不触发;
+        # 新逻辑下 0.014×70000=$980 > $200 → 正确触发
+        assert needs_rehedge(0.014, 70000.0, threshold_frac=0.2,
+                             leg_notional_usd=1000.0) is True
+
+    def test_symmetric_for_negative_delta(self) -> None:
+        assert needs_rehedge(-0.005, 70000.0, threshold_frac=0.2,
+                             leg_notional_usd=1000.0) is True
+
+    def test_no_spot_no_rehedge(self) -> None:
+        # spot<=0(尚无价)→ 不盲目 re-hedge
+        assert needs_rehedge(0.014, 0.0, threshold_frac=0.2,
+                             leg_notional_usd=1000.0) is False
+
+
 class TestOptionVolConfig:
     def test_defaults(self) -> None:
         cfg = OptionVolConfig(
@@ -61,6 +93,6 @@ class TestOptionVolConfig:
         assert cfg.tenor_target_days == 7
         assert cfg.iv_rv_ratio_min == 1.20
         assert cfg.max_notional_per_leg_usdt == 1000.0
-        assert cfg.delta_hedge_threshold == 0.05
+        assert cfg.delta_hedge_threshold == 0.2  # 2026-06-01: size-aware 语义新默认
         assert cfg.close_days_before_expiry == 1
         assert cfg.stop_distance_strike_pct == 0.05

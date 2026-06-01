@@ -17,7 +17,10 @@ iv_rv_ratio_min: 1.20        # IV/RV ≥ 1.2 才卖（20% premium）
 rv_window: 30                # 30d realized vol 窗口
 
 max_notional_per_leg_usdt: 1000.0
-delta_hedge_threshold: 0.05
+# 2026-06-01 修 bug:旧 0.05 配 ×strike/10000 算成 ~0.35 BTC,而 $1000/腿跨式
+# net_delta 物理上最多 ~0.014 BTC → re-hedge 永不触发、对冲形同虚设。新语义:
+# net delta 的 USD 价值 > 单腿名义 × 此值 才 re-hedge。0.2 = 漂移达 ~$200 触发。
+delta_hedge_threshold: 0.2
 delta_hedge_freq_min: 60
 stop_distance_strike_pct: 0.05
 close_days_before_expiry: 1

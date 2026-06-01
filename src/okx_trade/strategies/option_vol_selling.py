@@ -92,6 +92,39 @@ def select_atm_strike(strikes: list[float], spot: float) -> float | None:
     return min(strikes, key=lambda k: abs(k - spot))
 
 
+def needs_rehedge(
+    net_delta_btc: float,
+    spot: float,
+    *,
+    threshold_frac: float,
+    leg_notional_usd: float,
+) -> bool:
+    """是否需要 re-hedge:净 delta 的 USD 价值 > 单腿名义 × ``threshold_frac``。
+
+    为什么 size-aware（2026-06-01 修 bug）
+    --------------------------------------
+    旧逻辑 ``abs(net_delta) > threshold × strike / 10000``：threshold=0.05 时
+    阈值 = 0.05×70000/10000 = **0.35 BTC**（且随 strike 越涨越松，方向反了）。
+    但 ``$1000/腿`` 的 ATM 跨式，net_delta 物理上最多漂移 ~``qty×ct_val`` =
+    ``(1000/(spot×ct_val))×ct_val`` ≈ ``1000/spot`` ≈ **0.014 BTC** —— 比阈值小
+    ~25× → ``re-hedge`` 条件**永不成立**，入场对冲一次后仓位裸奔短 gamma 直到
+    5% spot 硬止损。即便去掉 strike-scaling，常数 0.05 BTC 仍是漂移上限 3.5×。
+
+    正确做法是让阈值随仓位走：当 delta 漂移的 USD 价值超过单腿名义的一定比例
+    （默认 ``threshold_frac=0.2`` → 漂移达单腿名义 20% ≈ $200 时再平衡）即触发，
+    与 strike / size 无关地保持 delta 中性。
+
+    Args:
+        net_delta_btc: 组合净 delta（BTC 单位）。
+        spot: 现价（USD/BTC）；``<=0``（尚无价）→ 返回 False，等下次有价再判。
+        threshold_frac: 触发阈值占单腿名义的比例。
+        leg_notional_usd: 单腿名义（``max_notional_per_leg_usdt``）。
+    """
+    if spot <= 0:
+        return False
+    return abs(net_delta_btc) * spot > threshold_frac * leg_notional_usd
+
+
 if _NT_AVAILABLE:
 
     class OptionVolConfig(StrategyConfig, frozen=True):  # type: ignore[misc]
@@ -121,7 +154,9 @@ if _NT_AVAILABLE:
         iv_rv_ratio_min: float = 1.20
         rv_window: int = 30
         max_notional_per_leg_usdt: float = 1000.0
-        delta_hedge_threshold: float = 0.05
+        # delta re-hedge 触发阈值：net delta 的 USD 价值占单腿名义的比例
+        # （2026-06-01 修 bug 后语义；0.2 = 漂移达单腿名义 20% ≈ $200 时再平衡）。
+        delta_hedge_threshold: float = 0.2
         delta_hedge_freq_min: int = 60
         stop_distance_strike_pct: float = 0.05
         close_days_before_expiry: int = 1
@@ -533,9 +568,15 @@ if _NT_AVAILABLE:
                 - self._put_qty * float(put_summary.delta) * ct_val
                 + self._perp_pos * ct_val
             )
-            # 阈值判断：偏离 > threshold 的 spot 等价量 → re-hedge
-            if abs(net_delta) > self.config.delta_hedge_threshold * self._strike / 10000.0:
-                # 阈值是 BTC 单位下的近似（0.05 ≈ 0.05 BTC ≈ $4000 spot）；这里粗略
+            # 阈值判断：net delta 的 USD 价值 > 单腿名义 × threshold_frac → re-hedge。
+            # size-aware（2026-06-01 修 bug：旧式 ×strike/10000 ≈0.35 BTC，对 $1000/腿
+            # 跨式的 ~0.014 BTC 漂移永不触发 → 对冲形同虚设）。
+            cfg: OptionVolConfig = self.config  # type: ignore[assignment]
+            if needs_rehedge(
+                net_delta, self._last_perp_close,
+                threshold_frac=cfg.delta_hedge_threshold,
+                leg_notional_usd=cfg.max_notional_per_leg_usdt,
+            ):
                 self._hedge_to_neutral(net_delta)
 
         def _close_all(self, reason: str) -> None:

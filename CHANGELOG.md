@@ -8,6 +8,13 @@
 
 ## [Unreleased] — Paper trading 观察期
 
+### Fixed (option_vol_selling delta-hedge 上线前 bug, 2026-06-01)
+
+- **`fix(option_vol_selling)`** — delta re-hedge 阈值 size-aware 化(上线前 hardening;该策略仍 `enabled:false`,零实盘影响)。
+  - 根因:`abs(net_delta) > delta_hedge_threshold × strike / 10000` —— `0.05` 算成 **0.35 BTC**(@70k,且随价格越涨越松,方向反了),而 `$1000/腿` ATM 跨式的 net_delta 物理上最多漂移 ~**0.014 BTC**(≈`1000/spot`)→ re-hedge **永不触发**,入场对冲一次后裸奔短 gamma 直到 5% spot 止损 —— 对 short-gamma 策略等于核心风控静默失效。即便去掉 strike-scaling,常数 `0.05 BTC` 仍是漂移上限 3.5×。
+  - 修:抽纯函数 `needs_rehedge(net_delta, spot, threshold_frac, leg_notional)` —— net delta 的 USD 价值 > 单腿名义 × `threshold_frac` 才再平衡,与 strike/size 无关。`delta_hedge_threshold` 默认 0.05→**0.2**(漂移达单腿名义 20% ≈ $200 触发)。5 个单测覆盖(含"0.014 BTC 现在正确触发"回归)。
+  - 上线前剩余项:补 isolated margin + paper gate 验证 re-hedge 真触发 / 期权 fill 率(见 go/no-go)。
+
 ### Changed (liq_reversal 止血 + 修复 plan, 2026-05-31)
 
 - **`fix(liq_reversal)`** — `risk_pct` 0.5% → **0.25%** 临时止血。复盘(4 天 12 round-trips)发现执行滑点把名义 3R 压成实测 ~1.2R(TP 市价回撤只吃 53%、SL 穿价 134%)+ 逆势 falling-knife 偏向(13 LONG vs 3 SHORT,入场价单边下行),结构性 -2.4 USDT/笔(4 天 -34)。减半把出血砍半,保留 paper 观察。
