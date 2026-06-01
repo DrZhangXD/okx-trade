@@ -212,7 +212,10 @@ def test_build_live_context_injects_iso_service_and_vol_filter(
         def __init__(self) -> None:
             self.trader = _FakeTrader()
 
-    monkeypatch.setattr(live_node_mod, "_build_trading_node", lambda cfg: _FakeNode())
+    monkeypatch.setattr(
+        live_node_mod, "_build_trading_node",
+        lambda cfg, option_ulys=None: _FakeNode(),  # fceeb2a 加了 option_ulys kwarg
+    )
 
     ctx = build_live_context(minimal_live_cfg, build_node=True)
 

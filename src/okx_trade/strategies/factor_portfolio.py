@@ -608,18 +608,10 @@ if _NT_AVAILABLE:
                 if (self._weights
                         and ts_ms - self._last_rebalance_ms
                         >= self.config.rebalance_hours * 3_600_000):
-                    # 2026-05-26 Phase 1c: _rebalance is now async (calls
-                    # await self._open_leg which may await set-leverage).
-                    # Dispatch from sync on_bar via asyncio.create_task,
-                    # mirroring funding_cross_section.on_bar→_rebalance_async.
-                    import asyncio
-                    try:
-                        loop = asyncio.get_running_loop()
-                        loop.create_task(self._rebalance(ts_ms))
-                    except RuntimeError:
-                        self.log.warning(
-                            "factor_portfolio: no running loop; skip rebalance"
-                        )
+                    # _rebalance is async (live awaits set-leverage). dispatch_rebalance
+                    # 在 backtest 同步泵到完成(NT BacktestEngine 同步跑,create_task 会把
+                    # 订单提交推迟到 exec client 断开后 → 'not connected'),live 走 create_task。
+                    self.dispatch_rebalance(self._rebalance(ts_ms))
                     self._last_rebalance_ms = ts_ms
                 return
             if inst_value in self._spot_to_perp:

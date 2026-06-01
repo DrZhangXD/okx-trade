@@ -8,6 +8,15 @@
 
 ## [Unreleased] — Paper trading 观察期
 
+### Fixed (factor_portfolio / funding_xs 回测不成交, 2026-06-01)
+
+- **`fix(backtest)`** — factor_portfolio / funding_cross_section 的 NT 回测**零成交、PnL 恒 0**(degenerate)修复。
+  - 根因:`on_bar`(同步回调)用 `loop.create_task(self._rebalance(...))` 派发 async rebalance。NT `BacktestEngine` 同步跑数据流,这些 detached task 要等 run 结束才被事件循环执行 —— 那时 `BacktestExecClient` 已断开,`submit_order` 抛 `ValueError: not connected` → 744→**0** 成交、`pnl_pct=0`/`sharpe=nan`。`scripts/backtest.py` 又因 `.env` 有真实 key 使 `IsolatedMarginService.is_backtest()`(api_key 启发式)误判,掩盖了表层。
+  - 修:`OkxStrategyBase.dispatch_rebalance(coro)` —— backtest(`TestClock`)下用 `drive_coro_sync` 把协程同步泵到完成(其 await 在 backtest 都不阻塞:iso set-leverage 走 cross 分支),订单在 `on_bar` 同步上下文、exec client 连接时提交;live(`LiveClock`)仍走 `create_task`(并保 task 引用防 GC)。factor_portfolio / funding_cross_section 的 on_bar 改用它。
+  - 验证:同一回测从 0 成交 → **744 成交 / 377 持仓 / nt_sharpe 4.83 / win 57.3%**,`not connected` 归零。Exp 1b A/B(5,5 vs 3,3,短窗)now 可比:减腿反而 pnl/sharpe/win 全降,**不支持"减腿提升"假设**(需更长窗复核)。
+  - 顺带:修了 `fceeb2a` 引入的 `test_build_live_context_...` 失败(monkeypatch lambda 漏 `option_ulys` kwarg)。`drive_coro_sync` 单测覆盖完成/挂起两路。全套 1021 passed。
+  - 已知遗留(非本次):CLI `--top-n/--bot-n` 未接 factor_portfolio(它读 yaml 的 top_k);equity_* 指标短窗年化失真(用 nt_* 为准)。
+
 ### Fixed (option_vol_selling delta-hedge 上线前 bug, 2026-06-01)
 
 - **`fix(option_vol_selling)`** — delta re-hedge 阈值 size-aware 化(上线前 hardening;该策略仍 `enabled:false`,零实盘影响)。

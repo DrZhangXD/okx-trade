@@ -29,11 +29,61 @@ if TYPE_CHECKING:
     from ..risk.volatility_filter import VolatilityFilter
 
 
+def drive_coro_sync(coro) -> bool:
+    """把协程同步推进一步;完成(StopIteration)返回 True,挂起(yield 了 future）
+    返回 False。
+
+    NT backtest 修复(2026-06-01）:``on_bar`` 是同步回调,async rebalance 过去用
+    ``loop.create_task`` 派发。但 NT ``BacktestEngine`` 同步跑数据流,这些 detached
+    task 要等 run 结束才被事件循环执行,那时 ``BacktestExecClient`` 已断开 →
+    ``submit_order`` 抛 ``ValueError: not connected`` → 0 成交。
+
+    在 backtest 里 rebalance 协程的 await 都不阻塞(``submit_isolated_order`` 因
+    ``_iso_service is None`` 走 cross 分支、不 await 真实 I/O),所以一次 ``send(None)``
+    即跑完 → 订单在 ``on_bar`` 同步上下文里、exec client 连接时提交。live 路径会因
+    真实 ``await``(set-leverage REST)挂起 → 返回 False,由调用方交回事件循环。
+    """
+    try:
+        coro.send(None)
+    except StopIteration:
+        return True
+    return False
+
+
 class OkxStrategyBase(_NTStrategy):  # type: ignore[misc,valid-type]
     """Optional base for OKX-aware strategies. See module docstring."""
 
     _iso_service: "IsolatedMarginService | None" = None
     _vol_filter: "VolatilityFilter | None" = None
+
+    def _in_backtest(self) -> bool:
+        """NT ``BacktestEngine`` 用 ``TestClock``,live ``TradingNode`` 用 ``LiveClock``。"""
+        return type(getattr(self, "clock", None)).__name__ == "TestClock"
+
+    def dispatch_rebalance(self, coro) -> None:
+        """派发一个 async rebalance 协程。backtest 同步泵到完成(否则订单在
+        exec client 断开后提交 → 'not connected');live 交给事件循环 create_task。"""
+        if self._in_backtest():
+            if not drive_coro_sync(coro):
+                coro.close()
+                self.log.warning(
+                    "rebalance suspended in backtest (unexpected real await); skipped",
+                )
+            return
+        import asyncio
+        try:
+            loop = asyncio.get_running_loop()
+            task = loop.create_task(coro)
+            # 保引用防 GC(detached task 没人持有会被回收 → "Task was destroyed")
+            tasks = getattr(self, "_rebalance_tasks", None)
+            if tasks is None:
+                tasks = set()
+                self._rebalance_tasks = tasks
+            tasks.add(task)
+            task.add_done_callback(tasks.discard)
+        except RuntimeError:
+            coro.close()
+            self.log.warning("no running loop; rebalance skipped")
 
     def vol_filter_allow(self, inst_id_okx: str) -> tuple[bool, str]:
         """Convenience wrapper.

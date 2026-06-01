@@ -442,11 +442,9 @@ if _NT_AVAILABLE:
                     and (today, now_hour) != (self._last_rebalance_day, self._last_rebalance_hour)):
                 self._last_rebalance_day = today
                 self._last_rebalance_hour = now_hour
-                try:
-                    loop = asyncio.get_running_loop()
-                    self._funding_task = loop.create_task(self._rebalance_async())
-                except RuntimeError:
-                    self.log.warning("funding_xs: no running loop; skip rebalance")
+                # backtest 同步泵(NT BacktestEngine 同步跑,create_task 会把订单提交
+                # 推迟到 exec client 断开后 → 'not connected'),live 走 create_task。
+                self.dispatch_rebalance(self._rebalance_async())
 
         def _feed_risk_data(self) -> None:
             equity_usdt = read_account_total_equity_usdt(
