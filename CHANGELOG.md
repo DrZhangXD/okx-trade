@@ -15,6 +15,7 @@
   - 修:`OkxStrategyBase.dispatch_rebalance(coro)` —— backtest(`TestClock`)下用 `drive_coro_sync` 把协程同步泵到完成(其 await 在 backtest 都不阻塞:iso set-leverage 走 cross 分支),订单在 `on_bar` 同步上下文、exec client 连接时提交;live(`LiveClock`)仍走 `create_task`(并保 task 引用防 GC)。factor_portfolio / funding_cross_section 的 on_bar 改用它。
   - 验证:同一回测从 0 成交 → **744 成交 / 377 持仓 / nt_sharpe 4.83 / win 57.3%**,`not connected` 归零。Exp 1b A/B(5,5 vs 3,3,短窗)now 可比:减腿反而 pnl/sharpe/win 全降,**不支持"减腿提升"假设**(需更长窗复核)。
   - 顺带:修了 `fceeb2a` 引入的 `test_build_live_context_...` 失败(monkeypatch lambda 漏 `option_ulys` kwarg)。`drive_coro_sync` 单测覆盖完成/挂起两路。全套 1021 passed。
+- **`fix(backtest)`** — factor_portfolio 回测真正支持 `--reuse-data`:`cmd_backtest_portfolio` 加 `reuse_data` 跳过全部网络下载(bars + warmup panel + panel pre-warm),直接读已有 catalog。解决"窗口随 `time.time()` 漂移 → 第二轮重跑触发 catalog 非-disjoint 写冲突 + 多标的长窗下载太慢/太脆"。验证:download 一次后 `--reuse-data` 重跑 **1.3s 完成、0 网络调用、结果完全一致**。这让"下载一次 → 跑多组 top_k 的稳定 A/B"成为可能。
   - 已知遗留(非本次):CLI `--top-n/--bot-n` 未接 factor_portfolio(它读 yaml 的 top_k);equity_* 指标短窗年化失真(用 nt_* 为准)。
 
 ### Fixed (option_vol_selling delta-hedge 上线前 bug, 2026-06-01)

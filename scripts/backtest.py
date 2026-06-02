@@ -1001,17 +1001,22 @@ async def _run_factor_portfolio(args: argparse.Namespace) -> None:
     catalog_path = Path(args.catalog).resolve()
     catalog_path.mkdir(parents=True, exist_ok=True)
 
-    print(
-        f"[0/3] pre-warming research panel cache "
-        f"({len(bare_ids)} instruments × {args.total_bars} {args.signal_bar} bars)"
-    )
     async with OKXRestClient(OKXSettings()) as client:
-        panel_path = await ensure_panel_cached(
-            rest_client=client, inst_ids=bare_ids, bar=args.signal_bar,
-            start_ms=start_ms, end_ms=end_ms, include=include,
-            cache_dir=cache_dir,
-        )
-        print(f"        panel parquet: {panel_path} ({panel_path.stat().st_size:,} bytes)")
+        if args.reuse_data:
+            # 复用上次下载的 catalog + 缓存 panel,跳过全部网络拉取 → 同窗 A/B
+            # 第二轮瞬时重跑(先 download 一次,再用 --reuse-data 跑不同 top_k)。
+            print("[0/3] reusing cached data (--reuse-data); skipping panel pre-warm")
+        else:
+            print(
+                f"[0/3] pre-warming research panel cache "
+                f"({len(bare_ids)} instruments × {args.total_bars} {args.signal_bar} bars)"
+            )
+            panel_path = await ensure_panel_cached(
+                rest_client=client, inst_ids=bare_ids, bar=args.signal_bar,
+                start_ms=start_ms, end_ms=end_ms, include=include,
+                cache_dir=cache_dir,
+            )
+            print(f"        panel parquet: {panel_path} ({panel_path.stat().st_size:,} bytes)")
 
         summary = await cmd_backtest_portfolio(
             rest_client=client,
@@ -1023,6 +1028,7 @@ async def _run_factor_portfolio(args: argparse.Namespace) -> None:
             maker_fee_bps=args.maker_fee_bps,
             warmup_days=args.warmup_days,
             warmup_panel_dir=cache_dir,
+            reuse_data=args.reuse_data,
         )
     print("\n=== RESULT ===")
     for k, v in summary.items():

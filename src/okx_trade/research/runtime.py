@@ -339,6 +339,7 @@ async def cmd_backtest_portfolio(
     maker_fee_bps: float = 2.0,
     warmup_days: int = 0,
     warmup_panel_dir: Path | None = None,
+    reuse_data: bool = False,
 ) -> dict:
     """Run FactorPortfolioStrategy backtest on freshly-downloaded bars.
 
@@ -380,26 +381,34 @@ async def cmd_backtest_portfolio(
         if bid.endswith("-SWAP"):
             spot_ids.append(bid[: -len("-SWAP")])
 
-    print(
-        f"[1/3] downloading {total_bars} × {bar} bars for "
-        f"{len(bare_ids)} perps + {len(spot_ids)} spot pairs"
-    )
-    for inst_id in bare_ids + spot_ids:
-        try:
-            _, bars = await prepare_backtest_catalog(
-                rest_client, inst_id, bar,  # type: ignore[arg-type]
-                total=total_bars, catalog_path=catalog_path,
-                taker_fee_bps=taker_fee_bps, maker_fee_bps=maker_fee_bps,
-            )
-            print(f"        {inst_id}: {len(bars)} bars")
-        except Exception as exc:  # noqa: BLE001
-            # Spot pair may not exist for some perps — log + continue (strategy
-            # will get None basis_apr for that inst, which it tolerates).
-            if inst_id in spot_ids:
-                print(f"        {inst_id}: SKIP ({exc})")
-                continue
-            print(f"        {inst_id}: FAILED ({exc})")
-            raise
+    if reuse_data:
+        # 复用已有 catalog 的 bars(上次下载留下的)。跳过全部网络下载 →
+        # 同窗 A/B 第二轮可瞬时重跑,且避开"窗口漂移→catalog 非disjoint 写冲突"。
+        print(
+            f"[1/3] reusing catalog bars (--reuse-data) for "
+            f"{len(bare_ids)} perps + {len(spot_ids)} spot pairs"
+        )
+    else:
+        print(
+            f"[1/3] downloading {total_bars} × {bar} bars for "
+            f"{len(bare_ids)} perps + {len(spot_ids)} spot pairs"
+        )
+        for inst_id in bare_ids + spot_ids:
+            try:
+                _, bars = await prepare_backtest_catalog(
+                    rest_client, inst_id, bar,  # type: ignore[arg-type]
+                    total=total_bars, catalog_path=catalog_path,
+                    taker_fee_bps=taker_fee_bps, maker_fee_bps=maker_fee_bps,
+                )
+                print(f"        {inst_id}: {len(bars)} bars")
+            except Exception as exc:  # noqa: BLE001
+                # Spot pair may not exist for some perps — log + continue (strategy
+                # will get None basis_apr for that inst, which it tolerates).
+                if inst_id in spot_ids:
+                    print(f"        {inst_id}: SKIP ({exc})")
+                    continue
+                print(f"        {inst_id}: FAILED ({exc})")
+                raise
 
     print("[2/3] building backtest config")
     from nautilus_trader.backtest.config import BacktestDataConfig
@@ -433,28 +442,33 @@ async def cmd_backtest_portfolio(
     # load it in on_start and start with hot rolling-window buffers.
     warmup_panel_cache_path: str | None = None
     if warmup_days > 0:
-        bar_ms = _bar_to_minutes(bar) * 60_000
-        bt_start_ms = int(_time.time() * 1000) - (total_bars * bar_ms)
-        warmup_start_ms = bt_start_ms - (warmup_days * 24 * 3_600_000)
-        warmup_end_ms = bt_start_ms - 1
-        print(
-            f"[1.5/3] fetching warmup panel ({warmup_days} days × {len(bare_ids)} perps)"
-        )
-        warmup_panel = await fetch_panel(
-            rest_client=rest_client,
-            inst_ids=bare_ids,
-            start_ms=warmup_start_ms,
-            end_ms=warmup_end_ms,
-            bar=bar,
-            include=("close", "volume_usdt", "funding_rate", "open_interest", "basis_apr"),
-            cache_dir=warmup_panel_dir,
-        )
         out_dir = warmup_panel_dir or catalog_path.parent
-        out_dir.mkdir(parents=True, exist_ok=True)
         warmup_path = out_dir / "warmup_panel.parquet"
-        _save_cache(warmup_panel, warmup_path)
-        warmup_panel_cache_path = str(warmup_path)
-        print(f"        wrote warmup parquet → {warmup_path} (T={warmup_panel.t})")
+        if reuse_data and warmup_path.exists():
+            # 复用上次写下的 warmup panel,跳过网络拉取。
+            warmup_panel_cache_path = str(warmup_path)
+            print(f"[1.5/3] reusing warmup panel → {warmup_path}")
+        else:
+            bar_ms = _bar_to_minutes(bar) * 60_000
+            bt_start_ms = int(_time.time() * 1000) - (total_bars * bar_ms)
+            warmup_start_ms = bt_start_ms - (warmup_days * 24 * 3_600_000)
+            warmup_end_ms = bt_start_ms - 1
+            print(
+                f"[1.5/3] fetching warmup panel ({warmup_days} days × {len(bare_ids)} perps)"
+            )
+            warmup_panel = await fetch_panel(
+                rest_client=rest_client,
+                inst_ids=bare_ids,
+                start_ms=warmup_start_ms,
+                end_ms=warmup_end_ms,
+                bar=bar,
+                include=("close", "volume_usdt", "funding_rate", "open_interest", "basis_apr"),
+                cache_dir=warmup_panel_dir,
+            )
+            out_dir.mkdir(parents=True, exist_ok=True)
+            _save_cache(warmup_panel, warmup_path)
+            warmup_panel_cache_path = str(warmup_path)
+            print(f"        wrote warmup parquet → {warmup_path} (T={warmup_panel.t})")
 
     strategy_config = ImportableStrategyConfig(
         strategy_path="okx_trade.strategies.factor_portfolio:FactorPortfolioStrategy",
