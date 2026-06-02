@@ -8,6 +8,10 @@
 
 ## [Unreleased] — Paper trading 观察期
 
+### Changed (factor_portfolio 减腿 paper A/B, 2026-06-02)
+
+- **`config(factor_portfolio)`** — `top_k_long/short` 5,5 → **3,3**(paper 前向 A/B)。3 窗回测(1000/1500/2000 bars,靠新 `--reuse-data` 同窗跑成):减腿性能 ≈中性(3,3 赢 2 输 1,pnl 差 ~0.2% / sharpe 差 ~0.4,在噪声内)但**一致少交易 15-20%** → 省手续费。回测边际太小不足以单凭回测拍板 → 上 paper 观察 2-4 周前向表现 vs 5,5 历史。reversible(改回 5,5 即可)。
+
 ### Fixed (factor_portfolio / funding_xs 回测不成交, 2026-06-01)
 
 - **`fix(backtest)`** — factor_portfolio / funding_cross_section 的 NT 回测**零成交、PnL 恒 0**(degenerate)修复。

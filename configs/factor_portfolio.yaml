@@ -11,8 +11,11 @@ instrument_ids:
 - BNB-USDT-SWAP.OKX
 bar_type_template: '{inst}-1-HOUR-LAST-EXTERNAL'
 rebalance_hours: 4
-top_k_long: 5
-top_k_short: 5
+# 2026-06-02 paper A/B:5,5 → 3,3。3 窗回测(1000/1500/2000 bars)显示减腿性能
+# ≈中性(赢2输1,差距在噪声内)但一致少交易 15-20% → 省手续费。线上 paper 观察
+# 前向表现 vs 5,5 历史,2-4 周后定夺(回测边际太小不足以单凭回测拍板)。
+top_k_long: 3
+top_k_short: 3
 risk_pct: 0.002
 account_equity_usdt: 10000.0
 factor_weights:
