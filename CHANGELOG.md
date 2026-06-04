@@ -8,6 +8,13 @@
 
 ## [Unreleased] — Paper trading 观察期
 
+### Fixed (daily_report 漏报 factor_portfolio, 2026-06-04)
+
+- **`fix(daily_report)`** — 把策略枚举从 `list_strategies()`(只扫 `trades` ∪ `equities`)扩到也纳入 `trades_okx` 的 strategy_id。
+  - 根因:`factor_portfolio` 从不调 `record_strategy_equity_daily`(其他策略都调),所以不在 `equities`/`trades` 表里 → 不在 `list_strategies()` → **自上线(05-19)起每一份日报都静默漏掉它**。后果:日报 TOTAL 一直系统性低估账户亏损(把 factor 这个较大的费拖累户整个排除),与权益实际跌幅对不上。
+  - 修:新增 `PnLTracker.list_okx_strategies()`(trades_okx 里去重的 strategy_id);`daily_report.build_report` 把它们也分桶。任何"有成交但没写 equity"的策略(含将来新策略)不再被漏。
+  - 实测:factor 06-03 有 13 个平仓回合却不在报告里;修复后纳入。回归测试(只 seed trades_okx 的策略必须出现)。全套 1022 passed。
+
 ### Changed (factor_portfolio 减腿 paper A/B, 2026-06-02)
 
 - **`config(factor_portfolio)`** — `top_k_long/short` 5,5 → **3,3**(paper 前向 A/B)。3 窗回测(1000/1500/2000 bars,靠新 `--reuse-data` 同窗跑成):减腿性能 ≈中性(3,3 赢 2 输 1,pnl 差 ~0.2% / sharpe 差 ~0.4,在噪声内)但**一致少交易 15-20%** → 省手续费。回测边际太小不足以单凭回测拍板 → 上 paper 观察 2-4 周前向表现 vs 5,5 历史。reversible(改回 5,5 即可)。

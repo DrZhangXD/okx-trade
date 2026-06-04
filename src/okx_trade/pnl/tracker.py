@@ -373,6 +373,27 @@ class PnLTracker:
             )
             return sorted(r[0] for r in cur.fetchall())
 
+    def list_okx_strategies(self) -> list[str]:
+        """``trades_okx`` 里出现过的 strategy_id（去重、非 NULL）。无该表 → ``[]``。
+
+        ``list_strategies()`` 只看 ``trades`` ∪ ``equities``;不写 equity 快照的
+        策略(如 ``factor_portfolio`` 从不调 ``record_strategy_equity_daily``)只在
+        ``trades_okx`` 有数据,会被 ``daily_report`` 整个漏掉。daily_report 用本方法
+        把这些只在权威账本里的策略也纳入枚举(2026-06-04 修)。
+        """
+        with self._lock:
+            has_okx = self._conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' "
+                "AND name='trades_okx'"
+            ).fetchone()
+            if not has_okx:
+                return []
+            cur = self._conn.execute(
+                "SELECT DISTINCT strategy_id FROM trades_okx "
+                "WHERE strategy_id IS NOT NULL"
+            )
+            return sorted(r[0] for r in cur.fetchall())
+
     def close(self) -> None:
         with self._lock:
             self._conn.close()

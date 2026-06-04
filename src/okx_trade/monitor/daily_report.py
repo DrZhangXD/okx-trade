@@ -123,6 +123,12 @@ class DailyReporter:
         buckets: dict[str, list[str]] = defaultdict(list)
         for sid in self.tracker.list_strategies():
             buckets[_canonical_class_id(sid)].append(sid)
+        # 也纳入只在 trades_okx 出现的策略——不写 equity 快照者(如 factor_portfolio)
+        # 不在 list_strategies 里,否则会被整份报告漏掉、TOTAL 低估亏损(2026-06-04 修)。
+        for sid in self.tracker.list_okx_strategies():
+            canon = _canonical_class_id(sid)
+            if sid not in buckets[canon]:
+                buckets[canon].append(sid)
 
         per_strategy: list[StrategyDailyReport] = []
         total_count = 0

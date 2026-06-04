@@ -257,6 +257,34 @@ def test_daily_report_counts_round_trips_not_open_orders(tmp_path: Path) -> None
     tracker.close()
 
 
+def test_daily_report_includes_okx_only_strategy(tmp_path: Path) -> None:
+    """只有 trades_okx 活动(不写 equity / trades 快照)的策略也必须出现在报告里。
+
+    2026-06-04 bug:``factor_portfolio`` 从不调 ``record_strategy_equity_daily``,
+    所以 ``list_strategies()``(只扫 trades∪equities)看不到它 → 它被**每一份**
+    日报静默漏掉,TOTAL 一直低估账户亏损。修复:report 的策略枚举也纳入
+    ``trades_okx`` 里的 strategy_id。
+    """
+    tracker = PnLTracker(":memory:")
+    # 只 seed trades_okx —— 无 equity、无 legacy trades(模拟 factor_portfolio)
+    _seed_trades_okx(tracker, [
+        ("b1", _ts("2026-06-03", 5), "BTC-USDT-SWAP", "cl1", "factor_portfolio", -3.0),
+        ("b2", _ts("2026-06-03", 6), "ETH-USDT-SWAP", "cl2", "factor_portfolio", 5.0),
+    ])
+    reporter = DailyReporter(tracker, output_dir=tmp_path)
+    j = json.loads(reporter.write_for_date("2026-06-03").read_text(encoding="utf-8"))
+
+    ids = [r["strategy_id"] for r in j["per_strategy"]]
+    assert "factor_portfolio" in ids, f"factor_portfolio 被漏掉了: {ids}"
+    row = next(r for r in j["per_strategy"] if r["strategy_id"] == "factor_portfolio")
+    assert row["trade_count"] == 2          # 2 个平仓回合(pnl≠0)
+    assert row["pnl_usdt"] == pytest.approx(2.0)   # -3 + 5
+    assert row["win_rate"] == pytest.approx(0.5)   # 1 赢 1 输
+    # totals 不再漏掉它
+    assert j["totals_pnl_usdt"] == pytest.approx(2.0)
+    tracker.close()
+
+
 def test_daily_report_non_nt_strategy_id_passthrough(tmp_path: Path) -> None:
     """不带 'Strategy' 后缀的旧式 sid（s1/s2，多见于单测/回测）不应被改写。"""
     tracker = PnLTracker(":memory:")
