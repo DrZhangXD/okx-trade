@@ -25,7 +25,10 @@ reentry_cooldown_sec: 60          # 平仓后 60s 内不能再入场
 reentry_requires_reversal: true   # 平仓后 imbalance 必须穿过 0 反转才能再入场
 
 # 仓位（M6+.Y：0.2% → 0.15% 继续压低，验证期再缩仓）
-risk_pct: 0.0015
+# 2026-06-09 减配止血:0.15% → 0.05%(1/3)。7天净 -139,手续费 -174 是毛 alpha
+# 的 5 倍 = 灾难性 fee churn,头号失血源。砍仓 → 绝对失血砍到 1/3,保留观察;
+# 真正修法是降频(需 books5 回测,blocked)。reversible。
+risk_pct: 0.0005
 account_equity_usdt: 10000.0
 
 # 实盘默认开 WS；回测/单测时设 false 改用手动喂帧

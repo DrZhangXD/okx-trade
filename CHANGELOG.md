@@ -8,6 +8,13 @@
 
 ## [Unreleased] — Paper trading 观察期
 
+### Changed (减配止血:ob_imbalance / liq_reversal, 2026-06-09)
+
+- **`config`** — 针对 8 天 -3.8% 的 paper 持续回撤做精准减配止血(allocator 是等权、无按策略权重旋钮 → 用 per-strategy `risk_pct`)。7 天账本净额排名定位失血源:
+  - **`ob_imbalance` risk_pct 0.15% → 0.05%(1/3)** —— 头号失血:7 天净 **-139**,手续费 -174 是毛 alpha(+35)的 **5 倍** = 灾难性 fee churn(920 单)。砍仓把绝对失血降到 ~1/3,保留观察;真正修法(降频)需 books5 回测,blocked。
+  - **`liq_reversal` risk_pct 0.25% → 0.125%(再减半)** —— #2 失血(7 天 -32,执行滑点修复未落地)。
+  - **不动赢家**:factor_portfolio(3,3,7 天 **+62**,全场最佳)、funding_cross_section(+2)、funding_carry(+9)。也修正了之前"factor 在亏/funding_xs 该减配"的误判 —— 那些是转换日噪声 / funding 收入未计。reversible。
+
 ### Fixed (daily_report 漏报 factor_portfolio, 2026-06-04)
 
 - **`fix(daily_report)`** — 把策略枚举从 `list_strategies()`(只扫 `trades` ∪ `equities`)扩到也纳入 `trades_okx` 的 strategy_id。

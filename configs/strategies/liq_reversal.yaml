@@ -16,7 +16,8 @@ entry_tp_rr_ratio: 3.0         # 3R 止盈(2026-05-16 调:2.0 → 3.0,盈亏平�
 # (TP 市价回撤只吃 53%、SL 穿价 134%)+ 逆势 falling-knife 偏向,结构性 -2.4/笔
 # (4 天 -34 USDT)。减半把出血砍半,保留 paper 观察;正经修复(真实 bracket/algo
 # 单 + 趋势否决)见 docs/superpowers/plans/2026-05-31-liq-reversal-execution-fix.md。
-risk_pct: 0.0025
+# 2026-06-09 再减半:0.0025 → 0.00125。仍是 7 天 -32 的 #2 失血源(执行修复未落地)。
+risk_pct: 0.00125
 account_equity_usdt: 10000.0
 buffer_size: 50000             # 24h 高峰期足够
 
