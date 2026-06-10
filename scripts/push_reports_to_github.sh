@@ -26,7 +26,13 @@ cp -p var/observation_reports/*.md "$PUB_DIR/observation/" 2>/dev/null || true
 cp -p var/audits/*.md "$PUB_DIR/truth/" 2>/dev/null || true
 
 # 没变化就 noop
-if [[ -z "$(git status --porcelain published_reports/)" ]]; then
+# 注意：$(...) 在条件判断里不受 set -e 保护，git status 失败（dubious ownership、
+# 仓库损坏等）会返回空串被误判为 "no changes"，必须显式检查退出码。
+if ! changes=$(git status --porcelain published_reports/); then
+    echo "$(date -u +%FT%TZ) push_reports: ERROR: git status failed" >&2
+    exit 1
+fi
+if [[ -z "$changes" ]]; then
     echo "$(date -u +%FT%TZ) push_reports: no changes"
     exit 0
 fi
