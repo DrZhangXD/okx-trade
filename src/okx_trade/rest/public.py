@@ -1,11 +1,16 @@
 """公共数据接口（不需鉴权）：交易品种规格、funding rate 等。"""
 from __future__ import annotations
 
+from pydantic import ValidationError
+
 from ..enums import InstType
 from ..exceptions import OKXAPIError
 from ..models.common import FundingRate, Instrument, OptionSummary
 from ..models.market import OpenInterest, OpenInterestPoint
+from ..utils.logging import get_logger
 from .transport import Transport
+
+log = get_logger(__name__)
 
 
 class PublicEndpoints:
@@ -32,7 +37,21 @@ class PublicEndpoints:
             "GET", "/api/v5/public/instruments",
             params=params, group="public.instruments",
         )
-        return [Instrument.model_validate(d) for d in data]
+        # OKX 会混入 preopen 占位条目，最严重时连 instId 都缺（2026-06-09 FUTURES
+        # 列表实际出现）。单条坏数据不能让整批抛错——load_all_async 靠这里的返回
+        # 建全量 cache，整批失败等于一个 instrument 都加载不上、策略全部停摆。
+        instruments: list[Instrument] = []
+        for d in data:
+            try:
+                instruments.append(Instrument.model_validate(d))
+            except ValidationError as exc:
+                log.warning(
+                    "instrument_parse_skipped",
+                    inst_id=d.get("instId") or "<missing>",
+                    state=d.get("state", ""),
+                    errors=exc.error_count(),
+                )
+        return instruments
 
     async def get_instrument(self, inst_type: InstType, inst_id: str) -> Instrument:
         """便捷方法：拿单个品种规格，找不到则抛 ``OKXAPIError``。"""

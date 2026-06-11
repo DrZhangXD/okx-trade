@@ -83,6 +83,30 @@ class TestPublic:
             with pytest.raises(OKXAPIError, match="not found"):
                 await c.public.get_instrument(InstType.SWAP, "FAKE-USDT-SWAP")
 
+    async def test_get_instruments_skips_rows_missing_inst_id(self) -> None:
+        """OKX FUTURES 列表会混入缺 instId 的 preopen 占位条目（2026-06-09 实际发生，
+        导致 live 节点 instrument 全量加载失败、策略停摆）。单条坏数据必须跳过，
+        不能让整批解析失败。"""
+        def handler(req: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={"code": "0", "data": [
+                {
+                    "instId": "BTC-USDT-SWAP",
+                    "instType": "SWAP",
+                    "ctVal": "0.01",
+                    "tickSz": "0.1",
+                    "lotSz": "1",
+                    "minSz": "1",
+                    "state": "live",
+                },
+                # preopen 占位条目：连 instId 都没有（category=1 futures 预上市）
+                {"category": "1", "instType": "FUTURES", "state": "preopen", "upcChg": []},
+            ]})
+
+        async with _client(handler) as c:
+            insts = await c.public.get_instruments(InstType.SWAP)
+
+        assert [i.inst_id for i in insts] == ["BTC-USDT-SWAP"]
+
     async def test_get_funding_rate(self) -> None:
         captured: dict[str, Any] = {}
 
