@@ -21,7 +21,7 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 from websockets.asyncio.client import ClientConnection, connect
-from websockets.exceptions import ConnectionClosed
+from websockets.exceptions import ConnectionClosed, InvalidHandshake
 
 from ..auth import build_ws_login_args
 from ..exceptions import OKXSubscriptionError, OKXWSConnectionError
@@ -143,6 +143,11 @@ class WSConnection:
                 attempt = 0  # 成功完成一轮则重置退避
             except (
                 ConnectionClosed,
+                # InvalidHandshake 覆盖 InvalidStatus——OKX 在重连风暴里会用
+                # HTTP 502 拒绝握手（2026-06-12 business 端点实际发生）。这是瞬时
+                # 故障，必须当成普通断连退避重连，不能落到下面 attempt>5 的致命
+                # raise 路径把整个端点 task 打死、订阅永久失效。
+                InvalidHandshake,
                 OKXWSConnectionError,
                 OSError,
                 asyncio.TimeoutError,

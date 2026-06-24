@@ -278,6 +278,56 @@ class TestReconnect:
                 await conn.stop()
 
 
+    async def test_survives_repeated_handshake_rejection(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """OKX 重连风暴里会用 HTTP 502 拒绝 WS 握手（2026-06-12 business 端点实际发生，
+        candle feed 静默死 11 天）。握手拒绝必须当成普通断连退避重连，不能在 5 次后
+        ``raise`` 把整个端点 task 打死——否则该连接的所有订阅永久失效且无人重启。"""
+        from websockets.datastructures import Headers
+        from websockets.http11 import Response
+
+        from okx_trade.ws import connection as conn_mod
+
+        # 退避降到极小，让 >5 次拒绝在亚秒内跑完
+        monkeypatch.setattr(conn_mod, "_BACKOFF_SCHEDULE", (0.01, 0.01, 0.01, 0.01, 0.01))
+
+        handshake_attempts = 0
+        REJECTS = 7  # > 5：足以触发旧代码的致命 raise
+
+        def process_request(connection: Any, request: Any) -> Response | None:
+            nonlocal handshake_attempts
+            handshake_attempts += 1
+            if handshake_attempts <= REJECTS:
+                return Response(502, "Bad Gateway", Headers(), b"")
+            return None  # 之后放行握手
+
+        async def server_handler(ws: ServerConnection) -> None:
+            try:
+                await asyncio.sleep(2.0)
+            except asyncio.CancelledError:
+                return
+
+        server = await serve(
+            server_handler, "127.0.0.1", 0, process_request=process_request
+        )
+        port = next(iter(server.sockets)).getsockname()[1]
+        url = f"ws://127.0.0.1:{port}"
+        try:
+            conn = WSConnection(url, _drain_on_message)
+            await conn.start()
+            try:
+                # 旧代码：第 6 次拒绝后 _run task raise 身亡 → 永不连上 → 超时
+                await conn.wait_connected(timeout=3.0)
+                assert conn.is_connected
+                assert handshake_attempts > REJECTS
+            finally:
+                await conn.stop()
+        finally:
+            server.close()
+            await server.wait_closed()
+
+
 class TestHeartbeat:
     async def test_ping_text_frame_sent(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # 把心跳间隔降到 0.1s 让测试快速跑完
